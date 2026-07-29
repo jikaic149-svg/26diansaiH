@@ -53,8 +53,14 @@
  * center channels share zero weight because they straddle the car center. */
 static const float g_line_position_weight[
     DEVICE_XINLIU_T8_CHANNEL_COUNT] = {
-    -1.0F, -0.60F, -0.25F, 0.0F,
-     0.0F,  0.25F,  0.60F, 1.0F,
+    -TEMPLATE_BRINGUP_LINE_OUTER_WEIGHT,
+    -TEMPLATE_BRINGUP_LINE_MIDDLE_WEIGHT,
+    -TEMPLATE_BRINGUP_LINE_INNER_WEIGHT,
+    0.0F,
+    0.0F,
+    TEMPLATE_BRINGUP_LINE_INNER_WEIGHT,
+    TEMPLATE_BRINGUP_LINE_MIDDLE_WEIGHT,
+    TEMPLATE_BRINGUP_LINE_OUTER_WEIGHT,
 };
 
 /* VOFA+ FireWater: one ASCII line per frame, comma-separated values ending
@@ -167,6 +173,15 @@ static bool g_tracking_drive_valid = false;
 static uint32_t bringup_now_ms(void)
 {
     return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+}
+
+static Mode_Car_AnalogTrackingConfig bringup_tracking_config(void)
+{
+    Mode_Car_AnalogTrackingConfig config =
+        Mode_Car_AnalogTracking_DefaultConfig();
+
+    config.steering.kp = TEMPLATE_BRINGUP_LINE_STEERING_KP;
+    return config;
 }
 
 static void bringup_show_status(void)
@@ -604,7 +619,7 @@ static bool bringup_init_devices(void)
     }
     {
         const Mode_Car_AnalogTrackingConfig tracking_config =
-            Mode_Car_AnalogTracking_DefaultConfig();
+            bringup_tracking_config();
 
         if ((TEMPLATE_BRINGUP_LINE_BASE_SPEED_MM_PER_SECOND <= 0.0F) ||
             (TEMPLATE_BRINGUP_LINE_BASE_SPEED_MM_PER_SECOND >
@@ -627,7 +642,7 @@ static void bringup_stop_motors(void)
     Mode_Car_SpeedController_Reset(&g_speed_controller);
     {
         const Mode_Car_AnalogTrackingConfig tracking_config =
-            Mode_Car_AnalogTracking_DefaultConfig();
+            bringup_tracking_config();
 
         (void)Mode_Car_AnalogTracking_Init(
             &g_tracking_controller, &tracking_config);
@@ -652,7 +667,7 @@ static void bringup_start_tracking(void)
     Mode_Car_SpeedController_Reset(&g_speed_controller);
     {
         const Mode_Car_AnalogTrackingConfig tracking_config =
-            Mode_Car_AnalogTracking_DefaultConfig();
+            bringup_tracking_config();
 
         if (!Mode_Car_AnalogTracking_Init(
                 &g_tracking_controller, &tracking_config)) {

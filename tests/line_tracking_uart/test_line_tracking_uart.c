@@ -184,8 +184,8 @@ static bool test_normalization_difference_sum_and_modes(void)
 {
     static const float product_weight[
         DEVICE_XINLIU_T8_CHANNEL_COUNT] = {
-        -1.0F, -0.60F, -0.25F, 0.0F,
-         0.0F, 0.25F, 0.60F, 1.0F,
+        -0.70F, -0.45F, -0.20F, 0.0F,
+         0.0F, 0.20F, 0.45F, 0.70F,
     };
     Device_LineTracking_Config config;
     Device_LineTracking device;
@@ -238,9 +238,10 @@ static bool test_normalization_difference_sum_and_modes(void)
     CHECK(nearly_equal(sample.line_strength[7], 1.0F, 0.0001F));
     CHECK(sample.line_present);
     CHECK(sample.difference_ratio > 0.9F);
-    CHECK(sample.centroid_position > 0.99F);
+    CHECK(nearly_equal(sample.centroid_position, 0.70F, 0.0001F));
     CHECK(sample.error > 0.0F);
-    CHECK(nearly_equal(sample.error, sample.difference_ratio, 0.0001F));
+    CHECK(nearly_equal(
+        sample.error, 0.70F * sample.difference_ratio, 0.0001F));
 
     CHECK(Device_LineTracking_Init(&inner_device, &config));
     raw.value[7] = 0U;
