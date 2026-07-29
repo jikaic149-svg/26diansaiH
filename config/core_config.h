@@ -90,9 +90,9 @@
 #define GATEWAY_LEVEL_START_MAX_SPEED_RPM  1.0F
 
 /* 相对固定机械零点的目标角、目标允许范围和机械硬限位，单位deg。
- * 三份采样中位数的均值55207比固定零点55183高24计数，对应+0.13184°，故目标取+0.13°；
+ * 首轮采样目标为+0.13°；按实机要求再增加0.13°，当前总目标为+0.26°，约对应raw=55230；
  * |TARGET|<=TARGET_LIMIT<=HARD_LIMIT<=180。 */
-#define GATEWAY_LEVEL_TARGET_DEG            0.13F
+#define GATEWAY_LEVEL_TARGET_DEG            0.26F
 #define GATEWAY_LEVEL_TARGET_LIMIT_DEG     85.0F
 #define GATEWAY_LEVEL_HARD_LIMIT_DEG       90.0F
 
