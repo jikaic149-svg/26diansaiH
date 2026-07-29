@@ -40,6 +40,11 @@ void APP_Gateway_Step(
  * disabled feedback; stopping sends zero current before Disable. */
 bool APP_Gateway_TogglePrimaryMotor(uint32_t now_ms);
 
+/* Temporary five-point mechanism calibration: first call starts at point 1,
+ * following calls advance one target, and the call after the final point
+ * sends zero current then Disable. */
+bool APP_Gateway_AdvancePrimaryMotorCalibration(uint32_t now_ms);
+
 /* 遥测：命令计数/错误计数，调试用。 */
 uint32_t APP_Gateway_CommandCount(void);
 uint32_t APP_Gateway_CommandErrorCount(void);

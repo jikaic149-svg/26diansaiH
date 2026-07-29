@@ -134,6 +134,20 @@ bool Algorithm_LevelCurrentControl_Start(
     return true;
 }
 
+bool Algorithm_LevelCurrentControl_SetTargetDeg(
+    Algorithm_LevelCurrentControl *controller,
+    float target_deg)
+{
+    if ((controller == NULL) || !controller->initialized ||
+        !isfinite(target_deg) ||
+        (absolute_value(target_deg) > controller->config.target_limit_deg)) {
+        return false;
+    }
+    controller->config.target_deg = target_deg;
+    reset_runtime_state(controller);
+    return true;
+}
+
 void Algorithm_LevelCurrentControl_Stop(
     Algorithm_LevelCurrentControl *controller)
 {

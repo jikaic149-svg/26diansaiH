@@ -62,7 +62,11 @@ static void Task_KeyStep(uint32_t now_ms)
     s_key_stable_pressed = pressed;
     if (pressed) {
         ++s_key_press_count;
+#if GATEWAY_LEVEL_CALIBRATION_KEY_MODE == 1U
+        if (!APP_Gateway_AdvancePrimaryMotorCalibration(now_ms)) {
+#else
         if (!APP_Gateway_TogglePrimaryMotor(now_ms)) {
+#endif
             ++s_key_command_errors;
         }
     }

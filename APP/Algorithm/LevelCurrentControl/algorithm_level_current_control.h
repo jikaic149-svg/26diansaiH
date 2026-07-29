@@ -45,6 +45,11 @@ bool Algorithm_LevelCurrentControl_HasZero(
     const Algorithm_LevelCurrentControl *controller);
 bool Algorithm_LevelCurrentControl_Start(
     Algorithm_LevelCurrentControl *controller);
+/* Update a validated relative target at runtime and clear the accumulated I
+ * term so a calibration step does not inherit effort from the previous one. */
+bool Algorithm_LevelCurrentControl_SetTargetDeg(
+    Algorithm_LevelCurrentControl *controller,
+    float target_deg);
 void Algorithm_LevelCurrentControl_Stop(
     Algorithm_LevelCurrentControl *controller);
 bool Algorithm_LevelCurrentControl_IsActive(

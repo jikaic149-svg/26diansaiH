@@ -17,6 +17,7 @@
 #include "device_qd4310.h"
 
 #define GATEWAY_ESP_UART_INDEX 1U  /* BSP transport 1 = USART3 */
+#define GATEWAY_ARRAY_COUNT(array) (sizeof(array) / sizeof((array)[0]))
 
 static esp8266_t s_wireless;
 static Device_QD4310 s_motors[GATEWAY_MOTOR_COUNT];
@@ -35,6 +36,9 @@ static uint16_t s_tx_sequence;
 static uint32_t s_last_feedback_sequence[GATEWAY_MOTOR_COUNT];
 static uint32_t s_last_control_feedback_sequence;
 static uint32_t s_level_control_fault_count;
+static const float s_level_calibration_targets_deg[] =
+    GATEWAY_LEVEL_CALIBRATION_TARGETS_DEG;
+static size_t s_level_calibration_index;
 
 static Device_QD4310 *find_motor(uint8_t motor_id)
 {
@@ -422,6 +426,7 @@ bool APP_Gateway_Init(uint32_t now_ms)
     s_tx_sequence = 0U;
     s_last_control_feedback_sequence = 0U;
     s_level_control_fault_count = 0U;
+    s_level_calibration_index = 0U;
     return true;
 }
 
@@ -507,6 +512,44 @@ bool APP_Gateway_TogglePrimaryMotor(uint32_t now_ms)
     }
     (void)stop_primary_level_control();
     return false;
+}
+
+bool APP_Gateway_AdvancePrimaryMotorCalibration(uint32_t now_ms)
+{
+    Device_QD4310 *motor = &s_motors[0];
+    const bool active =
+        Algorithm_LevelCurrentControl_IsActive(&s_level_controller);
+
+    if (!motor->initialized ||
+        (GATEWAY_ARRAY_COUNT(s_level_calibration_targets_deg) == 0U)) {
+        return false;
+    }
+    if (active || motor->command_enabled) {
+        if (!active || !motor->command_enabled) {
+            (void)stop_primary_level_control();
+            return false;
+        }
+        if ((s_level_calibration_index + 1U) >=
+            GATEWAY_ARRAY_COUNT(s_level_calibration_targets_deg)) {
+            s_level_calibration_index = 0U;
+            return stop_primary_level_control();
+        }
+        if (!Algorithm_LevelCurrentControl_SetTargetDeg(
+                &s_level_controller,
+                s_level_calibration_targets_deg[
+                    s_level_calibration_index + 1U])) {
+            return false;
+        }
+        ++s_level_calibration_index;
+        return true;
+    }
+
+    if (!Algorithm_LevelCurrentControl_SetTargetDeg(
+            &s_level_controller, s_level_calibration_targets_deg[0])) {
+        return false;
+    }
+    s_level_calibration_index = 0U;
+    return APP_Gateway_TogglePrimaryMotor(now_ms);
 }
 
 uint32_t APP_Gateway_CommandCount(void)

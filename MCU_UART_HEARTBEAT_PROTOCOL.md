@@ -189,3 +189,92 @@ F407 侧复用 USART1 静态收发环、DMA2 Stream2/Stream7 Channel4 和 Packet
 通过Debug/Release链接，并已用D盘OpenOCD烧录校验；运行快照中 `ENC` 发送1699帧、
 丢弃/错误为0。G3519接收与VOFA CH20软件也已由小车Agent完成，但尚未烧录；当前
 QD4310 `online=0` 且无反馈序号，所以双端CH20动态值仍待实物验证。
+
+## 9. 规划扩展：`ACC` 底盘加速度前馈（尚未实现）
+
+本节只冻结下一阶段协议和本地数据结构，不属于当前线上协议。双端源码、Task、控制器、
+VOFA 和已烧录固件尚未加入 `ACC`，不能把本节写成已经发送或实物验证。
+
+### 9.1 线上 Payload
+
+只有 G3519 节点 2 发送 `ACC`。复用第 2 节 Packet 帧，Payload 固定为：
+
+```text
+<node_id>,<sample_ms>,<parallel_mm_s2>,<valid>
+```
+
+| 字段 | 单位与范围 |
+|---|---|
+| `node_id` | 固定 `2` |
+| `sample_ms` | G3519 采集该加速度样本时的本地单调毫秒计数，`uint32_t`，允许回绕 |
+| `parallel_mm_s2` | 沿滚球杆轴线的有符号比力，`mm/s^2`，范围 `-40000..40000` |
+| `valid` | G3519 已得到可用新鲜样本时为 `1`，否则为 `0`；为 `0` 时 `parallel_mm_s2` 必须为 `0` |
+
+坐标正方向固定为从右侧杆面转轴沿杆面指向左侧连杆安装端。静止、车体水平时
+`parallel_mm_s2` 应接近 `0`；沿该正方向产生加速度或等效重力切向分量时为正。G3519
+负责完成 ICM-45686 传感器轴到该物理轴的映射和零偏处理，F407 不解释传感器原始轴。
+
+有效示例 Payload：
+
+```text
+2,123456,800,1
+```
+
+表示 G3519 在本地 `123456 ms` 采得沿杆正方向 `+0.800 m/s^2` 的有效前馈样本。
+
+### 9.2 本地 API 数据结构
+
+两端 Device 可以使用同语义的本地值结构，但不得把 C 结构体内存直接发送到线上：
+
+```c
+typedef struct {
+    uint32_t sampled_at_ms;
+    int32_t parallel_mm_s2;
+    bool source_valid;
+    uint32_t received_at_ms; /* F407 local receive time; not on wire. */
+    bool valid;              /* A syntactically valid ACC has been stored. */
+} Device_PeerLink_ChassisAcceleration;
+```
+
+线上仍按 9.1 节逐字段 ASCII 编码、固定字节序语义和 Packet CRC 校验，避免 ABI、对齐和
+编译器差异。
+
+### 9.3 周期、Latest Value 与失效语义
+
+- G3519 现有 10 ms Task 每周期最多提交一帧，目标更新率 `100 Hz`；`ACC` 使用独立
+  16 位 Packet `SEQ`。
+- 完整帧进入 UART DMA 发送队列后才增加序号。队列忙时整帧丢弃，不阻塞、不重发、
+  不产生 ACK，等待下一个 10 ms 周期。
+- F407 保存单槽 Latest Value和本地 `received_at_ms`。`sample_ms` 属于 G3519 时钟，
+  双端未同步时不得用它与 F407 本地时间直接相减。
+- 建议控制新鲜度为 `50 ms`。重复序号只增加诊断，不覆盖 Latest Value，也不刷新
+  `received_at_ms`。
+- 尚未收到有效帧、`valid=0` 或本地接收年龄超过 `50 ms` 时，F407 只令底盘前馈项为
+  `0`；球位置 PID、QD4310 使能、HB 在线状态和其他故障策略均不因此改变。
+- `ACC` 预计最坏约 46 字节/帧，100 Hz 时 G3519→F407 约 `4.6 kB/s`，低于
+  115200 8N1 单方向约 `11.52 kB/s` 的线上容量；实现后仍须实测 TX 丢弃和 Task WCET。
+
+### 9.4 F407 本地换算与机械参数归属
+
+F407 用收到的杆轴向比力计算第一阶段补偿角：
+
+```text
+theta_ff = -atan2(parallel_mm_s2, 9807)
+theta_target = theta_ball_pid +b*theta_ff
+```
+
+前馈系数 `b`、右侧转轴到左侧上球头的 `L=250 mm`、水平零点和实测
+`QD4310 raw <-> 杆面实际角度` 映射均属于 F407/滚球机构本地配置，不在 `ACC` 中重复
+发送。`L` 只用于检查连杆端理论高度变化 `delta_h=250*sin(theta_ff) mm`；实际执行命令
+必须使用 F407 本地角度映射，不能假设二连杆存在全范围固定 `raw/mm`。
+
+### 9.5 实现前验收项
+
+1. 双端主机测试覆盖正/负/零值、`uint32_t sample_ms` 回绕、非法范围、错误节点、重复
+   序号、`valid=0` 和 50 ms 新鲜度边界。
+2. ARM Debug/Release 完整链接后，静止水平时 F407 Latest Value 应接近 `0 mm/s^2`，
+   手动确认杆轴正方向和 `theta_ff` 符号。
+3. 连续运行至少 10 s，`ACC` 接收率接近 100 Hz，Packet/UART/DMA 错误为 0，发送队列
+   无持续丢弃；不能只用编译结果代替该项实测。
+4. 先保持 `b=0` 验证数据链，再从小系数逐步加入；断开发送端后仅前馈项在 50 ms 后
+   归零，球 PID 和现有双端通信继续运行。

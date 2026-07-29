@@ -146,6 +146,25 @@ static void test_speed_damping_current_limit_and_hard_limit(void)
     assert(close_enough(current_a, 0.0F));
 }
 
+static void test_runtime_target_update(void)
+{
+    Algorithm_LevelCurrentControl controller;
+    const Algorithm_LevelCurrentControl_Config config = default_config();
+    float current_a;
+
+    start_at(&controller, &config, 0.0F);
+    controller.integral_current_a = 0.005F;
+    assert(Algorithm_LevelCurrentControl_SetTargetDeg(&controller, 2.0F));
+    assert(close_enough(controller.config.target_deg, 2.0F));
+    assert(close_enough(controller.integral_current_a, 0.0F));
+    assert(Algorithm_LevelCurrentControl_Update(
+        &controller, 0.0F, 0.0F, &current_a));
+    assert(close_enough(current_a, 0.0180004F));
+    assert(!Algorithm_LevelCurrentControl_SetTargetDeg(&controller, 86.0F));
+    assert(!Algorithm_LevelCurrentControl_SetTargetDeg(&controller, NAN));
+    assert(close_enough(controller.config.target_deg, 2.0F));
+}
+
 static void test_invalid_config_and_polarity(void)
 {
     Algorithm_LevelCurrentControl controller;
@@ -172,6 +191,7 @@ int main(void)
     test_single_turn_wrap_and_proportional_current();
     test_deadband_integral_zone_and_integral_limit();
     test_speed_damping_current_limit_and_hard_limit();
+    test_runtime_target_update();
     test_invalid_config_and_polarity();
     puts("level current control tests: PASS");
     return 0;

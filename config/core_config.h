@@ -58,6 +58,13 @@
 /* 板载 KEY1(PA0，高有效)的消抖时间，单位 ms；稳定按下只触发一次。 */
 #define GATEWAY_KEY_DEBOUNCE_MS           UINT32_C(30)
 
+/* 临时五点机构标定模式：1时KEY依次切换水平附近5个电机相对角，第6次执行0 A + Disable；
+ * 0时恢复正常的一次启动、一次停止。角度单位deg，均须位于TARGET_LIMIT内。
+ * 以零点54379换算，五点约为raw=53579/53979/54379/54779/55179。 */
+#define GATEWAY_LEVEL_CALIBRATION_KEY_MODE 1U
+#define GATEWAY_LEVEL_CALIBRATION_TARGETS_DEG \
+    { -4.395F, -2.197F, 0.0F, 2.197F, 4.395F }
+
 /* 周期性向电机发 NOP 请求反馈并把反馈帧回传 TCP 的周期，单位 ms。
  * QD4310 是应答式：只有收到控制/NOP 帧才回反馈帧。 */
 #define GATEWAY_FEEDBACK_PERIOD_MS        UINT32_C(100)
@@ -82,24 +89,24 @@
 #define GATEWAY_LEVEL_CONTROL_PERIOD_MS    UINT32_C(10)
 #define GATEWAY_LEVEL_FEEDBACK_TIMEOUT_MS UINT32_C(100)
 
-/* 三份VOFA记录的有效CH20分别取中位数，再取三者中位数得到固定机械水平零点。
+/* 最新VOFA最后连续使能段末100帧raw均为54379、标准差0、转速0；用户确认后将其设为新的机械水平零点。
  * 原始值范围0..65535；改变安装关系后必须重新标定。上电不再以当前位置覆盖该值。 */
-#define GATEWAY_LEVEL_ZERO_RAW             UINT16_C(55183)
+#define GATEWAY_LEVEL_ZERO_RAW             UINT16_C(54379)
 
 /* KEY启动闭环时允许的最大绝对转速，单位rpm；必须>=0。 */
 #define GATEWAY_LEVEL_START_MAX_SPEED_RPM  1.0F
 
 /* 相对固定机械零点的目标角、目标允许范围和机械硬限位，单位deg。
- * 首轮采样目标为+0.13°；按实机要求再增加0.13°，当前总目标为+0.26°，约对应raw=55230；
+ * 固定零点标定为54379后，按用户要求将运行目标再减小约50count至54329；
  * |TARGET|<=TARGET_LIMIT<=HARD_LIMIT<=180。 */
-#define GATEWAY_LEVEL_TARGET_DEG            0.26F
+#define GATEWAY_LEVEL_TARGET_DEG           -0.275F
 #define GATEWAY_LEVEL_TARGET_LIMIT_DEG     85.0F
 #define GATEWAY_LEVEL_HARD_LIMIT_DEG       90.0F
 
 /* 实机水平闭环参数：角度 P、电流积分 I、转速反馈阻尼 D。
  * 单位依次为 A/deg、A/(deg*s)、A/rpm；增益均需>=0。
- * KP=0.030和0.020实机均振动明显，当前回退到0.015；KD暂不继续增加。 */
-#define GATEWAY_LEVEL_KP_A_PER_DEG          0.015F
+ * KP=0.030和0.020实机均振动明显；按用户要求从0.015小幅提高到0.017，KD保持不变。 */
+#define GATEWAY_LEVEL_KP_A_PER_DEG          0.017F
 #define GATEWAY_LEVEL_KI_A_PER_DEG_S        0.0010F
 #define GATEWAY_LEVEL_KD_A_PER_RPM          0.0010F
 
@@ -117,6 +124,10 @@
 
 #if GATEWAY_LEVEL_ZERO_RAW > UINT16_MAX
 #error "Level zero raw value must fit uint16_t"
+#endif
+
+#if GATEWAY_LEVEL_CALIBRATION_KEY_MODE > 1U
+#error "Level calibration key mode must be 0 or 1"
 #endif
 
 #if GATEWAY_LEVEL_CONTROL_PERIOD_MS != GATEWAY_TASK_PERIOD_MS
