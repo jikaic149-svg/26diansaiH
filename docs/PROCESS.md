@@ -1,5 +1,43 @@
 # 工程变更记录
 
+## 2026-07-29：G3519 Bring-up 切换为芯流 T8 八路模拟循迹闭环
+
+- 修改原因：用户要求小车使用模拟灰度实现闭环，并在完成后烧录，同时确认控制极性。
+- 最终决策：保留同一 10 ms 静态 Bring-up Task 和现有双轮速度内环；撤销按键后的
+  原地绝对 yaw 锁定。第一次 KEY 启用两路底盘电机和模拟循迹，第二次 KEY 仍立即
+  `Stop + SetUnlocked(false)`，并向 F407 非阻塞发送一次 `DIS`。T8 继续每 20 ms
+  查询一次；每个新 ADC 快照经 `Device_LineTracking_UpdateAnalogRaw()` 做八路共同
+  基线消除和模拟位置估计，再由 `Mode_Car_AnalogTracking` 以 250 mm/s 为前进基准
+  生成左右轮速目标。通道 CH1..CH8 从左到右的权重为
+  `-1,-0.60,-0.25,0,0,0.25,0.60,1`；丢线、置信度低于 0.10 或快照超过 100 ms 时
+  立即清零两路电机命令，后续有效新帧恢复闭环。未新增 Task、动态内存、重试或状态机。
+- 遥测与显示：VOFA 保持固定 21 列，CH0 从已撤销的 yaw 锁定目标改为归一化线误差
+  （右偏为正、样本过期为 0），CH1～CH20 顺序不变。TFT 第一行显示 `LINE:STALE`、
+  `LINE:LOST` 或带符号误差，其他 PeerLink/QD4310 状态页字段保持不变。
+- 构建接入：Bring-up profile 自动带入通用 `device_line_tracking` 和差比和算法；验证
+  清单将 IMU、Navigation 和 LineTracking 的修改映射到 Bring-up Debug/Release，避免
+  只通过 host 或 feature-smoke 构建得出产品结论。
+- 涉及文件：根/Task CMake、`Task/task_bringup_chassis.*`、`config/core_config.h`、
+  `config/verification/components.json`、Task/设备参数/协作说明和本文档。
+- 验证方式和结果：`tools/project.ps1 -Action Verify -Scope Auto` 通过，共执行十个
+  组件；模板架构、差异检查、循迹及相关 host 测试、Cortex-M0+ 严格编译和完整链接均
+  通过。Bring-up Debug/Release 使用 FLASH `64880/60720 B`，SRAM_BANK0
+  `18552/18544 B`，编译零警告。
+- 烧录与回读：显式选择序列号
+  `000100011a5a5bb60000000000045c0aa5a5a5a597969908` 的 G3519 DAPLink，写入
+  Bring-up Debug `64880 B`；从主 Flash `0x00000000` 按精确长度完整回读，源 BIN 与
+  回读 SHA-256 均为
+  `A994469198A8417E2F6370D52BC96425A115BD4AC9883B123BB64CB4DBF37A45`，随后执行
+  `reset run`。F407 探针和固件未修改。
+- 极性实物结论：用户确认车辆纠偏方向正确；同步读取的 VOFA 文件有 1197 帧固定
+  21 列数据，其中 204 帧存在闭环电机输出。强偏差 `|CH0|>=0.3` 共 94 帧，94/94 帧
+  的 `CH3-CH4` 与 CH0 同号，88/94 帧的 `CH1-CH2` 与 CH0 同号，其余为换向瞬态。
+  代表帧包括右偏 `CH0=+0.749` 时 A/B 命令 `+8000/-3372`，以及左偏
+  `CH0=-0.526` 时 A/B 命令 `-5454/+8000`。结合用户实车观察，T8 左右通道、黑线
+  有效极性、左右电机及编码器符号链在当前安装上确认正确。
+- 待确认事项：极性不再是阻碍；下一步按赛道曲率和机械速度能力整定 250 mm/s 基速、
+  循迹 PID，并关注当前强偏差时两路命令达到 80% 限幅的持续时间。
+
 ## 2026-07-29：Agent A 接收 QD4310 原始绝对值并追加 VOFA CH20
 
 - 修改原因：用户要求读取协作文档并完成交接 `20260729-01`，把 F407 已发送的

@@ -22,6 +22,7 @@ if(TEMPLATE_ENABLE_TASK_BRINGUP_CHASSIS)
         device_icm45686
         device_key
         device_key_input
+        device_line_tracking
         device_motor
         device_peer_link
         device_rgb

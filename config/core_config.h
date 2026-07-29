@@ -51,6 +51,15 @@
 #define TEMPLATE_BRINGUP_ENCODER_A_DIRECTION 1
 #define TEMPLATE_BRINGUP_ENCODER_B_DIRECTION (-1)
 
+/*
+ * Xinliu T8 analog line-tracking product policy. The forward target is
+ * converted to the normalized Mode drive intention using the shared wheel
+ * speed ceiling. A sample older than the freshness window cannot energize
+ * either chassis motor.
+ */
+#define TEMPLATE_BRINGUP_LINE_BASE_SPEED_MM_PER_SECOND 250.0F
+#define TEMPLATE_BRINGUP_GRAYSCALE_TIMEOUT_MS UINT32_C(100)
+
 /* RGB indicator brightness 0..255; kept low to limit LED current. */
 #define TEMPLATE_BRINGUP_RGB_BRIGHTNESS 32U
 

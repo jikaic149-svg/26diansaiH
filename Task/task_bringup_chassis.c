@@ -10,6 +10,7 @@
 #include "device_encoder.h"
 #include "device_icm45686_spi.h"
 #include "device_key_input.h"
+#include "device_line_tracking.h"
 #include "device_motor.h"
 #include "MG513X/device_motor_mg513x_gmr.h"
 #include "device_peer_link.h"
@@ -17,6 +18,7 @@
 #include "device_serial.h"
 #include "device_st7735s.h"
 #include "device_xinliu_t8.h"
+#include "mode_car.h"
 #include "mode_car_control.h"
 #include "mode_communicate.h"
 
@@ -46,6 +48,14 @@
     ((float)DEVICE_MOTOR_MG513X_GMR_ENCODER_LINES * 4.0F * \
         DEVICE_MOTOR_MG513X_GEAR_RATIO)
 #define BRINGUP_WHEEL_CIRCUMFERENCE_MM 204.20F
+
+/* Product-confirmed T8 channel order is CH1..CH8 from left to right. The two
+ * center channels share zero weight because they straddle the car center. */
+static const float g_line_position_weight[
+    DEVICE_XINLIU_T8_CHANNEL_COUNT] = {
+    -1.0F, -0.60F, -0.25F, 0.0F,
+     0.0F,  0.25F,  0.60F, 1.0F,
+};
 
 /* VOFA+ FireWater: one ASCII line per frame, comma-separated values ending
  * with \n. Integer-only formatting keeps newlib-nano printf small; yaw is
@@ -125,11 +135,12 @@ static Device_RGB g_rgb;
 static Device_Serial g_bluetooth;
 static Device_Serial g_grayscale_serial;
 static Device_XinliuT8 g_grayscale;
+static Device_LineTracking g_line_tracking;
 static Device_ST7735S g_display;
 static Device_ICM45686_SPI g_imu;
 static Mode_Communicate_BluetoothPCContext g_bluetooth_mode;
 static Mode_Car_SpeedController g_speed_controller;
-static Mode_Car_AngleController g_angle_controller;
+static Mode_Car_AnalogTrackingContext g_tracking_controller;
 static Device_PeerLink g_peer_link;
 static uint16_t g_display_line_pixels[
     BRINGUP_DISPLAY_WIDTH * BRINGUP_DISPLAY_LINE_HEIGHT];
@@ -142,10 +153,16 @@ static bool g_devices_ready = false;
 static bool g_peer_link_ready = false;
 /* 0 none, 1 init, 2 periodic step, 3 motor-disable request send. */
 static volatile uint32_t g_peer_link_fault = 0U;
-static bool g_angle_locked = false;
+static bool g_tracking_active = false;
 static size_t g_display_status_line = 0U;
-/* Captured Mahony yaw target while the angle lock is active. */
-static float g_locked_yaw_deg = 0.0F;
+static Device_LineTracking_Sample g_line_sample;
+static bool g_line_sample_available = false;
+static uint32_t g_processed_grayscale_sequence = 0U;
+static uint32_t g_previous_line_sample_ms = 0U;
+static bool g_has_previous_line_sample_time = false;
+static float g_target_left_speed = 0.0F;
+static float g_target_right_speed = 0.0F;
+static bool g_tracking_drive_valid = false;
 
 static uint32_t bringup_now_ms(void)
 {
@@ -159,7 +176,7 @@ static void bringup_show_status(void)
     if (g_BRINGUP_Fault != 0U) {
         color = (Device_RGB_Color){
             TEMPLATE_BRINGUP_RGB_BRIGHTNESS, 0U, 0U};
-    } else if (g_angle_locked) {
+    } else if (g_tracking_active) {
         color = (Device_RGB_Color){
             0U, 0U, TEMPLATE_BRINGUP_RGB_BRIGHTNESS};
     } else {
@@ -286,6 +303,13 @@ static uint32_t bringup_display_magnitude(int32_t value)
     return (value < 0) ? (uint32_t)(-(int64_t)value) : (uint32_t)value;
 }
 
+static bool bringup_line_sample_fresh(uint32_t now_ms)
+{
+    return g_line_sample_available &&
+        ((uint32_t)(now_ms - g_line_sample.sampled_at_ms) <=
+            TEMPLATE_BRINGUP_GRAYSCALE_TIMEOUT_MS);
+}
+
 static void bringup_update_display(uint32_t now_ms)
 {
     Device_PeerLink_Telemetry telemetry = {0};
@@ -308,14 +332,44 @@ static void bringup_update_display(uint32_t now_ms)
         return;
     }
     switch (g_display_status_line) {
-        case 0U:
-            (void)snprintf(text, sizeof(text), "H BALL STATUS");
-            foreground = BRINGUP_DISPLAY_COLOR_CYAN;
+        case 0U: {
+            const bool sample_fresh = bringup_line_sample_fresh(now_ms);
+
+            if (!sample_fresh) {
+                (void)snprintf(text, sizeof(text), "LINE:STALE");
+                foreground = BRINGUP_DISPLAY_COLOR_RED;
+            } else if (!g_line_sample.line_present) {
+                (void)snprintf(text, sizeof(text), "LINE:LOST");
+                foreground = BRINGUP_DISPLAY_COLOR_RED;
+            } else {
+                const int32_t error_milli =
+                    (int32_t)(g_line_sample.error * 1000.0F);
+                uint32_t magnitude =
+                    bringup_display_magnitude(error_milli);
+
+                if (magnitude > 1000U) {
+                    magnitude = 1000U;
+                }
+                text[0] = 'L';
+                text[1] = 'I';
+                text[2] = 'N';
+                text[3] = 'E';
+                text[4] = ':';
+                text[5] = (error_milli < 0) ? '-' : '+';
+                text[6] = (char)('0' + (magnitude / 1000U));
+                text[7] = '.';
+                text[8] = (char)('0' + ((magnitude / 100U) % 10U));
+                text[9] = (char)('0' + ((magnitude / 10U) % 10U));
+                text[10] = (char)('0' + (magnitude % 10U));
+                text[11] = '\0';
+                foreground = BRINGUP_DISPLAY_COLOR_CYAN;
+            }
             break;
+        }
         case 1U:
             (void)snprintf(text, sizeof(text),
-                "CAR:%s", g_angle_locked ? "RUN" : "STOP");
-            foreground = g_angle_locked ? BRINGUP_DISPLAY_COLOR_GREEN :
+                "CAR:%s", g_tracking_active ? "RUN" : "STOP");
+            foreground = g_tracking_active ? BRINGUP_DISPLAY_COLOR_GREEN :
                 BRINGUP_DISPLAY_COLOR_YELLOW;
             break;
         case 2U:
@@ -458,6 +512,7 @@ static bool bringup_init_devices(void)
         .startup_delay_ms = 10U,
     };
     Device_IMU_Config imu_config = Device_IMU_DefaultConfig();
+    Device_LineTracking_Config line_config;
 
     if (!Device_RGB_DefaultConfig(0U, &rgb_config) ||
         !Device_RGB_Init(&g_rgb, &rgb_config)) {
@@ -522,6 +577,21 @@ static bool bringup_init_devices(void)
         g_BRINGUP_Fault = 8U;
         return false;
     }
+    if (!Device_LineTracking_DefaultRawConfig(
+            DEVICE_XINLIU_T8_CHANNEL_COUNT, 0U, 4095U, &line_config)) {
+        g_BRINGUP_Fault = 10U;
+        return false;
+    }
+    for (size_t index = 0U;
+         index < DEVICE_XINLIU_T8_CHANNEL_COUNT;
+         ++index) {
+        line_config.channel[index].position_weight =
+            g_line_position_weight[index];
+    }
+    if (!Device_LineTracking_Init(&g_line_tracking, &line_config)) {
+        g_BRINGUP_Fault = 10U;
+        return false;
+    }
     {
         const Mode_Car_SpeedControllerConfig speed_config =
             Mode_Car_SpeedController_DefaultConfig();
@@ -533,11 +603,14 @@ static bool bringup_init_devices(void)
         }
     }
     {
-        const Mode_Car_AngleControllerConfig angle_config =
-            Mode_Car_AngleController_DefaultConfig();
+        const Mode_Car_AnalogTrackingConfig tracking_config =
+            Mode_Car_AnalogTracking_DefaultConfig();
 
-        if (!Mode_Car_AngleController_Init(
-                &g_angle_controller, &angle_config)) {
+        if ((TEMPLATE_BRINGUP_LINE_BASE_SPEED_MM_PER_SECOND <= 0.0F) ||
+            (TEMPLATE_BRINGUP_LINE_BASE_SPEED_MM_PER_SECOND >
+                TEMPLATE_CAR_SPEED_MAXIMUM_TARGET_MM_PER_SECOND) ||
+            !Mode_Car_AnalogTracking_Init(
+                &g_tracking_controller, &tracking_config)) {
             g_BRINGUP_Fault = 10U;
             return false;
         }
@@ -552,12 +625,21 @@ static void bringup_stop_motors(void)
         (void)Device_Motor_SetUnlocked(&g_motor[index], false);
     }
     Mode_Car_SpeedController_Reset(&g_speed_controller);
-    Mode_Car_AngleController_Reset(&g_angle_controller);
-    g_locked_yaw_deg = 0.0F;
-    g_angle_locked = false;
+    {
+        const Mode_Car_AnalogTrackingConfig tracking_config =
+            Mode_Car_AnalogTracking_DefaultConfig();
+
+        (void)Mode_Car_AnalogTracking_Init(
+            &g_tracking_controller, &tracking_config);
+    }
+    g_target_left_speed = 0.0F;
+    g_target_right_speed = 0.0F;
+    g_tracking_drive_valid = false;
+    g_has_previous_line_sample_time = false;
+    g_tracking_active = false;
 }
 
-static void bringup_start_angle_lock(float yaw_deg)
+static void bringup_start_tracking(void)
 {
     for (size_t index = 0U; index < BRINGUP_MOTOR_COUNT; ++index) {
         if (Device_Motor_SetUnlocked(&g_motor[index], true) !=
@@ -568,43 +650,161 @@ static void bringup_start_angle_lock(float yaw_deg)
         }
     }
     Mode_Car_SpeedController_Reset(&g_speed_controller);
-    Mode_Car_AngleController_Reset(&g_angle_controller);
-    g_locked_yaw_deg = yaw_deg;
-    g_angle_locked = true;
+    {
+        const Mode_Car_AnalogTrackingConfig tracking_config =
+            Mode_Car_AnalogTracking_DefaultConfig();
+
+        if (!Mode_Car_AnalogTracking_Init(
+                &g_tracking_controller, &tracking_config)) {
+            g_BRINGUP_Fault = 10U;
+            bringup_stop_motors();
+            return;
+        }
+    }
+    g_processed_grayscale_sequence = 0U;
+    g_has_previous_line_sample_time = false;
+    g_target_left_speed = 0.0F;
+    g_target_right_speed = 0.0F;
+    g_tracking_drive_valid = false;
+    g_tracking_active = true;
 }
 
-/* Absolute-yaw outer loop produces equal-and-opposite wheel-speed targets;
- * the verified dual-wheel speed loop remains the inner actuator loop. */
-static void bringup_update_angle_lock(
+static bool bringup_pause_tracking(uint32_t now_ms, float dt_seconds)
+{
+    const Mode_Car_AnalogTrackingInput tracking_input = {
+        .time = {
+            .now_ms = now_ms,
+            .dt_seconds = (dt_seconds > 0.0F) ? dt_seconds :
+                (float)BRINGUP_TASK_PERIOD_MS * 0.001F,
+        },
+        .base_drive = 0.0F,
+        .analog_error = 0.0F,
+        .confidence = 0.0F,
+        .line_valid = false,
+        .line_lost = true,
+        .intersection = false,
+    };
+    Mode_Car_Output stop_output;
+
+    g_target_left_speed = 0.0F;
+    g_target_right_speed = 0.0F;
+    g_tracking_drive_valid = false;
+    Mode_Car_SpeedController_Reset(&g_speed_controller);
+    if (!Mode_Car_AnalogTracking_Update(
+            &g_tracking_controller, &tracking_input, &stop_output)) {
+        g_BRINGUP_Fault = 10U;
+        return false;
+    }
+    if ((bringup_command_motor(&g_motor[0], 0) !=
+            DEVICE_MOTOR_RESULT_OK) ||
+        (bringup_command_motor(&g_motor[1], 0) !=
+            DEVICE_MOTOR_RESULT_OK)) {
+        g_BRINGUP_Fault = 3U;
+        return false;
+    }
+    return true;
+}
+
+/* A fresh T8 frame updates the analog position/PID outer loop. Between T8
+ * frames, the latest wheel-speed targets are held while the verified 10 ms
+ * dual-wheel speed loop continues to close on encoder feedback. */
+static void bringup_update_tracking(
+    uint32_t now_ms,
     float dt_seconds,
-    float yaw_deg,
-    float yaw_rate_dps,
     const Device_Encoder_Sample *speed_a,
     const Device_Encoder_Sample *speed_b)
 {
-    const Mode_Car_AngleControllerInput angle_input = {
-        .dt_seconds = dt_seconds,
-        .target_yaw_deg = g_locked_yaw_deg,
-        .measured_yaw_deg = yaw_deg,
-        .measured_yaw_rate_deg_per_second = yaw_rate_dps,
-    };
-    Mode_Car_AngleControllerOutput angle_output;
+    Device_XinliuT8_Snapshot snapshot;
     Mode_Car_SpeedControllerInput speed_input;
     Mode_Car_SpeedControllerOutput speed_output;
 
     if (dt_seconds <= 0.0F) {
         return;
     }
-    if (!Mode_Car_AngleController_Update(
-            &g_angle_controller, &angle_input, &angle_output)) {
-        g_BRINGUP_Fault = 10U;
-        bringup_stop_motors();
+    if (!Device_XinliuT8_GetLatest(&g_grayscale, &snapshot) ||
+        !Device_XinliuT8_SnapshotFresh(&snapshot, now_ms,
+            TEMPLATE_BRINGUP_GRAYSCALE_TIMEOUT_MS)) {
+        if (!bringup_pause_tracking(now_ms, dt_seconds)) {
+            bringup_stop_motors();
+        }
+        return;
+    }
+    if (snapshot.sequence != g_processed_grayscale_sequence) {
+        Device_LineTracking_RawSample raw = {
+            .channel_count = DEVICE_XINLIU_T8_CHANNEL_COUNT,
+            .valid_mask = UINT32_C(0xFF),
+        };
+        Mode_Car_AnalogTrackingInput tracking_input;
+        Mode_Car_Output tracking_output;
+        float tracking_dt_seconds =
+            (float)BRINGUP_TASK_PERIOD_MS * 0.001F;
+
+        for (size_t index = 0U;
+             index < DEVICE_XINLIU_T8_CHANNEL_COUNT;
+             ++index) {
+            raw.value[index] = snapshot.adc[index];
+        }
+        if (g_has_previous_line_sample_time) {
+            tracking_dt_seconds =
+                (float)((uint32_t)(snapshot.received_at_ms -
+                    g_previous_line_sample_ms)) * 0.001F;
+        }
+        if (!Device_LineTracking_UpdateAnalogRaw(
+                &g_line_tracking, &raw, snapshot.received_at_ms) ||
+            !Device_LineTracking_GetSample(
+                &g_line_tracking, &g_line_sample)) {
+            g_BRINGUP_Fault = 10U;
+            bringup_stop_motors();
+            return;
+        }
+        g_line_sample_available = true;
+        tracking_input = (Mode_Car_AnalogTrackingInput){
+            .time = {
+                .now_ms = snapshot.received_at_ms,
+                .dt_seconds = tracking_dt_seconds,
+            },
+            .base_drive =
+                TEMPLATE_BRINGUP_LINE_BASE_SPEED_MM_PER_SECOND /
+                TEMPLATE_CAR_SPEED_MAXIMUM_TARGET_MM_PER_SECOND,
+            .analog_error = g_line_sample.error,
+            .confidence = g_line_sample.confidence,
+            .line_valid = g_line_sample.line_present,
+            .line_lost = g_line_sample.line_lost,
+            .intersection = g_line_sample.intersection,
+        };
+        if (!Mode_Car_AnalogTracking_Update(
+                &g_tracking_controller, &tracking_input,
+                &tracking_output)) {
+            g_BRINGUP_Fault = 10U;
+            bringup_stop_motors();
+            return;
+        }
+        g_processed_grayscale_sequence = snapshot.sequence;
+        g_previous_line_sample_ms = snapshot.received_at_ms;
+        g_has_previous_line_sample_time = true;
+        if (!tracking_output.motion_requested) {
+            if (!bringup_pause_tracking(now_ms, dt_seconds)) {
+                bringup_stop_motors();
+            }
+            return;
+        }
+        g_target_left_speed = tracking_output.left_drive *
+            TEMPLATE_CAR_SPEED_MAXIMUM_TARGET_MM_PER_SECOND;
+        g_target_right_speed = tracking_output.right_drive *
+            TEMPLATE_CAR_SPEED_MAXIMUM_TARGET_MM_PER_SECOND;
+        g_tracking_drive_valid = true;
+    }
+    if (!g_tracking_drive_valid || !g_line_sample_available ||
+        !g_line_sample.line_present) {
+        if (!bringup_pause_tracking(now_ms, dt_seconds)) {
+            bringup_stop_motors();
+        }
         return;
     }
     speed_input = (Mode_Car_SpeedControllerInput){
         .dt_seconds = dt_seconds,
-        .target_left_speed = angle_output.target_left_speed,
-        .target_right_speed = angle_output.target_right_speed,
+        .target_left_speed = g_target_left_speed,
+        .target_right_speed = g_target_right_speed,
         .measured_left_speed = speed_a->speed_distance_per_second,
         .measured_right_speed = speed_b->speed_distance_per_second,
     };
@@ -619,22 +819,6 @@ static void bringup_update_angle_lock(
             DEVICE_MOTOR_RESULT_OK) ||
         (bringup_command_motor(&g_motor[1],
             (int32_t)(speed_output.right_effort_percent * 100.0F)) !=
-            DEVICE_MOTOR_RESULT_OK)) {
-        g_BRINGUP_Fault = 3U;
-        bringup_stop_motors();
-    }
-}
-
-/* Never hold the previous motor command when the current IMU sample cannot
- * support the outer loop. Keep the user-selected lock state so the next
- * valid sample can resume it, or the next key press can exit it. */
-static void bringup_pause_angle_lock(void)
-{
-    Mode_Car_AngleController_Reset(&g_angle_controller);
-    Mode_Car_SpeedController_Reset(&g_speed_controller);
-    if ((bringup_command_motor(&g_motor[0], 0) !=
-            DEVICE_MOTOR_RESULT_OK) ||
-        (bringup_command_motor(&g_motor[1], 0) !=
             DEVICE_MOTOR_RESULT_OK)) {
         g_BRINGUP_Fault = 3U;
         bringup_stop_motors();
@@ -681,10 +865,10 @@ static void bringup_send_firewater(
     Device_PeerLink_AbsoluteEncoder f407_encoder = {0};
     int32_t command_a = 0;
     int32_t command_b = 0;
-    int32_t target_yaw_centi = g_angle_locked
-        ? (int32_t)(g_locked_yaw_deg * 100.0F) : 0;
+    int32_t line_error_milli = bringup_line_sample_fresh(now_ms)
+        ? (int32_t)(g_line_sample.error * 1000.0F) : 0;
     int32_t yaw_centi = (int32_t)(yaw_deg * 100.0F);
-    const char *target_yaw_sign = "";
+    const char *line_error_sign = "";
     const char *yaw_sign = "";
     const char *f407_current_sign = "";
     const char *f407_speed_sign = "";
@@ -693,9 +877,9 @@ static void bringup_send_firewater(
     (void)Device_Motor_GetCommand(&g_motor[0], &command_a);
     (void)Device_Motor_GetCommand(&g_motor[1], &command_b);
     (void)Device_XinliuT8_GetLatest(&g_grayscale, &grayscale);
-    if (target_yaw_centi < 0) {
-        target_yaw_sign = "-";
-        target_yaw_centi = -target_yaw_centi;
+    if (line_error_milli < 0) {
+        line_error_sign = "-";
+        line_error_milli = -line_error_milli;
     }
     if (yaw_centi < 0) {
         yaw_sign = "-";
@@ -723,15 +907,16 @@ static void bringup_send_firewater(
         f407.speed_centi_rpm = -f407.speed_centi_rpm;
     }
 
-    /* Channel order: locked yaw target deg (0 while idle), wheel A/B speed
-     * mm/s, motor A/B command, measured yaw deg, grayscale ADC 0..7, then
-     * F407 QD4310 ID/enabled/current A/speed rpm/angle rad/online/raw angle. */
+    /* Channel order: normalized analog line error (-1..1, 0 when stale),
+     * wheel A/B speed mm/s, motor A/B command, measured yaw deg, grayscale
+     * ADC 0..7, then F407 QD4310 ID/enabled/current A/speed rpm/angle
+     * rad/online/raw angle. */
     length = snprintf(line, sizeof(line),
-        "%s%ld.%02ld,%ld,%ld,%ld,%ld,%s%ld.%02ld,%u,%u,%u,%u,%u,%u,%u,%u,"
+        "%s%ld.%03ld,%ld,%ld,%ld,%ld,%s%ld.%02ld,%u,%u,%u,%u,%u,%u,%u,%u,"
         "%u,%u,%s%ld.%03ld,%s%ld.%02ld,%lu.%03lu,%u,%u\n",
-        target_yaw_sign,
-        (long)(target_yaw_centi / 100),
-        (long)(target_yaw_centi % 100),
+        line_error_sign,
+        (long)(line_error_milli / 1000),
+        (long)(line_error_milli % 1000),
         (long)speed_a->speed_distance_per_second,
         (long)speed_b->speed_distance_per_second,
         (long)command_a,
@@ -798,9 +983,7 @@ static void Task_BringupChassis(void *argument)
             Device_Encoder_Sample sample_b;
             Device_IMU_Snapshot imu_snapshot;
             float yaw_deg = 0.0F;
-            float yaw_rate_dps = 0.0F;
             bool pressed_edge = false;
-            bool imu_feedback_valid = false;
             bool telemetry_due = false;
 
             (void)Device_Encoder_Update(&g_encoder[0], dt_seconds);
@@ -812,38 +995,32 @@ static void Task_BringupChassis(void *argument)
                     NULL, &imu_snapshot) == DEVICE_ICM45686_STATUS_OK) &&
                 imu_snapshot.has_sample) {
                 yaw_deg = imu_snapshot.yaw_deg;
-                yaw_rate_dps = imu_snapshot.yaw_rate_dps;
-                imu_feedback_valid = imu_snapshot.feedback_valid &&
-                    imu_snapshot.gyro_bias_valid;
             }
+
+            telemetry_due = (now_ms - last_telemetry_ms) >=
+                TEMPLATE_BRINGUP_TELEMETRY_PERIOD_MS;
+            bringup_update_grayscale(now_ms, telemetry_due);
 
             (void)Device_KeyInput_UpdatePressedEdge(
                 &g_start_key, now_ms, &pressed_edge);
 
             if (pressed_edge && (g_BRINGUP_Fault == 0U)) {
-                if (g_angle_locked) {
+                if (g_tracking_active) {
                     bringup_stop_motors();
                     if (!g_peer_link_ready ||
                         !Device_PeerLink_SendMotorDisableRequest(
                             &g_peer_link)) {
                         g_peer_link_fault = 3U;
                     }
-                } else if (imu_feedback_valid) {
-                    bringup_start_angle_lock(yaw_deg);
+                } else {
+                    bringup_start_tracking();
                 }
             }
-            if (g_angle_locked) {
-                if (imu_feedback_valid) {
-                    bringup_update_angle_lock(dt_seconds,
-                        yaw_deg, yaw_rate_dps, &sample_a, &sample_b);
-                } else {
-                    bringup_pause_angle_lock();
-                }
+            if (g_tracking_active) {
+                bringup_update_tracking(
+                    now_ms, dt_seconds, &sample_a, &sample_b);
             }
 
-            telemetry_due = (now_ms - last_telemetry_ms) >=
-                TEMPLATE_BRINGUP_TELEMETRY_PERIOD_MS;
-            bringup_update_grayscale(now_ms, telemetry_due);
             if (telemetry_due) {
                 last_telemetry_ms = now_ms;
                 bringup_send_firewater(

@@ -5,16 +5,19 @@
 #include <stdint.h>
 
 /*
- * Chassis bring-up (H-title): the first key press captures the current yaw
- * and enables an absolute-angle outer loop around the verified dual-wheel
- * speed inner loop. Left/right wheel-speed targets are equal and opposite,
- * so commanded linear speed stays zero; the next key press exits the lock
- * and disables both chassis motors, then queues one non-blocking DIS request
- * for the F407 primary motor. Every motor command stays inside the TB6612
- * protection clamp. Telemetry streams
+ * Chassis bring-up (H-title): the first key press enables Xinliu T8 analog
+ * line tracking. Each fresh eight-channel ADC frame is converted to a
+ * normalized line error and confidence, then an analog tracking PID produces
+ * left/right wheel-speed targets around a 250 mm/s forward target. The
+ * verified dual-wheel speed controller remains the 10 ms inner loop. Lost,
+ * low-confidence or older-than-100-ms line data clears both motor commands;
+ * a later valid frame resumes tracking without another key press. The next
+ * key press exits tracking, disables both chassis motors, and queues one
+ * non-blocking DIS request for the F407 primary motor. Every motor command
+ * stays inside the TB6612 protection clamp. Telemetry streams
  * continuously over the Bluetooth UART as VOFA+ FireWater ASCII lines
  * (comma-separated, \n terminated) with 21 values per line:
- *   0 locked yaw target deg (0 while idle)
+ *   0 normalized analog line error (-1..1; 0 when stale)
  *   1 wheel A speed mm/s        2 wheel B speed mm/s
  *   3 motor A command           4 motor B command
  *   5 yaw deg (ICM-45686 Mahony, two decimals)
@@ -24,11 +27,11 @@
  *   18 single-turn angle rad    19 online
  *   20 QD4310 absolute encoder protocol raw value (0 when stale/offline)
  * The RGB pixel shows idle/running/fault. At startup the G3519 ST7735S is
- * initialized once and filled red. No line following, no ball control.
+ * initialized once and filled red. No ball control runs on this MCU.
  *
  * Fault codes (g_BRINGUP_Fault): 0 none, 1 RGB, 2 key, 3 motor, 4 encoder,
  * 5 Bluetooth serial, 6 IMU, 7 task creation, 8 grayscale serial,
- * 9 speed controller, 10 angle controller.
+ * 9 speed controller, 10 analog line estimator/controller.
  */
 extern volatile uint32_t g_BRINGUP_Fault;
 

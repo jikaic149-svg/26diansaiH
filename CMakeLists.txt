@@ -129,7 +129,7 @@ option(TEMPLATE_ENABLE_DEVICE_FLASH
     "Compile the persistent DATA-Flash Device adapter"
     OFF)
 option(TEMPLATE_ENABLE_TASK_BRINGUP_CHASSIS
-    "Compile the chassis angle-lock bring-up task (yaw outer loop + wheel-speed inner loops + telemetry)"
+    "Compile the chassis analog line-tracking task (grayscale outer loop + wheel-speed inner loops + telemetry)"
     OFF)
 
 # Resolve only the transitive modules that an explicitly selected feature
@@ -179,6 +179,7 @@ if(TEMPLATE_ENABLE_TASK_BRINGUP_CHASSIS)
     set(TEMPLATE_ENABLE_DEVICE_XINLIU_T8 ON)
     set(TEMPLATE_ENABLE_MODE_COMMUNICATE ON)
     set(TEMPLATE_ENABLE_MODE_CAR ON)
+    set(TEMPLATE_BUILD_DEVICE_LINE_TRACKING ON)
     set(TEMPLATE_BUILD_DEVICE_SERIAL ON)
     set(TEMPLATE_BUILD_ALGORITHM_PACKET ON)
 endif()
