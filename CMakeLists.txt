@@ -42,11 +42,18 @@ add_executable(${PROJECT_NAME}
     startup/startup_stm32f407xx.s
     startup/system_stm32f4xx.c
     BSP/bsp_f407.c
+    Device/BMI088/device_bmi088.c
     Device/ESP8266/device_esp8266.c
     Device/PeerLink/device_peer_link.c
     Device/QD4310/device_qd4310.c
+    Device/VisionLink/device_vision_link.c
+    APP/Algorithm/BallPositionControl/algorithm_ball_position_control.c
+    APP/Algorithm/BallStateEstimator/algorithm_ball_state_estimator.c
+    APP/Algorithm/ChassisAccelerationFusion/algorithm_chassis_acceleration_fusion.c
+    APP/Algorithm/ChassisImuAcceleration/algorithm_chassis_imu_acceleration.c
     APP/Algorithm/LevelCurrentControl/algorithm_level_current_control.c
     APP/Algorithm/Packet/src/algorithm_packet.c
+    APP/Algorithm/RodAngleMap/algorithm_rod_angle_map.c
     APP/Algorithm/SPSC_Ring/src/algorithm_spsc_ring.c
     APP/Gateway/app_gateway.c
     Task/task_app.c
@@ -62,11 +69,18 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     .
     config
     BSP
+    Device/BMI088
     Device/ESP8266
     Device/PeerLink
     Device/QD4310
+    Device/VisionLink
+    APP/Algorithm/BallPositionControl
+    APP/Algorithm/BallStateEstimator
+    APP/Algorithm/ChassisAccelerationFusion
+    APP/Algorithm/ChassisImuAcceleration
     APP/Algorithm/LevelCurrentControl
     APP/Algorithm/Packet/include
+    APP/Algorithm/RodAngleMap
     APP/Algorithm/SPSC_Ring/include
     APP/Gateway
     Task

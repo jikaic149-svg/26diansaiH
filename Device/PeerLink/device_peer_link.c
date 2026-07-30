@@ -3,11 +3,7 @@
 #include <limits.h>
 #include <string.h>
 
-#define DEVICE_PEER_LINK_MOTOR_ID_MAX UINT32_C(15)
-#define DEVICE_PEER_LINK_CURRENT_ABS_MAX_MA INT32_C(10000)
-#define DEVICE_PEER_LINK_SPEED_ABS_MAX_CENTI_RPM INT32_C(100000)
-#define DEVICE_PEER_LINK_ANGLE_MAX_MRAD UINT32_C(6284)
-#define DEVICE_PEER_LINK_TELEMETRY_FIELD_COUNT 7U
+#define DEVICE_PEER_LINK_CAR_STATE_FIELD_COUNT 7U
 
 static void increment_saturating(uint32_t *value)
 {
@@ -24,6 +20,20 @@ static bool time_reached(uint32_t now_ms, uint32_t deadline_ms)
 static bool node_id_valid(uint8_t node_id)
 {
     return (node_id == 1U) || (node_id == 2U);
+}
+
+static bool serial_u16_is_new(uint16_t next, uint16_t previous)
+{
+    const uint16_t difference = (uint16_t)(next - previous);
+
+    return (difference > 0U) && (difference < UINT16_C(0x8000));
+}
+
+static bool serial_u32_is_new(uint32_t next, uint32_t previous)
+{
+    const uint32_t difference = next - previous;
+
+    return (difference > 0U) && (difference < UINT32_C(0x80000000));
 }
 
 static size_t format_u32(uint8_t *output, size_t capacity, uint32_t value)
@@ -47,24 +57,56 @@ static size_t format_u32(uint8_t *output, size_t capacity, uint32_t value)
 static size_t format_i32(uint8_t *output, size_t capacity, int32_t value)
 {
     uint32_t magnitude;
-    size_t length = 0U;
+    size_t offset = 0U;
+    size_t length;
 
     if (value < 0) {
         if (capacity == 0U) {
             return 0U;
         }
-        output[length++] = '-';
+        output[offset++] = '-';
         magnitude = (uint32_t)(-(value + 1)) + 1U;
     }
     else {
         magnitude = (uint32_t)value;
     }
-    {
-        const size_t digits = format_u32(
-            &output[length], capacity - length, magnitude);
+    length = format_u32(&output[offset], capacity - offset, magnitude);
+    return (length == 0U) ? 0U : offset + length;
+}
 
-        return (digits == 0U) ? 0U : (length + digits);
+static bool append_separator(uint8_t *payload, size_t capacity, size_t *length)
+{
+    if ((payload == NULL) || (length == NULL) || (*length >= capacity)) {
+        return false;
     }
+    payload[(*length)++] = ',';
+    return true;
+}
+
+static bool append_u32(
+    uint8_t *payload, size_t capacity, size_t *payload_length, uint32_t value)
+{
+    const size_t length = format_u32(
+        &payload[*payload_length], capacity - *payload_length, value);
+
+    if (length == 0U) {
+        return false;
+    }
+    *payload_length += length;
+    return true;
+}
+
+static bool append_i32(
+    uint8_t *payload, size_t capacity, size_t *payload_length, int32_t value)
+{
+    const size_t length = format_i32(
+        &payload[*payload_length], capacity - *payload_length, value);
+
+    if (length == 0U) {
+        return false;
+    }
+    *payload_length += length;
+    return true;
 }
 
 static bool parse_u32_canonical(
@@ -119,57 +161,29 @@ static bool parse_i32_canonical(
     return true;
 }
 
-static bool telemetry_values_valid(
-    const Device_PeerLink_Telemetry *telemetry)
+static bool absolute_i32_within(int32_t value, int32_t maximum)
 {
-    return (telemetry != NULL) &&
-        ((uint32_t)telemetry->motor_id <= DEVICE_PEER_LINK_MOTOR_ID_MAX) &&
-        (telemetry->current_milliamps >=
-            -DEVICE_PEER_LINK_CURRENT_ABS_MAX_MA) &&
-        (telemetry->current_milliamps <=
-            DEVICE_PEER_LINK_CURRENT_ABS_MAX_MA) &&
-        (telemetry->speed_centi_rpm >=
-            -DEVICE_PEER_LINK_SPEED_ABS_MAX_CENTI_RPM) &&
-        (telemetry->speed_centi_rpm <=
-            DEVICE_PEER_LINK_SPEED_ABS_MAX_CENTI_RPM) &&
-        (telemetry->angle_milliradians <=
-            DEVICE_PEER_LINK_ANGLE_MAX_MRAD);
+    return (value >= -maximum) && (value <= maximum);
 }
 
-static bool append_separator(
-    uint8_t *payload, size_t capacity, size_t *length)
+static bool car_state_values_valid(const Device_PeerLink_CarState *state)
 {
-    if ((*length) >= capacity) {
+    if ((state == NULL) ||
+        !absolute_i32_within(state->speed_x_mm_per_second,
+            DEVICE_PEER_LINK_CAR_SPEED_ABS_MAX_MM_PER_SECOND) ||
+        !absolute_i32_within(state->acceleration_x_mm_per_second2,
+            DEVICE_PEER_LINK_CAR_ACCEL_ABS_MAX_MM_PER_SECOND2) ||
+        !absolute_i32_within(state->acceleration_z_mm_per_second2,
+            DEVICE_PEER_LINK_CAR_ACCEL_ABS_MAX_MM_PER_SECOND2) ||
+        !absolute_i32_within(state->pitch_rate_centi_dps,
+            DEVICE_PEER_LINK_CAR_PITCH_RATE_ABS_MAX_CENTI_DPS)) {
         return false;
     }
-    payload[(*length)++] = ',';
-    return true;
-}
-
-static bool append_u32(
-    uint8_t *payload, size_t capacity, size_t *length, uint32_t value)
-{
-    const size_t count = format_u32(
-        &payload[*length], capacity - *length, value);
-
-    if (count == 0U) {
-        return false;
-    }
-    *length += count;
-    return true;
-}
-
-static bool append_i32(
-    uint8_t *payload, size_t capacity, size_t *length, int32_t value)
-{
-    const size_t count = format_i32(
-        &payload[*length], capacity - *length, value);
-
-    if (count == 0U) {
-        return false;
-    }
-    *length += count;
-    return true;
+    return state->valid ||
+        ((state->speed_x_mm_per_second == 0) &&
+         (state->acceleration_x_mm_per_second2 == 0) &&
+         (state->acceleration_z_mm_per_second2 == 0) &&
+         (state->pitch_rate_centi_dps == 0));
 }
 
 static bool is_heartbeat(const Algorithm_Packet_View *packet)
@@ -178,10 +192,20 @@ static bool is_heartbeat(const Algorithm_Packet_View *packet)
            (memcmp(packet->type, "HB", 2U) == 0);
 }
 
-static bool is_telemetry(const Algorithm_Packet_View *packet)
+static bool is_car_state(const Algorithm_Packet_View *packet)
 {
     return (packet->type_length == 3U) &&
-           (memcmp(packet->type, "TEL", 3U) == 0);
+           (memcmp(packet->type, "CAR", 3U) == 0);
+}
+
+static void reset_remote_session(Device_PeerLink *link)
+{
+    link->heartbeat_rx_sequence_seen = false;
+    link->car_state_rx_sequence_seen = false;
+    link->car_state_sample_seen = false;
+    link->remote_car_state_seen = false;
+    memset(&link->remote_car_state, 0, sizeof(link->remote_car_state));
+    increment_saturating(&link->status.remote_session_reset_count);
 }
 
 static void consume_heartbeat(
@@ -212,6 +236,13 @@ static void consume_heartbeat(
     }
 
     if (link->heartbeat_rx_sequence_seen &&
+        (!link->status.online ||
+         ((remote_uptime_ms != link->status.last_remote_uptime_ms) &&
+          !serial_u32_is_new(
+              remote_uptime_ms, link->status.last_remote_uptime_ms)))) {
+        reset_remote_session(link);
+    }
+    if (link->heartbeat_rx_sequence_seen &&
         (packet->sequence == link->last_heartbeat_rx_sequence)) {
         increment_saturating(&link->status.duplicate_sequence_count);
     }
@@ -219,37 +250,36 @@ static void consume_heartbeat(
         link->last_heartbeat_rx_sequence = packet->sequence;
         link->heartbeat_rx_sequence_seen = true;
     }
-
     link->status.last_heartbeat_rx_ms = now_ms;
     link->status.last_remote_uptime_ms = remote_uptime_ms;
     link->status.online = true;
     increment_saturating(&link->status.heartbeat_rx_count);
 }
 
-static void consume_telemetry(
+static void consume_car_state(
     Device_PeerLink *link,
     const Algorithm_Packet_View *packet,
     uint32_t now_ms)
 {
-    size_t start[DEVICE_PEER_LINK_TELEMETRY_FIELD_COUNT];
-    size_t length[DEVICE_PEER_LINK_TELEMETRY_FIELD_COUNT];
+    size_t start[DEVICE_PEER_LINK_CAR_STATE_FIELD_COUNT];
+    size_t length[DEVICE_PEER_LINK_CAR_STATE_FIELD_COUNT];
     size_t field_count = 0U;
     size_t field_start = 0U;
     uint32_t node_id;
-    uint32_t motor_id;
-    uint32_t enabled;
-    int32_t current_milliamps;
-    int32_t speed_centi_rpm;
-    uint32_t angle_milliradians;
-    uint32_t online;
+    uint32_t sample_ms;
+    int32_t speed_x;
+    int32_t specific_force_x;
+    int32_t specific_force_z;
+    int32_t pitch_rate;
+    uint32_t valid;
 
     for (size_t index = 0U; index <= packet->payload_length; ++index) {
         if ((index == packet->payload_length) ||
             (packet->payload[index] == ',')) {
-            if ((field_count >= DEVICE_PEER_LINK_TELEMETRY_FIELD_COUNT) ||
+            if ((field_count >= DEVICE_PEER_LINK_CAR_STATE_FIELD_COUNT) ||
                 (index == field_start)) {
                 increment_saturating(
-                    &link->status.telemetry_payload_error_count);
+                    &link->status.car_state_payload_error_count);
                 return;
             }
             start[field_count] = field_start;
@@ -258,60 +288,75 @@ static void consume_telemetry(
             field_start = index + 1U;
         }
     }
-    if ((field_count != DEVICE_PEER_LINK_TELEMETRY_FIELD_COUNT) ||
+    if ((field_count != DEVICE_PEER_LINK_CAR_STATE_FIELD_COUNT) ||
         !parse_u32_canonical(
             &packet->payload[start[0]], length[0], &node_id)) {
-        increment_saturating(&link->status.telemetry_payload_error_count);
+        increment_saturating(&link->status.car_state_payload_error_count);
         return;
     }
     if (node_id != link->config.remote_node_id) {
-        increment_saturating(&link->status.telemetry_source_error_count);
+        increment_saturating(&link->status.car_state_source_error_count);
         return;
     }
     if (!parse_u32_canonical(
-            &packet->payload[start[1]], length[1], &motor_id) ||
-        !parse_u32_canonical(
-            &packet->payload[start[2]], length[2], &enabled) ||
+            &packet->payload[start[1]], length[1], &sample_ms) ||
         !parse_i32_canonical(
-            &packet->payload[start[3]], length[3], &current_milliamps) ||
+            &packet->payload[start[2]], length[2], &speed_x) ||
         !parse_i32_canonical(
-            &packet->payload[start[4]], length[4], &speed_centi_rpm) ||
+            &packet->payload[start[3]], length[3], &specific_force_x) ||
+        !parse_i32_canonical(
+            &packet->payload[start[4]], length[4], &specific_force_z) ||
+        !parse_i32_canonical(
+            &packet->payload[start[5]], length[5], &pitch_rate) ||
         !parse_u32_canonical(
-            &packet->payload[start[5]], length[5], &angle_milliradians) ||
-        !parse_u32_canonical(
-            &packet->payload[start[6]], length[6], &online) ||
-        (motor_id > DEVICE_PEER_LINK_MOTOR_ID_MAX) ||
-        (enabled > 1U) ||
-        (current_milliamps < -DEVICE_PEER_LINK_CURRENT_ABS_MAX_MA) ||
-        (current_milliamps > DEVICE_PEER_LINK_CURRENT_ABS_MAX_MA) ||
-        (speed_centi_rpm < -DEVICE_PEER_LINK_SPEED_ABS_MAX_CENTI_RPM) ||
-        (speed_centi_rpm > DEVICE_PEER_LINK_SPEED_ABS_MAX_CENTI_RPM) ||
-        (angle_milliradians > DEVICE_PEER_LINK_ANGLE_MAX_MRAD) ||
-        (online > 1U)) {
-        increment_saturating(&link->status.telemetry_payload_error_count);
+            &packet->payload[start[6]], length[6], &valid) ||
+        (valid > 1U)) {
+        increment_saturating(&link->status.car_state_payload_error_count);
         return;
     }
+    {
+        const Device_PeerLink_CarState state = {
+            .sample_ms = sample_ms,
+            .speed_x_mm_per_second = speed_x,
+            .acceleration_x_mm_per_second2 = specific_force_x,
+            .acceleration_z_mm_per_second2 = specific_force_z,
+            .pitch_rate_centi_dps = pitch_rate,
+            .valid = valid != 0U,
+            .received_at_ms = now_ms,
+        };
 
-    if (link->telemetry_rx_sequence_seen &&
-        (packet->sequence == link->last_telemetry_rx_sequence)) {
-        increment_saturating(
-            &link->status.telemetry_duplicate_sequence_count);
+        if (!car_state_values_valid(&state)) {
+            increment_saturating(
+                &link->status.car_state_payload_error_count);
+            return;
+        }
+        if (link->car_state_rx_sequence_seen) {
+            if (packet->sequence == link->last_car_state_rx_sequence) {
+                increment_saturating(
+                    &link->status.car_state_duplicate_sequence_count);
+                return;
+            }
+            if (!serial_u16_is_new(
+                    packet->sequence, link->last_car_state_rx_sequence)) {
+                increment_saturating(
+                    &link->status.car_state_old_sequence_count);
+                return;
+            }
+        }
+        if (link->car_state_sample_seen &&
+            !serial_u32_is_new(
+                state.sample_ms, link->last_car_state_sample_ms)) {
+            increment_saturating(&link->status.car_state_old_sample_count);
+            return;
+        }
+        link->last_car_state_rx_sequence = packet->sequence;
+        link->last_car_state_sample_ms = state.sample_ms;
+        link->car_state_rx_sequence_seen = true;
+        link->car_state_sample_seen = true;
+        link->remote_car_state_seen = true;
+        link->remote_car_state = state;
     }
-    else {
-        link->last_telemetry_rx_sequence = packet->sequence;
-        link->telemetry_rx_sequence_seen = true;
-    }
-    link->remote_telemetry = (Device_PeerLink_Telemetry){
-        .motor_id = (uint8_t)motor_id,
-        .enabled = enabled != 0U,
-        .current_milliamps = current_milliamps,
-        .speed_centi_rpm = speed_centi_rpm,
-        .angle_milliradians = angle_milliradians,
-        .online = online != 0U,
-        .received_at_ms = now_ms,
-        .valid = true,
-    };
-    increment_saturating(&link->status.telemetry_rx_count);
+    increment_saturating(&link->status.car_state_rx_count);
 }
 
 static bool send_heartbeat(Device_PeerLink *link, uint32_t now_ms)
@@ -339,7 +384,6 @@ static bool send_heartbeat(Device_PeerLink *link, uint32_t now_ms)
         return false;
     }
     payload_length += length;
-
     if (Algorithm_Packet_Encode(
             "HB", link->heartbeat_tx_sequence,
             link->tx_payload, payload_length,
@@ -348,7 +392,6 @@ static bool send_heartbeat(Device_PeerLink *link, uint32_t now_ms)
         increment_saturating(&link->status.heartbeat_tx_error_count);
         return false;
     }
-
     result = BSP_UART_WriteBuffered(
         link->uart, link->tx_frame, frame_length);
     if (result == BSP_UART_RESULT_BUSY) {
@@ -359,7 +402,6 @@ static bool send_heartbeat(Device_PeerLink *link, uint32_t now_ms)
         increment_saturating(&link->status.heartbeat_tx_error_count);
         return false;
     }
-
     link->heartbeat_tx_sequence =
         (uint16_t)(link->heartbeat_tx_sequence + 1U);
     increment_saturating(&link->status.heartbeat_tx_count);
@@ -399,7 +441,6 @@ bool Device_PeerLink_Init(
             sizeof(link->parser_storage))) {
         return false;
     }
-
     link->config = *config;
     link->uart = uart;
     link->next_heartbeat_tx_ms = now_ms;
@@ -419,7 +460,6 @@ bool Device_PeerLink_Step(Device_PeerLink *link, uint32_t now_ms)
     if ((link == NULL) || !link->initialized) {
         return false;
     }
-
     if (BSP_UART_ReadAvailable(
             link->uart, link->rx_chunk,
             link->config.maximum_rx_bytes_per_step, &received) !=
@@ -436,20 +476,18 @@ bool Device_PeerLink_Step(Device_PeerLink *link, uint32_t now_ms)
             if (is_heartbeat(&packet)) {
                 consume_heartbeat(link, &packet, now_ms);
             }
-            else if (is_telemetry(&packet)) {
-                consume_telemetry(link, &packet, now_ms);
+            else if (is_car_state(&packet)) {
+                consume_car_state(link, &packet, now_ms);
             }
         }
     }
     link->status.packet_parser_error_count =
         Algorithm_Packet_Parser_ErrorCount(&link->parser);
-
     if (link->status.online &&
         ((uint32_t)(now_ms - link->status.last_heartbeat_rx_ms) >=
          link->config.offline_timeout_ms)) {
         link->status.online = false;
     }
-
     if (time_reached(now_ms, link->next_heartbeat_tx_ms)) {
         link->next_heartbeat_tx_ms =
             now_ms + link->config.heartbeat_period_ms;
@@ -457,9 +495,7 @@ bool Device_PeerLink_Step(Device_PeerLink *link, uint32_t now_ms)
             ok = false;
         }
     }
-
-    if (!BSP_UART_GetRxStatus(
-            link->uart, &link->status.uart_rx)) {
+    if (!BSP_UART_GetRxStatus(link->uart, &link->status.uart_rx)) {
         ok = false;
     }
     if (!ok) {
@@ -468,138 +504,121 @@ bool Device_PeerLink_Step(Device_PeerLink *link, uint32_t now_ms)
     return ok;
 }
 
-bool Device_PeerLink_SendTelemetry(
-    Device_PeerLink *link,
-    const Device_PeerLink_Telemetry *telemetry)
-{
-    size_t payload_length = 0U;
-    size_t frame_length = 0U;
-    BSP_UART_Result result;
-
-    if ((link == NULL) || !link->initialized ||
-        !telemetry_values_valid(telemetry)) {
-        if ((link != NULL) && link->initialized) {
-            increment_saturating(&link->status.telemetry_tx_error_count);
-        }
-        return false;
-    }
-    if (!append_u32(link->tx_payload, sizeof(link->tx_payload),
-            &payload_length, link->config.local_node_id) ||
-        !append_separator(link->tx_payload, sizeof(link->tx_payload),
-            &payload_length) ||
-        !append_u32(link->tx_payload, sizeof(link->tx_payload),
-            &payload_length, telemetry->motor_id) ||
-        !append_separator(link->tx_payload, sizeof(link->tx_payload),
-            &payload_length) ||
-        !append_u32(link->tx_payload, sizeof(link->tx_payload),
-            &payload_length, telemetry->enabled ? 1U : 0U) ||
-        !append_separator(link->tx_payload, sizeof(link->tx_payload),
-            &payload_length) ||
-        !append_i32(link->tx_payload, sizeof(link->tx_payload),
-            &payload_length, telemetry->current_milliamps) ||
-        !append_separator(link->tx_payload, sizeof(link->tx_payload),
-            &payload_length) ||
-        !append_i32(link->tx_payload, sizeof(link->tx_payload),
-            &payload_length, telemetry->speed_centi_rpm) ||
-        !append_separator(link->tx_payload, sizeof(link->tx_payload),
-            &payload_length) ||
-        !append_u32(link->tx_payload, sizeof(link->tx_payload),
-            &payload_length, telemetry->angle_milliradians) ||
-        !append_separator(link->tx_payload, sizeof(link->tx_payload),
-            &payload_length) ||
-        !append_u32(link->tx_payload, sizeof(link->tx_payload),
-            &payload_length, telemetry->online ? 1U : 0U) ||
-        (Algorithm_Packet_Encode(
-            "TEL", link->telemetry_tx_sequence,
-            link->tx_payload, payload_length,
-            link->tx_frame, sizeof(link->tx_frame), &frame_length) !=
-         ALGORITHM_PACKET_ENCODE_OK)) {
-        increment_saturating(&link->status.telemetry_tx_error_count);
-        return false;
-    }
-
-    result = BSP_UART_WriteBuffered(
-        link->uart, link->tx_frame, frame_length);
-    if (result == BSP_UART_RESULT_BUSY) {
-        increment_saturating(&link->status.telemetry_tx_drop_count);
-        return true;
-    }
-    if (result != BSP_UART_RESULT_OK) {
-        increment_saturating(&link->status.telemetry_tx_error_count);
-        return false;
-    }
-    link->telemetry_tx_sequence =
-        (uint16_t)(link->telemetry_tx_sequence + 1U);
-    increment_saturating(&link->status.telemetry_tx_count);
-    return true;
-}
-
-bool Device_PeerLink_SendAbsoluteEncoder(
-    Device_PeerLink *link,
-    const Device_PeerLink_AbsoluteEncoder *encoder)
-{
-    size_t payload_length = 0U;
-    size_t frame_length = 0U;
-    BSP_UART_Result result;
-
-    if ((link == NULL) || !link->initialized || (encoder == NULL) ||
-        ((uint32_t)encoder->motor_id > DEVICE_PEER_LINK_MOTOR_ID_MAX)) {
-        if ((link != NULL) && link->initialized) {
-            increment_saturating(&link->status.encoder_tx_error_count);
-        }
-        return false;
-    }
-    if (!append_u32(link->tx_payload, sizeof(link->tx_payload),
-            &payload_length, link->config.local_node_id) ||
-        !append_separator(link->tx_payload, sizeof(link->tx_payload),
-            &payload_length) ||
-        !append_u32(link->tx_payload, sizeof(link->tx_payload),
-            &payload_length, encoder->motor_id) ||
-        !append_separator(link->tx_payload, sizeof(link->tx_payload),
-            &payload_length) ||
-        !append_u32(link->tx_payload, sizeof(link->tx_payload),
-            &payload_length, encoder->angle_raw) ||
-        !append_separator(link->tx_payload, sizeof(link->tx_payload),
-            &payload_length) ||
-        !append_u32(link->tx_payload, sizeof(link->tx_payload),
-            &payload_length, encoder->online ? 1U : 0U) ||
-        (Algorithm_Packet_Encode(
-            "ENC", link->encoder_tx_sequence,
-            link->tx_payload, payload_length,
-            link->tx_frame, sizeof(link->tx_frame), &frame_length) !=
-         ALGORITHM_PACKET_ENCODE_OK)) {
-        increment_saturating(&link->status.encoder_tx_error_count);
-        return false;
-    }
-
-    result = BSP_UART_WriteBuffered(
-        link->uart, link->tx_frame, frame_length);
-    if (result == BSP_UART_RESULT_BUSY) {
-        increment_saturating(&link->status.encoder_tx_drop_count);
-        return true;
-    }
-    if (result != BSP_UART_RESULT_OK) {
-        increment_saturating(&link->status.encoder_tx_error_count);
-        return false;
-    }
-    link->encoder_tx_sequence =
-        (uint16_t)(link->encoder_tx_sequence + 1U);
-    increment_saturating(&link->status.encoder_tx_count);
-    return true;
-}
-
-bool Device_PeerLink_GetRemoteTelemetry(
+bool Device_PeerLink_GetRemoteCarState(
     const Device_PeerLink *link,
     uint32_t now_ms,
     uint32_t maximum_age_ms,
-    Device_PeerLink_Telemetry *telemetry)
+    Device_PeerLink_CarState *state)
 {
-    if ((link == NULL) || !link->initialized || (telemetry == NULL) ||
-        !link->remote_telemetry.valid ||
-        ((uint32_t)(now_ms - link->remote_telemetry.received_at_ms) >
-            maximum_age_ms)) {
+    if ((link == NULL) || (state == NULL) || !link->initialized ||
+        !link->remote_car_state_seen || !link->remote_car_state.valid ||
+        ((uint32_t)(now_ms - link->remote_car_state.received_at_ms) >
+         maximum_age_ms)) {
         return false;
     }
-    *telemetry = link->remote_telemetry;
+    *state = link->remote_car_state;
+    return true;
+}
+
+bool Device_PeerLink_SendDebugTelemetry(
+    Device_PeerLink *link,
+    const Device_PeerLink_DebugTelemetry *telemetry)
+{
+    size_t payload_length = 0U;
+    size_t frame_length = 0U;
+    BSP_UART_Result result;
+
+    if ((link == NULL) || (telemetry == NULL) || !link->initialized ||
+        !absolute_i32_within(
+            telemetry->chassis_acceleration_mm_s2, INT32_C(60000)) ||
+        !absolute_i32_within(
+            telemetry->chassis_compensation_mdeg, INT32_C(60000)) ||
+        !absolute_i32_within(
+            telemetry->rod_command_mdeg, INT32_C(60000)) ||
+        !absolute_i32_within(
+            telemetry->motor_command_current_ma, INT32_C(2000)) ||
+        !absolute_i32_within(
+            telemetry->motor_feedback_current_ma, INT32_C(10000)) ||
+        !absolute_i32_within(
+            telemetry->motor_speed_centi_rpm, INT32_C(100000)) ||
+        (telemetry->control_phase > 2U) ||
+        ((telemetry->status_flags &
+            (uint16_t)~DEVICE_PEER_LINK_DEBUG_STATUS_MASK) != 0U)) {
+        if ((link != NULL) && link->initialized) {
+            increment_saturating(&link->status.debug_tx_error_count);
+        }
+        return false;
+    }
+
+#define APPEND_DEBUG_U32(value) \
+    do { \
+        if (!append_u32(link->tx_payload, sizeof(link->tx_payload), \
+                &payload_length, (uint32_t)(value))) { \
+            increment_saturating(&link->status.debug_tx_error_count); \
+            return false; \
+        } \
+    } while (0)
+#define APPEND_DEBUG_I32(value) \
+    do { \
+        if (!append_i32(link->tx_payload, sizeof(link->tx_payload), \
+                &payload_length, (int32_t)(value))) { \
+            increment_saturating(&link->status.debug_tx_error_count); \
+            return false; \
+        } \
+    } while (0)
+#define APPEND_DEBUG_SEPARATOR() \
+    do { \
+        if (!append_separator(link->tx_payload, sizeof(link->tx_payload), \
+                &payload_length)) { \
+            increment_saturating(&link->status.debug_tx_error_count); \
+            return false; \
+        } \
+    } while (0)
+
+    APPEND_DEBUG_U32(link->config.local_node_id);
+    APPEND_DEBUG_SEPARATOR();
+    APPEND_DEBUG_I32(telemetry->chassis_acceleration_mm_s2);
+    APPEND_DEBUG_SEPARATOR();
+    APPEND_DEBUG_I32(telemetry->chassis_compensation_mdeg);
+    APPEND_DEBUG_SEPARATOR();
+    APPEND_DEBUG_I32(telemetry->rod_command_mdeg);
+    APPEND_DEBUG_SEPARATOR();
+    APPEND_DEBUG_U32(telemetry->motor_target_raw);
+    APPEND_DEBUG_SEPARATOR();
+    APPEND_DEBUG_U32(telemetry->motor_feedback_raw);
+    APPEND_DEBUG_SEPARATOR();
+    APPEND_DEBUG_I32(telemetry->motor_command_current_ma);
+    APPEND_DEBUG_SEPARATOR();
+    APPEND_DEBUG_I32(telemetry->motor_feedback_current_ma);
+    APPEND_DEBUG_SEPARATOR();
+    APPEND_DEBUG_I32(telemetry->motor_speed_centi_rpm);
+    APPEND_DEBUG_SEPARATOR();
+    APPEND_DEBUG_U32(telemetry->control_phase);
+    APPEND_DEBUG_SEPARATOR();
+    APPEND_DEBUG_U32(telemetry->status_flags);
+
+#undef APPEND_DEBUG_U32
+#undef APPEND_DEBUG_I32
+#undef APPEND_DEBUG_SEPARATOR
+
+    if (Algorithm_Packet_Encode(
+            "DBG", link->debug_tx_sequence,
+            link->tx_payload, payload_length,
+            link->tx_frame, sizeof(link->tx_frame), &frame_length) !=
+        ALGORITHM_PACKET_ENCODE_OK) {
+        increment_saturating(&link->status.debug_tx_error_count);
+        return false;
+    }
+    result = BSP_UART_WriteBuffered(link->uart, link->tx_frame, frame_length);
+    if (result == BSP_UART_RESULT_BUSY) {
+        increment_saturating(&link->status.debug_tx_drop_count);
+        return true;
+    }
+    if (result != BSP_UART_RESULT_OK) {
+        increment_saturating(&link->status.debug_tx_error_count);
+        return false;
+    }
+    link->debug_tx_sequence = (uint16_t)(link->debug_tx_sequence + 1U);
+    increment_saturating(&link->status.debug_tx_count);
     return true;
 }

@@ -1,9 +1,13 @@
-/* STM32F407VET6 BSP：时钟、KEY1、USART1(板间通信)、USART3(ESP8266)、CAN1(QD4310)。
+/* STM32F407VET6 BSP：时钟、KEY1、USART1(板间通信)、USART2(视觉)、
+ * USART3(ESP8266)、SPI1(BMI088)、CAN1(QD4310)。
  *
  * 硬件映射（来自开发板例程与 QD4310 手册）：
  *   KEY1    PA0 input, pull-down, active high
  *   USART1  PA9 TX / PA10 RX  115200 8N1  APB2 84MHz   DMA2 S7/S2 CH4
+ *   USART2  PA2 TX / PA3 RX    115200 8N1  APB1 42MHz   MaixCAM Pro VIS
  *   USART3  PB10 TX / PB11 RX 115200 8N1  APB1 42MHz   ESP8266
+ *   SPI1    PA5 SCK / PA6 MISO / PA7 MOSI, 5.25MHz Mode3, DMA2 S0/S3
+ *           PA4 ACC_CS / PC4 GYRO_CS; PC13 held high for board W25Q128
  *   CAN1    PB9 TX / PB8 RX   1Mbps       APB1 42MHz   QD4310 总线
  *           BTR: 预分频6, BS1=5TQ, BS2=1TQ, SJW=1TQ -> 42M/(6*7)=1M
  *
@@ -15,6 +19,7 @@
 #include "bsp_key.h"
 #include "bsp_uart.h"
 #include "bsp_can.h"
+#include "bsp_spi.h"
 
 #include <string.h>
 
@@ -30,6 +35,9 @@
 #define BSP_DMA_IRQ_PRIORITY   6U
 #define BSP_CAN_IRQ_PRIORITY   6U
 #define BSP_CAN_RX_QUEUE_SIZE  16U
+#define BSP_SPI_BIT_RATE_HZ     5250000UL
+#define BSP_SPI_MAX_TRANSFER    16U
+#define BSP_SPI_CHIP_SELECTS    2U
 #define BSP_CLOCK_POLL_LIMIT   4000000UL
 #define BSP_UART_ERROR_MASK    (USART_SR_PE | USART_SR_FE | USART_SR_NE | \
                                 USART_SR_ORE)
@@ -120,9 +128,11 @@ struct BSP_UART_Resource {
 };
 
 static uart_ring_t s_uart1_tx, s_uart1_rx;
+static uart_ring_t s_uart2_tx, s_uart2_rx;
 static uart_ring_t s_uart3_tx, s_uart3_rx;
 static uart_dma_state_t s_uart1_dma;
 static volatile uint32_t s_uart1_err[6];
+static volatile uint32_t s_uart2_err[6];
 static volatile uint32_t s_uart3_err[6];
 
 static const struct BSP_UART_Resource s_uart_resources[] = {
@@ -142,6 +152,14 @@ static const struct BSP_UART_Resource s_uart_resources[] = {
         .dma_error = &s_uart3_err[4], .sticky = &s_uart3_err[5],
         .dma = NULL, .uses_dma = false,
     },
+    {
+        .instance = USART2, .irq = USART2_IRQn,
+        .tx_ring = &s_uart2_tx, .rx_ring = &s_uart2_rx,
+        .sw_overflow = &s_uart2_err[0], .hw_overrun = &s_uart2_err[1],
+        .framing = &s_uart2_err[2], .parity = &s_uart2_err[3],
+        .dma_error = &s_uart2_err[4], .sticky = &s_uart2_err[5],
+        .dma = NULL, .uses_dma = false,
+    },
 };
 
 #define BSP_UART_TRANSPORT_COUNT \
@@ -155,6 +173,59 @@ static bool uart_handle_valid(BSP_UART_Handle uart)
         }
     }
     return false;
+}
+
+/* ------------------------------------------------------------------ */
+/* SPI1 resource: BMI088 dual chip-select, full-duplex DMA             */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    const uint8_t *tx_data;
+    uint8_t *rx_data;
+    size_t length;
+    size_t chip_select;
+    volatile bool active;
+    volatile bool dma_complete;
+    volatile bool dma_error;
+    volatile bool event_sent;
+    BSP_SPI_CompletionCallbackFromISR completion_callback;
+    void *completion_context;
+} spi_dma_state_t;
+
+struct BSP_SPI_Resource {
+    SPI_TypeDef *instance;
+    GPIO_TypeDef *chip_select_gpio[BSP_SPI_CHIP_SELECTS];
+    uint16_t chip_select_pin[BSP_SPI_CHIP_SELECTS];
+    spi_dma_state_t *state;
+};
+
+static spi_dma_state_t s_spi1_dma;
+static const struct BSP_SPI_Resource s_spi_resources[] = {
+    {
+        .instance = SPI1,
+        .chip_select_gpio = { GPIOA, GPIOC },
+        .chip_select_pin = { UINT16_C(1) << 4U, UINT16_C(1) << 4U },
+        .state = &s_spi1_dma,
+    },
+};
+
+#define BSP_SPI_TRANSPORT_COUNT \
+    (sizeof(s_spi_resources) / sizeof(s_spi_resources[0]))
+
+static bool spi_handle_valid(BSP_SPI_Handle spi)
+{
+    return spi == &s_spi_resources[0];
+}
+
+static void spi_chip_select(
+    const struct BSP_SPI_Resource *spi,
+    size_t chip_select,
+    bool asserted)
+{
+    const uint32_t pin = spi->chip_select_pin[chip_select];
+
+    spi->chip_select_gpio[chip_select]->BSRR = asserted ?
+        (pin << 16U) : pin;
 }
 
 /* ------------------------------------------------------------------ */
@@ -244,8 +315,56 @@ static void gpio_af_init(
         ((uint32_t)alternate << afr_pos);
 }
 
+static void gpio_output_high_init(GPIO_TypeDef *gpio, uint8_t pin)
+{
+    const uint32_t mode_pos = (uint32_t)pin * 2U;
+
+    gpio->BSRR = UINT32_C(1) << pin;
+    gpio->MODER = (gpio->MODER & ~(UINT32_C(3) << mode_pos)) |
+        (UINT32_C(1) << mode_pos);
+    gpio->OTYPER &= ~(UINT32_C(1) << pin);
+    gpio->OSPEEDR |= UINT32_C(3) << mode_pos;
+    gpio->PUPDR = (gpio->PUPDR & ~(UINT32_C(3) << mode_pos)) |
+        (UINT32_C(1) << mode_pos);
+}
+
+static void spi1_init(void)
+{
+    /* Keep every slave deselected before the first SCK edge. PC13 owns the
+     * development-board W25Q128 which shares PA5/PA6/PA7. */
+    gpio_output_high_init(GPIOC, 13U);
+    gpio_output_high_init(GPIOA, 4U);  /* BMI088 ACC_CS */
+    gpio_output_high_init(GPIOC, 4U);  /* BMI088 GYRO_CS */
+    gpio_af_init(GPIOA, 5U, 5U);
+    gpio_af_init(GPIOA, 6U, 5U);
+    gpio_af_init(GPIOA, 7U, 5U);
+
+    DMA2_Stream0->CR = 0U;
+    DMA2_Stream3->CR = 0U;
+    DMA2->LIFCR = DMA_LIFCR_CFEIF0 | DMA_LIFCR_CDMEIF0 |
+        DMA_LIFCR_CTEIF0 | DMA_LIFCR_CHTIF0 | DMA_LIFCR_CTCIF0 |
+        DMA_LIFCR_CFEIF3 | DMA_LIFCR_CDMEIF3 |
+        DMA_LIFCR_CTEIF3 | DMA_LIFCR_CHTIF3 | DMA_LIFCR_CTCIF3;
+    memset(&s_spi1_dma, 0, sizeof(s_spi1_dma));
+
+    SPI1->CR1 = 0U;
+    SPI1->CR2 = 0U;
+    SPI1->I2SCFGR = 0U;
+    /* APB2 84 MHz / 16 = 5.25 MHz, 8-bit, MSB-first, SPI mode 3. */
+    SPI1->CR1 = SPI_CR1_MSTR | SPI_CR1_SSM | SPI_CR1_SSI |
+        SPI_CR1_BR_1 | SPI_CR1_BR_0 | SPI_CR1_CPOL | SPI_CR1_CPHA |
+        SPI_CR1_SPE;
+
+    NVIC_SetPriority(DMA2_Stream0_IRQn, BSP_DMA_IRQ_PRIORITY);
+    NVIC_SetPriority(DMA2_Stream3_IRQn, BSP_DMA_IRQ_PRIORITY);
+    NVIC_ClearPendingIRQ(DMA2_Stream0_IRQn);
+    NVIC_ClearPendingIRQ(DMA2_Stream3_IRQn);
+    NVIC_EnableIRQ(DMA2_Stream0_IRQn);
+    NVIC_EnableIRQ(DMA2_Stream3_IRQn);
+}
+
 /* ------------------------------------------------------------------ */
-/* UART 初始化与中断：USART1 使用 DMA2，USART3 保留字节中断后端             */
+/* UART 初始化与中断：USART1 使用 DMA2，USART2/3、UART4 使用字节中断后端    */
 /* ------------------------------------------------------------------ */
 
 static void uart_periph_init(
@@ -437,6 +556,11 @@ void USART1_IRQHandler(void)
 void USART3_IRQHandler(void)
 {
     uart_irq_common(&s_uart_resources[1]);
+}
+
+void USART2_IRQHandler(void)
+{
+    uart_irq_common(&s_uart_resources[2]);
 }
 
 void DMA2_Stream2_IRQHandler(void)
@@ -746,6 +870,261 @@ bool BSP_UART_IsRxBusy(BSP_UART_Handle uart)
 }
 
 /* ------------------------------------------------------------------ */
+/* SPI1 DMA API                                                        */
+/* ------------------------------------------------------------------ */
+
+static void spi1_dma_signal_terminal_from_isr(bool error)
+{
+    if (!s_spi1_dma.active) {
+        return;
+    }
+    if (error) {
+        s_spi1_dma.dma_error = true;
+        SPI1->CR2 &= ~(SPI_CR2_RXDMAEN | SPI_CR2_TXDMAEN);
+    }
+    if (s_spi1_dma.event_sent) {
+        return;
+    }
+    s_spi1_dma.dma_complete = true;
+    s_spi1_dma.event_sent = true;
+    if (s_spi1_dma.completion_callback != NULL) {
+        s_spi1_dma.completion_callback(
+            s_spi1_dma.completion_context);
+    }
+}
+
+void DMA2_Stream0_IRQHandler(void)
+{
+    const uint32_t status = DMA2->LISR;
+
+    DMA2->LIFCR = DMA_LIFCR_CFEIF0 | DMA_LIFCR_CDMEIF0 |
+        DMA_LIFCR_CTEIF0 | DMA_LIFCR_CHTIF0 | DMA_LIFCR_CTCIF0;
+    if ((status & (DMA_LISR_DMEIF0 | DMA_LISR_TEIF0)) != 0U) {
+        spi1_dma_signal_terminal_from_isr(true);
+    }
+    else if ((status & DMA_LISR_TCIF0) != 0U) {
+        spi1_dma_signal_terminal_from_isr(false);
+    }
+}
+
+void DMA2_Stream3_IRQHandler(void)
+{
+    const uint32_t status = DMA2->LISR;
+
+    DMA2->LIFCR = DMA_LIFCR_CFEIF3 | DMA_LIFCR_CDMEIF3 |
+        DMA_LIFCR_CTEIF3 | DMA_LIFCR_CHTIF3 | DMA_LIFCR_CTCIF3;
+    if ((status & (DMA_LISR_DMEIF3 | DMA_LISR_TEIF3)) != 0U) {
+        spi1_dma_signal_terminal_from_isr(true);
+    }
+}
+
+size_t BSP_SPI_Count(void)
+{
+    return BSP_SPI_TRANSPORT_COUNT;
+}
+
+BSP_SPI_Handle BSP_SPI_GetHandle(size_t index)
+{
+    return (index < BSP_SPI_TRANSPORT_COUNT) ?
+        &s_spi_resources[index] : NULL;
+}
+
+bool BSP_SPI_GetInfo(BSP_SPI_Handle spi, BSP_SPI_Info *info)
+{
+    if (!spi_handle_valid(spi) || (info == NULL)) {
+        return false;
+    }
+    *info = (BSP_SPI_Info){
+        .bit_rate_hz = BSP_SPI_BIT_RATE_HZ,
+        .chip_select_count = BSP_SPI_CHIP_SELECTS,
+        .maximum_transfer_length = BSP_SPI_MAX_TRANSFER,
+    };
+    return true;
+}
+
+bool BSP_SPI_SetCompletionCallbackFromISR(
+    BSP_SPI_Handle spi,
+    BSP_SPI_CompletionCallbackFromISR callback,
+    void *context)
+{
+    spi_dma_state_t *state;
+    uint32_t primask;
+
+    if (!spi_handle_valid(spi) ||
+        ((callback == NULL) && (context != NULL))) {
+        return false;
+    }
+    state = spi->state;
+    primask = __get_PRIMASK();
+    __disable_irq();
+    if (state->active) {
+        if (primask == 0U) {
+            __enable_irq();
+        }
+        return false;
+    }
+    state->completion_callback = callback;
+    state->completion_context = context;
+    if (primask == 0U) {
+        __enable_irq();
+    }
+    return true;
+}
+
+BSP_SPI_Result BSP_SPI_StartTransfer(
+    BSP_SPI_Handle spi,
+    size_t chip_select,
+    const uint8_t *tx_data,
+    uint8_t *rx_data,
+    size_t length)
+{
+    spi_dma_state_t *state;
+    uint32_t primask;
+
+    if (!spi_handle_valid(spi) ||
+        (chip_select >= BSP_SPI_CHIP_SELECTS) ||
+        (tx_data == NULL) || (rx_data == NULL) ||
+        (length == 0U) || (length > BSP_SPI_MAX_TRANSFER)) {
+        return BSP_SPI_RESULT_INVALID_ARGUMENT;
+    }
+    state = spi->state;
+    primask = __get_PRIMASK();
+    __disable_irq();
+    if (state->active) {
+        if (primask == 0U) {
+            __enable_irq();
+        }
+        return BSP_SPI_RESULT_BUSY;
+    }
+
+    state->tx_data = tx_data;
+    state->rx_data = rx_data;
+    state->length = length;
+    state->chip_select = chip_select;
+    state->dma_complete = false;
+    state->dma_error = false;
+    state->event_sent = false;
+    state->active = true;
+
+    DMA2->LIFCR = DMA_LIFCR_CFEIF0 | DMA_LIFCR_CDMEIF0 |
+        DMA_LIFCR_CTEIF0 | DMA_LIFCR_CHTIF0 | DMA_LIFCR_CTCIF0 |
+        DMA_LIFCR_CFEIF3 | DMA_LIFCR_CDMEIF3 |
+        DMA_LIFCR_CTEIF3 | DMA_LIFCR_CHTIF3 | DMA_LIFCR_CTCIF3;
+    DMA2_Stream0->PAR = (uint32_t)&spi->instance->DR;
+    DMA2_Stream0->M0AR = (uint32_t)rx_data;
+    DMA2_Stream0->NDTR = length;
+    DMA2_Stream0->FCR = 0U;
+    DMA2_Stream0->CR = (UINT32_C(3) << DMA_SxCR_CHSEL_Pos) |
+        DMA_SxCR_MINC | DMA_SxCR_PL_1 | DMA_SxCR_TCIE |
+        DMA_SxCR_TEIE | DMA_SxCR_DMEIE;
+    DMA2_Stream3->PAR = (uint32_t)&spi->instance->DR;
+    DMA2_Stream3->M0AR = (uint32_t)tx_data;
+    DMA2_Stream3->NDTR = length;
+    DMA2_Stream3->FCR = 0U;
+    DMA2_Stream3->CR = (UINT32_C(3) << DMA_SxCR_CHSEL_Pos) |
+        DMA_SxCR_DIR_0 | DMA_SxCR_MINC | DMA_SxCR_PL_1 |
+        DMA_SxCR_TEIE | DMA_SxCR_DMEIE;
+
+    spi_chip_select(spi, chip_select, true);
+    DMA2_Stream0->CR |= DMA_SxCR_EN;
+    DMA2_Stream3->CR |= DMA_SxCR_EN;
+    spi->instance->CR2 |= SPI_CR2_RXDMAEN | SPI_CR2_TXDMAEN;
+    if (primask == 0U) {
+        __enable_irq();
+    }
+    return BSP_SPI_RESULT_OK;
+}
+
+BSP_SPI_Result BSP_SPI_Poll(
+    BSP_SPI_Handle spi,
+    size_t *transferred)
+{
+    spi_dma_state_t *state;
+    BSP_SPI_Result result;
+    uint32_t primask;
+
+    if (transferred != NULL) {
+        *transferred = 0U;
+    }
+    if (!spi_handle_valid(spi) || (transferred == NULL)) {
+        return BSP_SPI_RESULT_INVALID_ARGUMENT;
+    }
+    state = spi->state;
+    if (!state->active) {
+        return BSP_SPI_RESULT_NO_TRANSFER;
+    }
+    if (!state->dma_complete ||
+        ((spi->instance->SR & SPI_SR_BSY) != 0U)) {
+        return BSP_SPI_RESULT_BUSY;
+    }
+
+    primask = __get_PRIMASK();
+    __disable_irq();
+    spi->instance->CR2 &= ~(SPI_CR2_RXDMAEN | SPI_CR2_TXDMAEN);
+    DMA2_Stream0->CR &= ~DMA_SxCR_EN;
+    DMA2_Stream3->CR &= ~DMA_SxCR_EN;
+    spi_chip_select(spi, state->chip_select, false);
+    if (state->dma_error) {
+        const size_t remaining = DMA2_Stream0->NDTR;
+
+        *transferred = (remaining <= state->length) ?
+            state->length - remaining : 0U;
+        result = BSP_SPI_RESULT_IO_ERROR;
+    }
+    else {
+        *transferred = state->length;
+        result = BSP_SPI_RESULT_OK;
+    }
+    state->active = false;
+    state->dma_complete = false;
+    state->dma_error = false;
+    state->event_sent = false;
+    state->tx_data = NULL;
+    state->rx_data = NULL;
+    state->length = 0U;
+    if (primask == 0U) {
+        __enable_irq();
+    }
+    return result;
+}
+
+bool BSP_SPI_Abort(BSP_SPI_Handle spi)
+{
+    spi_dma_state_t *state;
+    BSP_SPI_CompletionCallbackFromISR callback;
+    void *callback_context;
+    uint32_t primask;
+
+    if (!spi_handle_valid(spi)) {
+        return false;
+    }
+    state = spi->state;
+    primask = __get_PRIMASK();
+    __disable_irq();
+    spi->instance->CR2 &= ~(SPI_CR2_RXDMAEN | SPI_CR2_TXDMAEN);
+    DMA2_Stream0->CR &= ~DMA_SxCR_EN;
+    DMA2_Stream3->CR &= ~DMA_SxCR_EN;
+    if (state->active) {
+        spi_chip_select(spi, state->chip_select, false);
+    }
+    DMA2->LIFCR = DMA_LIFCR_CFEIF0 | DMA_LIFCR_CDMEIF0 |
+        DMA_LIFCR_CTEIF0 | DMA_LIFCR_CHTIF0 | DMA_LIFCR_CTCIF0 |
+        DMA_LIFCR_CFEIF3 | DMA_LIFCR_CDMEIF3 |
+        DMA_LIFCR_CTEIF3 | DMA_LIFCR_CHTIF3 | DMA_LIFCR_CTCIF3;
+    NVIC_ClearPendingIRQ(DMA2_Stream0_IRQn);
+    NVIC_ClearPendingIRQ(DMA2_Stream3_IRQn);
+    callback = state->completion_callback;
+    callback_context = state->completion_context;
+    memset(state, 0, sizeof(*state));
+    state->completion_callback = callback;
+    state->completion_context = callback_context;
+    if (primask == 0U) {
+        __enable_irq();
+    }
+    return true;
+}
+
+/* ------------------------------------------------------------------ */
 /* CAN1：1Mbps，接收走 FIFO0 中断入软件队列，发送轮询空邮箱                */
 /* ------------------------------------------------------------------ */
 
@@ -986,50 +1365,67 @@ bool BSP_Init(void)
     }
 
     RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN | RCC_AHB1ENR_GPIOBEN |
-        RCC_AHB1ENR_DMA2EN;
-    RCC->APB2ENR |= RCC_APB2ENR_USART1EN;
-    RCC->APB1ENR |= RCC_APB1ENR_USART3EN | RCC_APB1ENR_CAN1EN;
+        RCC_AHB1ENR_GPIOCEN | RCC_AHB1ENR_DMA2EN;
+    RCC->APB2ENR |= RCC_APB2ENR_USART1EN | RCC_APB2ENR_SPI1EN;
+    RCC->APB1ENR |= RCC_APB1ENR_USART2EN | RCC_APB1ENR_USART3EN |
+        RCC_APB1ENR_CAN1EN;
     (void)RCC->AHB1ENR;
     (void)RCC->APB1ENR;
 
     RCC->APB2RSTR |= RCC_APB2RSTR_USART1RST;
     RCC->APB2RSTR &= ~RCC_APB2RSTR_USART1RST;
+    RCC->APB2RSTR |= RCC_APB2RSTR_SPI1RST;
+    RCC->APB2RSTR &= ~RCC_APB2RSTR_SPI1RST;
     RCC->APB1RSTR |= RCC_APB1RSTR_USART3RST;
     RCC->APB1RSTR &= ~RCC_APB1RSTR_USART3RST;
+    RCC->APB1RSTR |= RCC_APB1RSTR_USART2RST;
+    RCC->APB1RSTR &= ~RCC_APB1RSTR_USART2RST;
 
     key_init();
 
     /* USART1: PA9 TX / PA10 RX AF7 */
     gpio_af_init(GPIOA, 9U, 7U);
     gpio_af_init(GPIOA, 10U, 7U);
+    /* USART2: PA2 TX / PA3 RX AF7. Board-header continuity and 3.3 V
+     * MaixCAM wiring still require physical verification before use. */
+    gpio_af_init(GPIOA, 2U, 7U);
+    gpio_af_init(GPIOA, 3U, 7U);
     /* USART3: PB10 TX / PB11 RX AF7 */
     gpio_af_init(GPIOB, 10U, 7U);
     gpio_af_init(GPIOB, 11U, 7U);
     ring_reset(&s_uart1_tx);
     ring_reset(&s_uart1_rx);
+    ring_reset(&s_uart2_tx);
+    ring_reset(&s_uart2_rx);
     ring_reset(&s_uart3_tx);
     ring_reset(&s_uart3_rx);
     memset(&s_uart1_dma, 0, sizeof(s_uart1_dma));
     memset((void *)s_uart1_err, 0, sizeof(s_uart1_err));
+    memset((void *)s_uart2_err, 0, sizeof(s_uart2_err));
     memset((void *)s_uart3_err, 0, sizeof(s_uart3_err));
 
     DMA2_Stream2->CR = 0U;
     DMA2_Stream7->CR = 0U;
     uart_periph_init(USART1, BSP_APB2_CLOCK_HZ, true);
     uart_periph_init(USART3, BSP_APB1_CLOCK_HZ, false);
+    uart_periph_init(USART2, BSP_APB1_CLOCK_HZ, false);
+    spi1_init();
     if (!uart_dma_start_rx(&s_uart_resources[0])) {
         return false;
     }
 
     NVIC_SetPriority(USART1_IRQn, BSP_UART_IRQ_PRIORITY);
+    NVIC_SetPriority(USART2_IRQn, BSP_UART_IRQ_PRIORITY);
     NVIC_SetPriority(USART3_IRQn, BSP_UART_IRQ_PRIORITY);
     NVIC_SetPriority(DMA2_Stream2_IRQn, BSP_DMA_IRQ_PRIORITY);
     NVIC_SetPriority(DMA2_Stream7_IRQn, BSP_DMA_IRQ_PRIORITY);
     NVIC_ClearPendingIRQ(USART1_IRQn);
+    NVIC_ClearPendingIRQ(USART2_IRQn);
     NVIC_ClearPendingIRQ(USART3_IRQn);
     NVIC_ClearPendingIRQ(DMA2_Stream2_IRQn);
     NVIC_ClearPendingIRQ(DMA2_Stream7_IRQn);
     NVIC_EnableIRQ(USART1_IRQn);
+    NVIC_EnableIRQ(USART2_IRQn);
     NVIC_EnableIRQ(USART3_IRQn);
     NVIC_EnableIRQ(DMA2_Stream2_IRQn);
     NVIC_EnableIRQ(DMA2_Stream7_IRQn);

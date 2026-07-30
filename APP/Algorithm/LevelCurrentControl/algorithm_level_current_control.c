@@ -62,6 +62,7 @@ static bool valid_config(
         (config->ki_a_per_deg_s >= 0.0F) &&
         isfinite(config->kd_a_per_rpm) &&
         (config->kd_a_per_rpm >= 0.0F) &&
+        isfinite(config->feedforward_current_a) &&
         isfinite(config->error_limit_deg) &&
         (config->error_limit_deg > 0.0F) &&
         isfinite(config->deadband_deg) &&
@@ -73,10 +74,16 @@ static bool valid_config(
         (config->integral_limit_a >= 0.0F) &&
         isfinite(config->current_limit_a) &&
         (config->current_limit_a > 0.0F) &&
+        (absolute_value(config->feedforward_current_a) <=
+            config->current_limit_a) &&
         (config->integral_limit_a <= config->current_limit_a) &&
         isfinite(config->current_polarity) &&
         ((config->current_polarity == 1.0F) ||
-         (config->current_polarity == -1.0F));
+         (config->current_polarity == -1.0F)) &&
+        (config->raw_min_limit < config->raw_max_limit) &&
+        isfinite(config->raw_recovery_current_a) &&
+        (config->raw_recovery_current_a > 0.0F) &&
+        (config->raw_recovery_current_a <= config->current_limit_a);
 }
 
 static void reset_runtime_state(Algorithm_LevelCurrentControl *controller)
@@ -148,6 +155,19 @@ bool Algorithm_LevelCurrentControl_SetTargetDeg(
     return true;
 }
 
+bool Algorithm_LevelCurrentControl_SetTrackingTargetDeg(
+    Algorithm_LevelCurrentControl *controller,
+    float target_deg)
+{
+    if ((controller == NULL) || !controller->initialized ||
+        !isfinite(target_deg) ||
+        (absolute_value(target_deg) > controller->config.target_limit_deg)) {
+        return false;
+    }
+    controller->config.target_deg = target_deg;
+    return true;
+}
+
 void Algorithm_LevelCurrentControl_Stop(
     Algorithm_LevelCurrentControl *controller)
 {
@@ -189,6 +209,44 @@ bool Algorithm_LevelCurrentControl_GetRelativeAngleDeg(
         delta_rad += LEVEL_CURRENT_CONTROL_TWO_PI;
     }
     *relative_angle_deg = delta_rad * LEVEL_CURRENT_CONTROL_RAD2DEG;
+    return true;
+}
+
+bool Algorithm_LevelCurrentControl_ComputeRawRecoveryCurrent(
+    Algorithm_LevelCurrentControl *controller,
+    uint16_t raw,
+    float *current_a,
+    bool *recovery_active)
+{
+    float raw_direction = 0.0F;
+
+    if (current_a != NULL) {
+        *current_a = 0.0F;
+    }
+    if (recovery_active != NULL) {
+        *recovery_active = false;
+    }
+    if ((controller == NULL) || !controller->initialized ||
+        !controller->active || (current_a == NULL) ||
+        (recovery_active == NULL)) {
+        return false;
+    }
+
+    if (raw < controller->config.raw_min_limit) {
+        raw_direction = 1.0F;
+    }
+    else if (raw > controller->config.raw_max_limit) {
+        raw_direction = -1.0F;
+    }
+    else {
+        return true;
+    }
+
+    reset_runtime_state(controller);
+    *current_a = raw_direction *
+        controller->config.raw_recovery_current_a *
+        controller->config.current_polarity;
+    *recovery_active = true;
     return true;
 }
 
@@ -236,7 +294,8 @@ bool Algorithm_LevelCurrentControl_Update(
         reset_runtime_state(controller);
     }
 
-    effort = controller->config.kp_a_per_deg * controlled_error +
+    effort = controller->config.feedforward_current_a +
+        controller->config.kp_a_per_deg * controlled_error +
         controller->integral_current_a -
         controller->config.kd_a_per_rpm * speed_rpm;
     effort = limit_symmetric(effort, controller->config.current_limit_a);

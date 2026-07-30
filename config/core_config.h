@@ -14,7 +14,7 @@
 /* ------------------------------------------------------------------ */
 
 /* 网关控制 Task：周期 ms、tskIDLE_PRIORITY 之上的偏移、栈深(StackType_t)。 */
-#define GATEWAY_TASK_PERIOD_MS            UINT32_C(10)
+#define GATEWAY_TASK_PERIOD_MS            UINT32_C(1)
 #define GATEWAY_TASK_PRIORITY_OFFSET      2U
 #define GATEWAY_TASK_STACK_DEPTH          512U
 #define GATEWAY_TASK_NAME                 "gateway"
@@ -22,6 +22,10 @@
 /* ------------------------------------------------------------------ */
 /* ESP8266 无线（AP + TCP 服务器）                                       */
 /* ------------------------------------------------------------------ */
+
+/* 当前控制器不使用ESP8266。0时不初始化、不轮询、不收发，避免无线字节流
+ * 占用1 ms控制周期；仅改为1才恢复原AP/TCP链路。 */
+#define GATEWAY_ESP8266_ENABLE              0U
 
 /* ESP8266 建热点的 SSID / 密码（密码至少 8 字符，WPA2）。 */
 /* 本机可在被 Git 忽略的 local_secrets.h 中覆盖以下默认值。 */
@@ -59,9 +63,10 @@
 #define GATEWAY_KEY_DEBOUNCE_MS           UINT32_C(30)
 
 /* 临时五点机构标定模式：1时KEY依次切换水平附近5个电机相对角，第6次执行0 A + Disable；
- * 0时恢复正常的一次启动、一次停止。角度单位deg，均须位于TARGET_LIMIT内。
+ * 0时恢复正常的一次启动、一次停止。滚球闭环使用正常模式。
+ * 角度单位deg，均须位于TARGET_LIMIT内。
  * 以零点54379换算，五点约为raw=53579/53979/54379/54779/55179。 */
-#define GATEWAY_LEVEL_CALIBRATION_KEY_MODE 1U
+#define GATEWAY_LEVEL_CALIBRATION_KEY_MODE 0U
 #define GATEWAY_LEVEL_CALIBRATION_TARGETS_DEG \
     { -4.395F, -2.197F, 0.0F, 2.197F, 4.395F }
 
@@ -69,8 +74,8 @@
  * QD4310 是应答式：只有收到控制/NOP 帧才回反馈帧。 */
 #define GATEWAY_FEEDBACK_PERIOD_MS        UINT32_C(100)
 
-/* CAN 发送等待空邮箱的上限，单位 ms；网关任务周期 10ms，不允许长阻塞。 */
-#define GATEWAY_CAN_SEND_TIMEOUT_MS       UINT32_C(2)
+/* 500 Hz Task禁止等待CAN邮箱；0表示检查后立即成功或返回TIMEOUT。 */
+#define GATEWAY_CAN_SEND_TIMEOUT_MS       UINT32_C(0)
 
 /* QD4310 产品侧命令限幅：电流 A、速度 rpm。不得超过 Device 登记的 2 A / 800 rpm
  * 物理峰值；首轮保持额定值 1 A / 500 rpm。 */
@@ -86,35 +91,181 @@
 
 /* 控制器名义周期和新反馈超时，单位 ms。控制只在收到一帧新反馈时更新一次；
  * 名义周期参与积分计算，必须与当前 Gateway Task 周期一致。 */
-#define GATEWAY_LEVEL_CONTROL_PERIOD_MS    UINT32_C(10)
+#define GATEWAY_LEVEL_CONTROL_PERIOD_MS    UINT32_C(1)
 #define GATEWAY_LEVEL_FEEDBACK_TIMEOUT_MS UINT32_C(100)
 
-/* 最新VOFA最后连续使能段末100帧raw均为54379、标准差0、转速0；用户确认后将其设为新的机械水平零点。
- * 原始值范围0..65535；改变安装关系后必须重新标定。上电不再以当前位置覆盖该值。 */
+/* 旧机械水平零点继续固定为raw=54379；本轮IMU向上扫描不会覆盖它。
+ * TRIM_RAW=54329保留此前约-0.275电机度的工作微调。改变安装关系后必须重新标定。 */
 #define GATEWAY_LEVEL_ZERO_RAW             UINT16_C(54379)
+#define GATEWAY_LEVEL_TRIM_RAW             UINT16_C(54329)
+
+/* 2026-07-30绝对编码器正常控制边界。低raw侧49325由用户明确标记的第二端
+ * raw=49319向内收6 count；高raw侧59233保留此前落地侧约59293读数的内缩余量。
+ * 目标raw始终必须在范围内；允许从任意单圈raw启动，但反馈在范围外时暂停PID，
+ * 仅以RECOVERY_CURRENT向范围内部回收，位于边界时也只允许向内电流。 */
+#define GATEWAY_LEVEL_RAW_MIN_LIMIT         UINT16_C(49325)
+#define GATEWAY_LEVEL_RAW_MAX_LIMIT         UINT16_C(59233)
+#define GATEWAY_LEVEL_RAW_RECOVERY_CURRENT_A          0.10F
+
+/* KEY启动后先回到固定机械零点。位置/转速连续满足条件达到settle时间后，
+ * 才允许使用F407本地BMI088纵向加速度补偿。单位依次为电机deg、rpm、ms。 */
+#define GATEWAY_LEVEL_ZERO_ENTRY_TOL_DEG       1.00F
+#define GATEWAY_LEVEL_ZERO_ENTRY_MAX_RPM       1.00F
+#define GATEWAY_LEVEL_ZERO_ENTRY_SETTLE_MS UINT32_C(300)
+
+/* 向上运动分支的实测表：raw减小、杆执行端上升、双IMU/CH12示值增大。
+ * 初始化时在旧机械零点54379处分段插值并减去该示值，因此常量安装偏置不会被
+ * 当作杆角；只在58499..53577内插值，不外推。反向回差仍待下行扫描。 */
+#define GATEWAY_ROD_ANGLE_CALIBRATION_POINTS \
+    { \
+        { UINT16_C(58499), 20.640F }, \
+        { UINT16_C(57999), 21.160F }, \
+        { UINT16_C(57499), 21.650F }, \
+        { UINT16_C(56999), 22.110F }, \
+        { UINT16_C(56499), 22.570F }, \
+        { UINT16_C(55999), 23.030F }, \
+        { UINT16_C(55499), 23.460F }, \
+        { UINT16_C(54999), 24.000F }, \
+        { UINT16_C(54499), 24.470F }, \
+        { UINT16_C(53999), 25.080F }, \
+        { UINT16_C(53577), 25.450F }, \
+    }
 
 /* KEY启动闭环时允许的最大绝对转速，单位rpm；必须>=0。 */
 #define GATEWAY_LEVEL_START_MAX_SPEED_RPM  1.0F
 
-/* 相对固定机械零点的目标角、目标允许范围和机械硬限位，单位deg。
- * 固定零点标定为54379后，按用户要求将运行目标再减小约50count至54329；
- * |TARGET|<=TARGET_LIMIT<=HARD_LIMIT<=180。 */
-#define GATEWAY_LEVEL_TARGET_DEG           -0.275F
+/* LevelCurrentControl内部仍使用相对固定机械零点的电机角，单位deg；滚球侧先
+ * 通过实测杆角表逆查raw，再换算成此角域。 */
 #define GATEWAY_LEVEL_TARGET_LIMIT_DEG     85.0F
 #define GATEWAY_LEVEL_HARD_LIMIT_DEG       90.0F
 
+/* ------------------------------------------------------------------ */
+/* 球位置/速度外环                                                      */
+/* ------------------------------------------------------------------ */
+
+/* 全链路统一物理坐标：
+ * - 杆轴x正方向从右侧固定转轴指向左侧执行端；水管几何中心为x=0 mm；
+ * - 杆角theta正方向表示左侧执行端抬高；实测为theta增大时QD4310 raw减小；
+ * - 相机画面右正，而画面右侧是固定转轴，因此x=-x_camera；
+ * - BMI088安装为Sensor X朝车头；两次向车头手推的主动作实测均为处理后a_x先正后负；
+ * - 执行端位于车头，车辆向前加速时应降低执行端，即theta<0；因此BMI088正向
+ *   a_x通过前馈极性-1映射成负theta、raw增大；
+ * - 实测负电流使raw减小并抬高执行端，故电机电流极性保持+1。
+ * 这些定义统一视觉、双IMU杆角表、底盘IMU和无刷电机的符号；改装任何器件后
+ * 必须重新核对，不能在上层临时叠加负号。 */
+#define GATEWAY_BALL_VISUAL_CONTROL_ENABLE  1U
+#define GATEWAY_BALL_MEASUREMENT_POLARITY  -1.0F
+#define GATEWAY_BALL_TARGET_MM               0.0F
+
+/* a_cmd=Kp*(target-x)-Kd*v。单位分别为1/s^2、1/s；速度一阶滤波tau为s。
+ * 首版为低动态台架初值，需由真实VIS日志整定。 */
+#define GATEWAY_BALL_POSITION_KP_PER_S2      1.2F
+#define GATEWAY_BALL_VELOCITY_KD_PER_S       1.8F
+#define GATEWAY_BALL_VELOCITY_FILTER_TAU_S   0.080F
+#define GATEWAY_BALL_MAX_VELOCITY_DT_MS      UINT32_C(100)
+
+/* 实心钢球逆模型参数与球反馈对称杆角限幅。TOTAL限制视觉反馈与BMI088补偿相加后的
+ * 动态偏移；水平trim在该限幅之后相加，因此TOTAL不是相对机械零点的绝对杆角边界。
+ * 当前取0.60deg，避免两个已限幅动态分量叠加后越界。 */
+#define GATEWAY_BALL_GRAVITY_MM_S2            9807.0F
+#define GATEWAY_BALL_INERTIA_RATIO             0.4F
+#define GATEWAY_BALL_ROD_ANGLE_LIMIT_DEG       0.60F
+#define GATEWAY_TOTAL_ROD_COMMAND_LIMIT_DEG    0.60F
+
+/* 三状态[x,v,模型残差加速度]固定滞后Kalman。代码已接入，但在用户审核
+ * 公式、极性、延迟和Q/R前必须保持0，此时完全沿用原VIS差分速度路径。 */
+#ifndef GATEWAY_BALL_KALMAN_ENABLE
+#define GATEWAY_BALL_KALMAN_ENABLE                     0U
+#endif
+#define GATEWAY_BALL_KALMAN_POSITION_R_MM2             9.0F
+#define GATEWAY_BALL_KALMAN_MODEL_ACCEL_Q_MM2_S3   90000.0F
+#define GATEWAY_BALL_KALMAN_BIAS_WALK_Q_MM2_S4_S   10000.0F
+#define GATEWAY_BALL_KALMAN_INITIAL_POSITION_P_MM2     25.0F
+#define GATEWAY_BALL_KALMAN_INITIAL_VELOCITY_P_MM2_S2 90000.0F
+#define GATEWAY_BALL_KALMAN_INITIAL_BIAS_P_MM2_S4  250000.0F
+#define GATEWAY_BALL_KALMAN_INNOVATION_GATE_SIGMA       5.0F
+#define GATEWAY_BALL_KALMAN_MAX_POSITION_MM            150.0F
+#define GATEWAY_BALL_KALMAN_MAX_VELOCITY_MM_S         1500.0F
+#define GATEWAY_BALL_KALMAN_MAX_BIAS_MM_S2            1000.0F
+#define GATEWAY_BALL_KALMAN_TRUST_POSITION_P_MM2        25.0F
+#define GATEWAY_BALL_KALMAN_TRUST_VELOCITY_P_MM2_S2 100000.0F
+#define GATEWAY_BALL_KALMAN_MAX_PREDICT_STEP_MS UINT32_C(10)
+#define GATEWAY_BALL_KALMAN_MIN_ACCEPTED_VIS          UINT32_C(3)
+
+/* 底盘三状态[v,a,IMU零偏]融合器。首轮参数仅依据100 Hz轮速/IMU数据源和旧电机响应
+ * 预测：规划输入纯延迟30 ms、一阶时间常数0.12 s。代码接入但必须保持0，直到ACC_MEAS
+ * 的轴向、重力补偿、轮速尺度、延迟和Q/R由实车日志确认。 */
+#ifndef GATEWAY_CHASSIS_ACCEL_FUSION_ENABLE
+#define GATEWAY_CHASSIS_ACCEL_FUSION_ENABLE                 0U
+#endif
+#define GATEWAY_CHASSIS_FUSION_PLAN_GAIN                  1.0F
+#define GATEWAY_CHASSIS_FUSION_RESPONSE_TAU_S            0.12F
+#define GATEWAY_CHASSIS_FUSION_PLAN_DELAY_MS       UINT32_C(30)
+#define GATEWAY_CHASSIS_FUSION_WHEEL_R_MM2_S2           225.0F
+#define GATEWAY_CHASSIS_FUSION_IMU_R_MM2_S4           14400.0F
+#define GATEWAY_CHASSIS_FUSION_VELOCITY_Q_MM2_S3        400.0F
+#define GATEWAY_CHASSIS_FUSION_ACCEL_Q_MM2_S5        160000.0F
+#define GATEWAY_CHASSIS_FUSION_BIAS_Q_MM2_S5              4.0F
+#define GATEWAY_CHASSIS_FUSION_INITIAL_VELOCITY_P_MM2_S2 900.0F
+#define GATEWAY_CHASSIS_FUSION_INITIAL_ACCEL_P_MM2_S4  10000.0F
+#define GATEWAY_CHASSIS_FUSION_INITIAL_BIAS_P_MM2_S4    6400.0F
+#define GATEWAY_CHASSIS_FUSION_GATE_SIGMA                  5.0F
+#define GATEWAY_CHASSIS_FUSION_MAX_VELOCITY_MM_S         2000.0F
+#define GATEWAY_CHASSIS_FUSION_MAX_ACCEL_MM_S2           3000.0F
+#define GATEWAY_CHASSIS_FUSION_MAX_BIAS_MM_S2            1000.0F
+#define GATEWAY_CHASSIS_FUSION_TRUST_ACCEL_P_MM2_S4     40000.0F
+#define GATEWAY_CHASSIS_FUSION_MAX_PREDICT_STEP_MS UINT32_C(10)
+#define GATEWAY_CHASSIS_FUSION_MAX_MEAS_AGE_MS     UINT32_C(30)
+#define GATEWAY_CHASSIS_FUSION_MIN_WHEEL_SAMPLES   UINT32_C(3)
+#define GATEWAY_CHASSIS_FUSION_MIN_IMU_SAMPLES     UINT32_C(3)
+
+/* BMI088本地纵向加速度预处理。实车动态标定确认Sensor Y平行车身，向前
+ * 加速时Ay先增大，因此车身向前正方向直接取+Sensor Y。上电后前300个
+ * 连续样本求静止Ay零偏并冻结；完成前不向电机控制提交加速度。1kHz下约
+ * 需300ms。控制链不使用Pitch、Gyro Y或Z轴重力补偿。 */
+#define GATEWAY_BMI088_ACCEL_Y_BIAS_CALIBRATION_SAMPLES UINT32_C(300)
+/* 纵向输出先用1kHz RBJ陷波抑制实测9.3~13.5Hz机构回灌，再使用两级相同
+ * 的精确EMA，alpha=1-exp(-dt/tau)。第二组VOFA确认电机失能时Ay噪声约
+ * 30mm/s^2，使能后约500~600mm/s^2；中心11.7Hz、Q=1.2兼顾抑振与1~3Hz响应。 */
+#define GATEWAY_BMI088_ACCEL_NOTCH_SAMPLE_HZ       1000.0F
+#define GATEWAY_BMI088_ACCEL_NOTCH_CENTER_HZ         11.7F
+#define GATEWAY_BMI088_ACCEL_NOTCH_QUALITY_FACTOR     1.2F
+#define GATEWAY_BMI088_ACCEL_FILTER_STAGE_TAU_S       0.00225F
+#define GATEWAY_BMI088_ACCEL_MAX_ABS_OUTPUT_MM_S2    40000.0F
+#define GATEWAY_BMI088_ACCEL_MAX_SAMPLE_STEP_MS   UINT32_C(5)
+#define GATEWAY_BMI088_ACCEL_MAX_INPUT_AGE_MS     UINT32_C(10)
+
+/* 动态实测：Sensor Y平行车身，向前加速的主峰为正；Sensor Z为重力轴。 */
+#define GATEWAY_BMI088_ACCEL_Y_SIGN                    1.0F
+
+/* 底盘加速度补偿：theta=b*polarity*atan2(a_forward,g)。KEY启动并完成零点稳定后，
+ * 当前版本只使用F407本地BMI088经启动零偏和两级2.25ms低通处理的+Y测量，完全剔除
+ * G3519/ICM45686的CAR加速度。+Y朝车头时向前加速度a_forward>0，极性-1将其映射为
+ * theta<0、raw增大并降低车头执行端。
+ * 新VOFA中0.50增益仍有70.57%时间撞限幅，因此首轮降至0.20；离线回放预计
+ * 静车饱和率约1.6%。补偿与视觉+BMI088动态和均限0.60deg，加上水平trim后的
+ * 最终命令仍受杆角表和绝对raw边界约束。 */
+#define GATEWAY_CHASSIS_FF_GAIN                0.20F
+#define GATEWAY_CHASSIS_FF_POLARITY           (-1.0F)
+#define GATEWAY_CHASSIS_FF_ANGLE_LIMIT_DEG      0.60F
+#define GATEWAY_ACC_PREVIEW_LEAD_MS            UINT32_C(0)
+#define GATEWAY_ACC_TRANSPORT_BOUND_MS         UINT32_C(0)
+
 /* 实机水平闭环参数：角度 P、电流积分 I、转速反馈阻尼 D。
  * 单位依次为 A/deg、A/(deg*s)、A/rpm；增益均需>=0。
- * KP=0.030和0.020实机均振动明显；按用户要求从0.015小幅提高到0.017，KD保持不变。 */
+ * 0.8s短测表明0.030能够快速抬升，但目标附近机构需要约-0.10A静态承重电流；
+ * 单纯提高P只会以静差换取承重并增加振动风险。因此P退回0.017，并用独立静态
+ * 前馈承担约-0.09A，余下误差由现有最多-0.01A积分补足。 */
 #define GATEWAY_LEVEL_KP_A_PER_DEG          0.017F
 #define GATEWAY_LEVEL_KI_A_PER_DEG_S        0.0010F
 #define GATEWAY_LEVEL_KD_A_PER_RPM          0.0010F
+#define GATEWAY_LEVEL_FEEDFORWARD_CURRENT_A (-0.067F)
 
 /* 角误差限幅、死区和积分作用区，单位 deg。先限幅再扣除死区；仅在
  * |原始误差|<=INTEGRAL_ZONE 时积分，离开该区立即清积分。 */
-#define GATEWAY_LEVEL_ERROR_LIMIT_DEG        8.0F
+#define GATEWAY_LEVEL_ERROR_LIMIT_DEG       10.0F
 #define GATEWAY_LEVEL_DEADBAND_DEG           0.20F
-#define GATEWAY_LEVEL_INTEGRAL_ZONE_DEG      1.0F
+#define GATEWAY_LEVEL_INTEGRAL_ZONE_DEG      2.0F
 
 /* 积分分量和最终电流的对称限幅，单位 A。控制电流限幅不得超过 Device
  * 产品侧电流限幅；POLARITY 只能是 +1 或 -1，用于实机确认电机方向。 */
@@ -126,12 +277,42 @@
 #error "Level zero raw value must fit uint16_t"
 #endif
 
+#if GATEWAY_LEVEL_RAW_MIN_LIMIT >= GATEWAY_LEVEL_RAW_MAX_LIMIT
+#error "Level raw limits must be strictly increasing"
+#endif
+
+#if (GATEWAY_LEVEL_ZERO_RAW < GATEWAY_LEVEL_RAW_MIN_LIMIT) || \
+    (GATEWAY_LEVEL_ZERO_RAW > GATEWAY_LEVEL_RAW_MAX_LIMIT)
+#error "Level zero raw value must be inside manual raw limits"
+#endif
+
+#if (GATEWAY_LEVEL_TRIM_RAW < GATEWAY_LEVEL_RAW_MIN_LIMIT) || \
+    (GATEWAY_LEVEL_TRIM_RAW > GATEWAY_LEVEL_RAW_MAX_LIMIT)
+#error "Level trim raw value must be inside manual raw limits"
+#endif
+
 #if GATEWAY_LEVEL_CALIBRATION_KEY_MODE > 1U
 #error "Level calibration key mode must be 0 or 1"
 #endif
 
+#if GATEWAY_BALL_VISUAL_CONTROL_ENABLE > 1U
+#error "Ball visual control enable must be 0 or 1"
+#endif
+
+#if GATEWAY_BALL_KALMAN_ENABLE > 1U
+#error "Ball Kalman enable must be 0 or 1"
+#endif
+
+#if GATEWAY_CHASSIS_ACCEL_FUSION_ENABLE > 1U
+#error "Chassis acceleration fusion enable must be 0 or 1"
+#endif
+
 #if GATEWAY_LEVEL_CONTROL_PERIOD_MS != GATEWAY_TASK_PERIOD_MS
 #error "Level controller period must match the Gateway Task period"
+#endif
+
+#if GATEWAY_CAN_SEND_TIMEOUT_MS >= GATEWAY_TASK_PERIOD_MS
+#error "CAN send timeout must be shorter than the Gateway Task period"
 #endif
 
 /* ------------------------------------------------------------------ */
@@ -144,12 +325,23 @@
 
 /* 心跳发送周期与离线超时，单位 ms。超时应不小于一个心跳周期。 */
 #define PEER_LINK_HEARTBEAT_PERIOD_MS     UINT32_C(500)
+#define PEER_LINK_DEBUG_PERIOD_MS         UINT32_C(20)
 #define PEER_LINK_OFFLINE_TIMEOUT_MS      UINT32_C(1500)
 
-/* 现有 10 ms Task 每周期最多解析的 USART1 字节数，范围 1..128。 */
+/* 现有1 ms Task每周期最多解析的USART1字节数，范围1..128。 */
 #define PEER_LINK_RX_BYTES_PER_STEP       128U
 
-/* 主 QD4310 遥测送往对端的周期，单位 ms；BUSY 时整帧丢弃。 */
-#define PEER_LINK_TELEMETRY_PERIOD_MS     UINT32_C(20)
+/* ------------------------------------------------------------------ */
+/* MaixCAM Pro视觉链路（USART2 PA2/PA3候选接线）                         */
+/* ------------------------------------------------------------------ */
+
+#define VISION_LINK_UART_INDEX            2U
+#define VISION_LINK_RX_BYTES_PER_STEP     128U
+#define VISION_LINK_SESSION_TIMEOUT_MS    UINT32_C(100)
+#define VISION_LINK_MEASUREMENT_MAX_AGE_MS UINT32_C(100)
+/* 47字节VIS在115200 8N1的纯串行时间向上取5ms。相机曝光/流水线固定延迟
+ * 尚未实测，所以CAL先置0，只能用于功能调试。 */
+#define VISION_LINK_CAMERA_PIPELINE_CAL_MS UINT32_C(0)
+#define VISION_LINK_TRANSPORT_BOUND_MS     UINT32_C(5)
 
 #endif

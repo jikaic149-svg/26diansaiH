@@ -10,19 +10,67 @@ typedef struct {
     float current_a;
     float speed_rpm;
     uint16_t single_turn_angle_raw;
+    uint16_t target_single_turn_angle_raw;
     float single_turn_angle_rad;
+    float command_current_a;
     bool online;
+    float rod_command_deg;
+    float ball_position_mm;
+    float ball_velocity_mm_s;
+    float ball_acceleration_bias_mm_s2;
+    float ball_position_variance_mm2;
+    float ball_velocity_variance_mm2_s2;
+    int32_t chassis_acceleration_mm_s2;
+    int32_t planned_chassis_acceleration_mm_s2;
+    float chassis_velocity_estimate_mm_s;
+    float chassis_imu_bias_estimate_mm_s2;
+    float chassis_acceleration_variance_mm2_s4;
+    bool ball_measurement_valid;
+    bool ball_velocity_valid;
+    bool ball_estimator_trusted;
+    bool chassis_acceleration_valid;
+    bool chassis_acceleration_fusion_trusted;
+    bool rod_angle_saturated;
+    bool motor_raw_limit_blocked;
+    uint8_t level_control_phase;
+    float chassis_compensation_angle_deg;
+    uint32_t ball_estimator_innovation_reject_count;
+    uint32_t chassis_fusion_innovation_reject_count;
 } APP_Gateway_Telemetry;
+
+typedef struct {
+    bool ball_measurement_valid;
+    uint16_t ball_sequence;
+    uint32_t ball_sample_ms;
+    int16_t ball_position_mm;
+    uint32_t ball_measurement_age_ms;
+
+    bool chassis_acceleration_valid;
+    int32_t acceleration_now_mm_s2;
+    int32_t acceleration_next_mm_s2;
+    uint16_t acceleration_next_after_ms;
+    uint32_t acceleration_received_at_ms;
+
+    bool chassis_motion_measurement_valid;
+    uint16_t chassis_motion_sequence;
+    uint32_t chassis_motion_sample_ms;
+    uint32_t chassis_motion_age_ms;
+    int32_t measured_chassis_acceleration_mm_s2;
+    int32_t measured_chassis_wheel_speed_mm_s;
+    bool measured_chassis_acceleration_valid;
+    bool measured_chassis_wheel_speed_valid;
+} APP_Gateway_ControlInput;
 
 /* TCP<->CAN 双向网关。
  *
  * 下行（TCP 客户端 -> CAN/QD4310），Packet 帧 TYPE=CMD，payload 为 ASCII：
- *   "<motor_id>,ENABLE"          使能
+ *   "<motor_id>,ENABLE"          使能（仅非主电机）
  *   "<motor_id>,DISABLE"         失能
- *   "<motor_id>,CURRENT,<A>"     电流模式，单位 A
- *   "<motor_id>,SPEED,<rpm>"     速度模式，单位 rpm
- *   "<motor_id>,LOWSPEED,<rpm>"  低速模式，单位 rpm
+ *   "<motor_id>,CURRENT,<A>"     电流模式，单位 A（仅非主电机）
+ *   "<motor_id>,SPEED,<rpm>"     速度模式，单位 rpm（仅非主电机）
+ *   "<motor_id>,LOWSPEED,<rpm>"  低速模式，单位 rpm（仅非主电机）
  *   "<motor_id>,NOP"             仅请求一帧反馈
+ * 主电机只接受NOP/DISABLE；使能和控制只能由带绝对raw保护的KEY闭环发出。
  *
  * 上行（CAN 反馈 -> TCP），TYPE=FB，payload：
  *   "<motor_id>,<en>,<current_A>,<speed_rpm>,<angle_rad>,<online>"
@@ -32,12 +80,15 @@ typedef struct {
 
 bool APP_Gateway_Init(uint32_t now_ms);
 void APP_Gateway_Step(
-    uint32_t now_ms, APP_Gateway_Telemetry *primary_telemetry);
+    uint32_t now_ms,
+    const APP_Gateway_ControlInput *control_input,
+    APP_Gateway_Telemetry *primary_telemetry);
 
 /* Toggle the first configured QD4310 between absolute-angle outer-loop hold
  * and Disable. Level hold commands only QD4310 CURRENT mode. The first start
  * uses the configured fixed absolute zero and requires fresh, stopped,
- * disabled feedback; stopping sends zero current before Disable. */
+ * disabled feedback. Any single-turn raw may start; an off-range start first
+ * uses bounded inward-only recovery. Stopping sends zero before Disable. */
 bool APP_Gateway_TogglePrimaryMotor(uint32_t now_ms);
 
 /* Temporary five-point mechanism calibration: first call starts at point 1,

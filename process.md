@@ -862,7 +862,651 @@
   复位恢复运行后COM3新鲜反馈仍为enabled=0、速度0、电流约-1 mA、raw=59099。
 - 涉及文件：仅更新`process.md`；保留用户/其他Agent的`COOPERATION.md`改动，不跟踪或提交
   `vofa+.csv`。
-- 已知限制与待确认：`CH12`仍含IMU安装零偏，尚未用精准角度仪确定真水平`beta0`；本轮
-  只有向上扫，尚不能量化机械回差。下一步把精准角度仪固定在杆面刚性平面、IMU留在同一
-  杆面，在中间工作角附近同步记录真角、`CH12`与raw以求`beta0`，再从高位向下反扫同一批
-  节点；补齐绝对零偏和回差后才能冻结最终绝对杆角分段查表。
+- 用户纠正：`CH12=ICM45686 pitch+JY61P pitch`。此前直接写成“beta0未确定”过强，已否决。
+  若ICM是车体对世界pitch、JY是杆对车体的相对pitch且两者轴/符号一致，相加可以得到杆对
+  世界角；若JY本身也是对世界pitch，相加会重复计入车体倾角。当前源码事实仍是ICM轴映射
+  未冻结且JY只tare yaw、未tare pitch，所以尚不能仅凭字段名证明CH12是真水平绝对角。
+- 当前相对控制不等待上述判别：在旧机械参考`raw=54379`处把CH12插值为`24.6164°`并相减，
+  等效把该点定义为相对杆角0°，常量安装偏置不会进入相对命令。绝对角最小验证仍为“固定
+  车体只抬杆”与“锁杆随车体整体倾斜”两步；反向扫同一节点后才能量化回差。
+
+## 2026-07-30：F407滚球闭环、ACC/VIS接入及烧录
+
+- 修改原因：用户要求补齐ACC消费、实测分段查表和球位置/速度闭环，并要求把AgentB与
+  AgentA/AgentC的协作边界写入`COOPERATION.md`；随后明确授权烧录。
+- 最终决策：KEY标定模式恢复为0。正常10 ms Task依次推进PeerLink和VisionLink，再执行
+  `VIS -> x/v -> 位置/速度PD -> 实心球逆模型杆角`、
+  `ACC -> 当前/下一规划加速度选择 -> 前馈杆角`、
+  `trim+反馈+前馈 -> 上行实测逆表 -> raw -> 电机相对角 -> CURRENT外环`。连续滚球目标
+  使用`SetTrackingTargetDeg()`，不再每10 ms清积分；旧`SetTargetDeg()`仅供标定换点。
+- 杆角映射：采用2026-07-30的11点向上表，在此前确认的`ZERO_RAW=54379`处减去插值示值
+  `24.6164°`，不是另立零点；杆角范围约`-3.9764°..+0.8336°`，区间外目标饱和到端点，
+  禁止外推。工作微调`TRIM_RAW=54329`约为电机角`-0.275°`、杆角`+0.061°`。
+- 球环初值：`a_cmd=1.2*(x_target-x)-1.8*v`，速度按真实相机`sample_ms`差分并以
+  `tau=0.080 s`一阶滤波；实心球使用`theta=-asin(1.4*a_cmd/9807)`。首版对称限幅从
+  `0.70°`保守收至`0.60°`，trim后距上行表正端约`0.173°`、约197 raw count；理想10 cm
+  bang-bang时间约2.34 s只用于余量检查，不是实物成绩。
+- ACC协议：F407接收六字段
+  `node_id,sample_ms,a_now,a_next,next_after_ms,valid`，使用独立序号、远端样本前半区规则、
+  单槽Latest Value和本地年龄；达到50 ms即失效。HB离线恢复或uptime非回绕倒退时清旧
+  ACC会话，允许G3519独立重启后从0恢复。语法范围`±40000 mm/s²`不是执行范围；当前
+  `GATEWAY_CHASSIS_FF_GAIN=0`、preview/transport=0，故链路和公式已接通但前馈尚未施加。
+- VIS链路：候选USART2为PA2 TX/PA3 RX、115200 8N1、字节中断环；Payload为
+  `sample_ms,proc_age_ms,position_mm,flags`，拒绝旧/重复序号、预测/无标定/clamp数据，
+  保守年龄达到100 ms即失效。VIS失效只清球反馈回trim，ACC失效只清前馈，均不自动失能。
+  相机坐标极性暂取`-1`，实物方向未冻结。
+- 涉及文件：新增`RodAngleMap`、`BallPositionControl`、`VisionLink`及测试/README；修改
+  `PeerLink`、`LevelCurrentControl`、`Gateway`、`Task`、`BSP`、`CMakeLists.txt`、
+  `core_config.h`、根README、板间协议、本记录和`COOPERATION.md`。保留既有协作内容和
+  未跟踪`vofa+.csv`，未执行Git提交或推送。
+- 验证方式和结果：五组主机测试均以`-Wall -Wextra -Werror`通过；Debug/Release均
+  clean-first完整链接零警告，FLASH/RAM分别为`27916/14000 B`、`23804/13984 B`；
+  `git diff --check`通过。Debug BIN 27916 B，SHA-256为
+  `D89F452A900CBDD2C3B241209E9F56BA8927DDB370383E4999D656B5115DC8EF`。
+- 烧录与安全状态：按`VID:PID 0416:5051`锁定CMSIS-DAP并识别Cortex-M4、DEV_ID
+  `0x413`、512 KiB Flash。烧录前完整回读27916 B已与本轮Debug BIN哈希一致；匹配新ELF
+  后的SWD快照确认主程序/Task/控制/Peer/Vision故障均0、Task Ready=1、闭环active=0、
+  命令门/反馈使能=0、速度/电流=0，QD4310反馈当前离线。D盘xPack OpenOCD随后完成编程、
+  `Verified OK`和复位；复位后再次SWD回读上述故障与使能状态仍为0，Peer/Vision初始化成功。
+  未按KEY、未启动机构。较早一次用旧ELF地址的快照读到栈填充值，已判无效且未作为结论。
+- 已知限制：只有上行表，没有下行回差；双IMU组合角能否代表真水平仍取决于两个pitch的
+  坐标/参考定义。G3519 ACC发送端和Maix VIS发送端不在本仓库，USART2接线、相机极性、
+  真实视觉年龄、工作区双向小阶跃、带球负载和扰动恢复均未验证。旧大阶跃只支持约
+  `0.10 s`的10%～90%上升、约6%超调和约`0.30..0.34 s`稳定量级，不能替代小信号验收。
+  现有`-220 mm/s²`制动理论需约`+1.285°`前馈，超过表正端，不能声称所有加速度可补偿。
+- 待确认：AgentA实现并验证G3519六字段ACC发送；AgentC实现VIS发送并完成九点/端点标定；
+  冻结USART2接线和两条极性；从高位向下扫同一11点并做工作点双向小阶跃。完成这些证据后
+  才能小步启用`b>0`并整定球环。
+
+## 2026-07-30：500 Hz调度与默认关闭的三状态球Kalman
+
+- 修改原因：用户将F407本地控制频率冻结为500 Hz，并要求先完成基于当前杆球模型、
+  VIS和G3519加速度的三状态Kalman代码，但审核逻辑与公式前不启用。
+- 最终决策：Gateway Task和电机角外环名义周期由10 ms改为2 ms；FreeRTOS仍为1 kHz
+  Tick、单一静态Task、`idle+2`优先级和512 `StackType_t`栈。CAN邮箱等待改为`0 ms`单次
+  非阻塞检查，QD4310 Device允许该值；无空邮箱仍沿用现有发送失败停机语义。
+- 跨板频率边界：现有115200 8N1的六字段ASCII `ACC`在100 Hz约占单向理论线速49%；
+  500 Hz需约280 kbit/s，不可直接提频。本轮保持G3519 100 Hz产生带`sample_ms`的
+  `a_now/a_next/next_after_ms`，F407在500 Hz间持Latest Value并按倒计时切换。若后续要求
+  500 Hz全新帧，须新建协议版本并升至少460800、建议921600或重设定长二进制帧。
+- Kalman模型：状态为`X=[x_mm,v_mm_s,b_mm_s2]`；实心球比例`kappa=5/7`，
+  `a_model=-kappa*(g*sin(theta_rod)+a_chassis*cos(theta_rod))`，
+  `x+=v*dt+0.5*(a_model+b)*dt^2`、`v+=(a_model+b)*dt`、`b`按随机游走。原始观测只是
+  VIS毫米位置；杆角来自QD4310 raw经11点表；底盘输入首版为G3519规划ACC，不将
+  其写成IMU实测。`b`无独立传感器，由VIS创新估计慢变模型残差。
+- 延迟和可信度：使用64个静态快照，2 ms下覆盖约126 ms。VIS按
+  `proc_age_ms+接收/串行年龄`在历史时刻校正，然后按已保存的输入重放；观测落在快照
+  之间时拆步。连续白加速度Q离散为`dt^3/3、dt^2/2、dt`；创新用
+  `nu^2/S<=25`的5σ门控。至少接受3帧VIS、最新观测低于100 ms且`Pxx/Pvv`达标才
+  输出trusted状态。过期、杆角表外或不可信时球反馈归零，不自动Disable。
+- 启用边界：`GATEWAY_BALL_KALMAN_ENABLE=0`已冻结；当前固件仍使用VIS真实`sample_ms`
+  差分+一阶滤波的球速基线，Kalman不会改变杆角或电机命令。原始VIS/杆角/ACC日志、
+  三条极性、固定延迟和Q/R未整定前不得改为1。加速度计噪声问题采用“规划ACC主输入，
+  未建模误差由Q/b吸收”；若后续增加IMU/轮速融合实测，新建独立`ACC_MEAS`而不混用规划`ACC`。
+- 内存与文件：新增`BallStateEstimator`与主机测试，增加`BallPositionControl_SetEstimatedState()`，
+  修改Gateway、QD4310非阻塞配置/测试、`core_config.h`、CMake、README、`COOPERATION.md`和本记录。
+  未新增Task、ISR、DMA、动态内存、ACK或重发。估计器历史为静态RAM；Gateway栈深保持不变。
+- 验证方式和结果：LevelCurrentControl、RodAngleMap、BallPositionControl、BallStateEstimator、
+  VisionLink、PeerLink/ACC和QD4310七组主机测试以`-Wall -Wextra -Werror`通过；覆盖刚体预测、
+  整快照/半步延迟重放、首帧年龄传播、极性、创新拒绝、trusted和超时重置。Debug/Release
+  clean-first链接零警告，FLASH/RAM为`28996/16968 B`和`24724/16960 B`。独立强制
+  `GATEWAY_BALL_KALMAN_ENABLE=1`的Debug链接也通过，为`36324/16968 B`；最终配置已恢复0。
+  `git diff --check`通过。最终Debug BIN 28996 B，SHA-256为
+  `8FBB7B6F7F07ED9705580EA420386F6D9940BFA215B69C195815F94FFB463D10`。
+- 烧录和实物验证：按既定`VID:PID 0416:5051`以200 kHz尝试只读识别时，OpenOCD报
+  `unable to find a matching CMSIS-DAP device`；Windows也未枚举到该设备。因此本轮未擦除、未编程、
+  未复位目标，也未测`g_TASK_Heartbeat`或QD4310新反馈频率。只能宣称名义500 Hz，不能宣称实测
+  Task/电机闭环500 Hz。
+- 已知限制：当前ACC仍是规划值且G3519发送端未在本仓库；VIS发送、相机延迟/极性、
+  Q/R、实际杆角极性、带球模型残差、Task WCET/抖动、栈高水位、CAN错误计数和QD4310实际响应频率
+  均未实物验证。只有上行杆角表且正端余量有限，这些限制不因Kalman插值而消失。
+- 待确认：用户先审核三状态公式、坐标和输入语义；Agent A交付100 Hz规划ACC与计数/
+  时延证据，Agent C交付原始VIS及延迟/标定日志。重新连接`0416:5051`后才能烧录并分别测
+  Task心跳与QD反馈频率；完成离线回放和Q/R整定、用户再次确认后才能将Kalman开关改为1。
+
+## 2026-07-30：F407 / G3519 与 MaixCAM2 通信复测
+
+- 测试边界：用户要求重新测试通信并顺带检查MaixCAM2回路。本轮未烧录、未复位、未按KEY、
+  未启动电机；仅按指定DAPLink读取G3519运行计数。F407的HID CMSIS-DAP
+  `VID:PID 0416:5051`仍未被Windows枚举，因此没有读取F407侧接收计数。
+- 固件身份：G3519 Bring-up Debug BIN与`MSPM0G3519.acc.readback.bin`均为79216 B，
+  SHA-256同为`48B3F2DEDA506255FF07147CA516846E8DFF40DA22C583D83A0967424088452B`，
+  与当前包含`ACC/ACC_MEAS`发送端的ELF匹配。
+- 运行结果：两次快照的G3519本地时间为31300 ms和64510 ms，33.210 s有效运行窗口内，
+  HB发送/接收均增加66，ACC发送增加3321（100.00 Hz），ACC_MEAS发送增加1661
+  （约50.02 Hz）；HB、ACC、ACC_MEAS发送丢弃和发送错误、PeerLink Step错误、Task/Main/
+  Bring-up故障均为0，链路保持online。F407远端uptime持续增长，证明F407正在运行且
+  F407 TX -> G3519 RX心跳通路成立；G3519 TX -> F407 RX的HB/ACC/ACC_MEAS仍须F407侧计数确认。
+- 调试侵入说明：第二次GDB读取期间G3519相对F407少运行约11.29 s，并新增1次硬件overrun和
+  1次parser error；这是在线halt窗口内UART仍收字节造成的测试侵入，不能算正常运行错误。
+  启动阶段已有2164字节软件环溢出且在两次快照间未增长；后续不再用长时间halt做频率采样。
+- MaixCAM2结果：USB复合设备`VID:PID 2D95:6012`已连接，序列号
+  `10AE6D1MQF004P4`；其MTP接口处于Problem Code 19，ADB未枚举设备。当前源码启用
+  `/dev/ttyS2`、B0 TX/B1 RX、115200 8N1和最多50 Hz VIS，毫米标定有效位仍关闭；
+  `VOFA_UDP_ENABLED=False`，电脑1347端口5 s无包符合配置，不能作为视觉Task未运行的证据。
+  因F407探针缺失且没有UART逻辑分析仪抓帧，本轮不能宣称MaixCAM2 -> F407 VIS实收或
+  F407 -> MaixCAM2 VST回传通过。
+- 下一步：插回`0416:5051`后，在不长停CPU的短快照中读取F407的HB、ACC、ACC_MEAS、VIS、
+  VST及UART/DMA错误计数；同时修复MaixCAM2 MTP/ADB访问或接逻辑分析仪，连续抓至少10 s
+  VIS/VST，核对50 Hz上限、序号、CRC、年龄和无效标定flags。
+
+## 2026-07-30：插回F407探针后的通信闭环复测
+
+- 探针与构建：Windows已枚举F407 CMSIS-DAP `0416:5051`及COM3，OpenOCD识别
+  Cortex-M4、DEV_ID尾码`0x413`和512 KiB Flash。重建时发现三状态估计器`.c`与旧二状态
+  `.h`不同步；仅补齐状态bias、协方差`p02/p12/p22`和对应配置字段后，Debug完整链接通过，
+  FLASH/RAM为28732/17600 B。BIN SHA-256为
+  `FBF3F17C10080BE5D8CEA0776690D353222509BF6D2EF85FEC57127ECB6CF8B1`。
+- 烧录：用户再次明确允许烧录；当前Debug ELF已编程、校验成功并复位。测试期间未按KEY、
+  未发送电机启动命令，主程序/Task故障均为0。
+- F407运行快照：`g_TASK_Heartbeat=48932`、`g_TASK_NowMs=97862`，实测Task约500.0 Hz；
+  PeerLink Ready/online，HB TX=196、RX=116，远端会话复位1次，100 Hz业务帧接收3216；
+  HB发送drop/error、业务Payload/来源/重复/旧序号/旧样本、Step、UART overflow/overrun/
+  framing/parity/DMA错误均为0。单个parser error与调试/远端重启窗口同时出现，不影响online。
+- 协议真值修正：15:11后G3519工作树和Debug ELF被后续版本切回七字段`CAR`，当前F407也
+  只解析`CAR`，所以3216是CAR接收计数，不是ACC。CAR携带轮速、ICM X/Z比力和Pitch角速度；
+  不携带规划`a_now/a_next/next_after_ms`。F407当前`Task_MakeControlInput()`只取VIS，未把CAR
+  送入Gateway，因此当前滚球控制没有使用任何底盘加速度；此前ACC/ACC_MEAS发送和融合链
+  已被后续并发版本覆盖，不能写成仍在线。
+- MaixCAM2回路：VisionLink Ready且故障0，但`vis_rx_count=0`、RX字节缓冲为0，所有UART/
+  DMA和解析错误也为0；说明F407 USART2已正常初始化，但相机没有向PA3送达任何字节。
+  当前优先检查Maix应用是否实际启动、B0/UART2_TX到PA3/RX是否交叉并共地；在收到首字节前
+  无需调整CRC、标定表或Kalman。
+- G3519复读限制：切换探针后DAPLink出现USB I/O Error并从Windows有效枚举中消失，未能在
+  15:11版本上再读一次G侧计数；F407实收CAR和远端uptime已证明G3519发送端正在运行，但
+  F407 HB是否被15:11版本接收仍待DAPLink恢复后的单次短快照确认。
+
+## 2026-07-30：ICM45686纵向加速度读取与预处理
+
+- 修改原因：`CAR`已经稳定回传ICM45686的X/Z比力和零偏校正后的Pitch/Y角速度，但静止时
+  X轴仍含车体倾角造成的重力投影，不能直接作为小车纵向线加速度使用。
+- 最终决策：新增无MCU/RTOS依赖的`ChassisImuAcceleration`纯算法。只处理年龄不超过50 ms
+  的新CAR样本；以`atan2(-fx,fz)`得到加速度倾角，Pitch角速度积分后用0.50 s时间常数互补
+  校正，按`a_linear=fx+g*sin(pitch_est)`去除X轴重力投影，再以0.05 s时间常数一阶低通。
+  X/Z重力模长偏离`g`超过2500 mm/s^2时停用加速度倾角校正但保留陀螺预测；采样步长超过
+  50 ms时仅在重力门通过后重置姿态；输出绝对值限制为40000 mm/s^2。
+- 架构和行为边界：算法位于`APP/Algorithm/ChassisImuAcceleration`，Task从PeerLink Latest
+  Value取样并填入Gateway的底盘运动测量字段；未新增Task、Topic、ISR、DMA、动态内存、ACK
+  或重发。`GATEWAY_CHASSIS_ACCEL_FUSION_ENABLE=0`、`GATEWAY_CHASSIS_FF_GAIN=0`保持不变，
+  所以该测量当前不会进入滚球Kalman、杆角目标或电机控制，也不会启动电机。
+- 涉及文件：新增`APP/Algorithm/ChassisImuAcceleration/algorithm_chassis_imu_acceleration.[ch]`
+  和主机测试；修改`Task/task_app.c`、`config/core_config.h`、`CMakeLists.txt`、`README.md`及
+  `COOPERATION.md`。工作树内其余滚球、通信和电机修改属于此前任务，本条不重复认领。
+- 实机证据：静止原始CAR快照为`speed=0 mm/s`、`fx=-734 mm/s^2`、`fz=9843 mm/s^2`、
+  `pitch_rate=-0.01 deg/s`。处理得到`pitch_acc=4.2647 deg`、`pitch_est=4.2715 deg`、
+  `gravity_norm=9870.33 mm/s^2`、瞬时线加速度`-3.54 mm/s^2`、低通输出`-8.40 mm/s^2`；
+  更新3471次、重力门控拒绝0、非法样本0。Main/Task fault为0，Task约500 Hz，HB TX/RX
+  为97/97、CAR RX为4834，UART/DMA错误为0。该证据说明静止时约`-0.734 m/s^2`主要是
+  约4.27 deg倾角重力投影，去除后接近0。
+- 验证方式和结果：ChassisImuAcceleration主机测试通过；Debug/Release clean-first完整链接
+  零警告，FLASH/RAM分别为`34708/17672 B`和`30180/17656 B`。此前已完成测量版F407编程、
+  校验和复位；本次重新构建未再次烧录，测试期间没有发送电机启动命令。
+- 已知限制：只有静止单点证据。加速度计无法单独区分持续纵向加速与倾角，0.50 s互补校正会
+  使持续加速度呈高通特性；仅用X/Z重力模长，不覆盖侧向动态。ICM安装轴正负、运动噪声、
+  50 ms输出滤波的相位延迟、轮速比例和与轮速差分加速度的一致性均未动态验证。
+- 待确认：保持电机失能，采集水平静止、正反向手推、起步和制动原始CAR及处理输出，统计
+  静止均值/标准差、方向、延迟和饱和/拒绝计数；再依据日志调整时间常数和融合Q/R。未经该
+  动态确认，不启用融合或前馈，不把ICM测量冒充具有前瞻性的规划加速度。
+
+## 2026-07-30：KEY回零后启用ICM补偿与QD4310绝对raw限幅
+
+- 修改原因：用户要求实时观察ICM补偿，并要求电机只能在其手动指定的范围内运动；随后明确
+  KEY启动必须先进入机械零点，再开启加速度补偿。
+- 手动标定证据：滚球闭环未运行，先提交`ENABLE`和`CURRENT 0 A`；提交前驱动反馈已为
+  `0.000 A/0 rpm`，两条命令均返回成功。调试链路异常导致F407随后复位，端点正式读取时
+  驱动反馈为Disable且电流约0 A。用户指定第一端`raw=59233`、第二端`raw=49325`，范围跨度
+  9908 count，按单圈65535 count换算约54.43电机度；范围不跨单圈回绕。
+- 最终决策：新增控制phase `STOPPED/ZEROING/ACCELERATION_COMPENSATION`。KEY启动时先把目标
+  设为固定机械零点`raw=54379`并发送Enable、0 A；反馈相对零点误差不超过0.50电机度且
+  `|speed|<=1 rpm`连续300 ms后才进入ICM补偿。KEY再次按下沿用0 A后Disable退出。
+- 补偿行为：补偿phase直接消费Task提交的CAR实测支路，不开启底盘三状态融合；使用已完成的
+  Pitch互补、去重力和50 ms低通结果，`theta_ff=-0.20*atan2(a_linear,g)`，杆角另限
+  `±0.50 deg`。球Kalman仍为0；VIS有效时原球位置反馈仍可与trim和补偿相加。
+- 限幅行为：新增绝对raw边界`49325..59233`，目标raw超界拒绝；反馈严格越界立即0 A并
+  Disable；反馈恰在边界时将控制电流换算回未施加极性的电机方向，只阻断继续向外的电流。
+  现有11点杆角表`53577..58499`仍是正常目标的更窄边界，现有电流限0.30 A也保持不变。
+- 架构和资源：只修改Gateway现有控制编排、Telemetry字段和`core_config.h`，未改2 ms Task、
+  优先级、栈、CAN/UART/DMA/ISR、通信协议、动态内存、ACK或重发。Telemetry新增phase、实际
+  补偿杆角和raw限幅阻断标志，便于调试观察；无线FB帧格式未改变。
+- 验证方式和结果：Debug/Release clean-first完整链接零警告，FLASH/RAM分别为
+  `35284/17696 B`和`30756/17672 B`；`git diff --check`通过。Debug BIN为35284 B，SHA-256
+  `1C4BBDE6308F882CF7756226F26C1709569FA7E621C11EB54E035A9D111AB918`。OpenOCD以50 kHz和
+  CMSIS-DAP quirk完成编程、校验和复位。复位后只读状态：phase=STOPPED、驱动反馈Disable、
+  电流0 A、raw=58939、raw limit blocked=0、Task fault=0；本轮没有替用户按KEY。
+- 已知限制：新的KEY phase转换、回零方向、300 ms稳定判定、补偿正负和raw边界方向阻断尚未
+  在电机运动中验证。ICM新样本仍为100 Hz而非500 Hz；50 ms低通和0.20增益是首次安全值，
+  无法保证球完全静止。下行回差、相机位置和动态加速度残差仍未标定。
+- 待确认：首次按KEY必须有人旁站；确认先回到raw约54379且没有振动，phase再从1变2。随后
+  轻推小车确认加速度正负；若平台朝错误方向、raw接近49325/59233或出现异常电流，立即再次
+  按KEY。保存raw最值、phase、处理后加速度、补偿角、blocked和fault后再提高增益。
+
+## 2026-07-30：`HB/CAR`最终协议与双板Debug部署
+
+- 修改原因：用户最终要求板间不发送QD4310/CAN明细，只传F407需要的车速、ICM45686
+  X/Z比力和Pitch角速度，并明确授权烧录当前双端Debug镜像。
+- 最终决策：活动协议只保留双向500 ms `HB`及G3519到F407的100 Hz七字段`CAR`；
+  `TEL/ENC/ACC/ACC_MEAS/DIS`均不发送或解析。F407本地QD4310/CAN逻辑不变，CAR纵向
+  预处理已接入，但`GATEWAY_CHASSIS_ACCEL_FUSION_ENABLE=0`和
+  `GATEWAY_CHASSIS_FF_GAIN=0`保持不变，不影响滚球目标或电机控制。
+- 涉及文件：F407 PeerLink文档、`MCU_UART_HEARTBEAT_PROTOCOL.md`、既有CAR消费和
+  ChassisImuAcceleration链、双端`COOPERATION.md`及process记录；未改Task周期、引脚、
+  QD4310控制参数、融合开关或前馈增益。
+- 验证方式和结果：PeerLink CAR和ChassisImuAcceleration主机测试通过；Debug/Release
+  clean-first完整链接零警告，FLASH/RAM为`34708/17672 B`和`30180/17656 B`。G3519
+  Communication主机测试、Cortex-M0+严格编译和Bring-up Debug/Release完整链接也通过。
+- 烧录与回读：F407使用`VID:PID 0416:5051`的CMSIS-DAP，OpenOCD识别Cortex-M4、
+  DEV_ID尾码`0x413`和512 KiB Flash；写入Debug 34708 B并从`0x08000000`完整回读，
+  源BIN与回读SHA-256均为
+  `56362B8704CF4822E8008C2781EF096270E2D152747D8F73F34A44A86B9E6A36`。G3519使用指定
+  DAPLink首次写入后检测到工作区又完成按键/Task更新，故以当前源码覆盖写入Bring-up
+  Debug 79368 B，从`0x00000000`完整回读，SHA-256为
+  `E5E0E1E4D75A56A84940B3E9EDB1323AB68E16F5F6CDBCD830E45F18BDE5385C`。两端均已复位运行。
+- 已知限制：本次只证明目标识别、写入、整镜像一致性和复位运行；没有在最终双镜像下
+  连续抓取100 Hz CAR或验证50 ms断流失效、动态ICM轴向、轮速比例和滚球前馈。
+- 待确认：保持滚球电机失能，连续采集至少10 s双端HB/CAR和UART/DMA计数，再做正反向
+  手推、起步、制动对照；只有轴向、延迟和噪声证据通过后才讨论启用融合或前馈。
+
+## 2026-07-30 16:08：当前F407控制行为覆盖说明
+
+- 本条晚于上方`HB/CAR最终协议与双板Debug部署`。板间协议仍保持双向HB和100 Hz CAR，
+  但F407控制行为已经按用户后续明确要求更新：KEY回零稳定后启用ICM补偿，前馈增益现为
+  `0.20`而不是0；绝对raw硬边界为`49325..59233`。详细状态机、限幅、构建、烧录和静态
+  验证证据见紧邻上方的“KEY回零后启用ICM补偿与QD4310绝对raw限幅”条目。
+- 上方协议部署条目中的“前馈保持0、不会影响电机控制”只描述SHA-256以`56362B...`开头的
+  前一版F407镜像，已被当前SHA-256
+  `1C4BBDE6308F882CF7756226F26C1709569FA7E621C11EB54E035A9D111AB918`覆盖，不再代表现状。
+
+## 2026-07-30：ICM补偿响应与力度第二档
+
+- 修改原因：用户完成旧档位实机测试，确认KEY启动顺序、补偿方向和保护没有问题，但反馈
+  响应偏慢、纠正力度不足。
+- 最终决策：ICM输出一阶低通时间常数由50 ms降至20 ms，补偿增益由`0.20`提高至`0.50`，
+  ICM补偿角和视觉合成后的总杆角限幅均由`±0.50°`提高至`±0.60°`。角环继续使用
+  `P=0.017 A/deg`、电流限`0.30 A`，未恢复历史实测会振动的`P=0.020 A/deg`。2 ms Task、
+  100 Hz CAR、KEY状态机、绝对raw边界`49325..59233`和11点杆角表均未改变。
+- 涉及文件：控制参数位于`config/core_config.h`；同步更新`README.md`、`COOPERATION.md`和
+  本记录。工作树内其他未提交修改不属于本次调参。
+- 验证方式和结果：Debug clean-first完整链接通过，FLASH/RAM为`35348/17696 B`；Debug BIN
+  35348 B，SHA-256为`3D8C9AF77B7BAF691760BD0F5581A7123A62B99F9BC305F9501578956A1917B6`。
+  CMSIS-DAP重插后OpenOCD编程和整镜像verify成功并复位。运行快照为`phase=STOPPED`、驱动
+  Disable、命令未使能、速度0 rpm、raw=58953、raw blocked=0、Task fault=0；电流仅剩协议
+  量化级零附近值。
+- 已知限制：CAR仍只有100 Hz新测量，500 Hz Task只能在样本间保持/计算；20 ms低通和0.50
+  增益尚未完成第二档带球动态验证。补偿输出、总杆角限幅和角环电流中究竟谁先成为瓶颈，
+  需要日志才能判断，不能只凭体感继续加大KP。
+- 待确认：用户旁站按KEY测试第二档，记录处理后加速度、补偿角、合成杆角、raw、电流、
+  blocked和fault。若仍显弱且补偿角未触及0.60°，再提高前馈增益；若角度已触顶但电流很小，
+  再评估角环P/死区；若出现振动或方向异常立即再次按KEY停机。
+
+## 2026-07-30 16:29：水管中心、零点与限幅语义复核
+
+- 修改原因：用户再次强调“补偿点是水管中心”并要求不要混淆滚球目标、机构零点和限幅。
+- 当前唯一有效坐标定义：水管几何中心是球位置`x_target=0 mm`；机构回零点是QD4310单圈
+  `raw=54379`；`raw=54329`只对应历史水平工作trim，不能写成新的球位置零点或机构零点。
+- 当前命令链：KEY首次按下进入`ZEROING`并只命令相对杆角0°；满足电机角误差`±0.50°`、
+  `|speed|<=1 rpm`连续300 ms后进入`ACCELERATION_COMPENSATION`。补偿阶段使用
+  `theta_imu=-0.50*atan2(a_icm/g)`并限`±0.60°`；视觉有效时以`x_target=0 mm`执行球位置/速度
+  闭环。代码实际限制的是`theta_ball+theta_imu`相对水平trim的动态偏移`±0.60°`，随后才加
+  trim并查11点向上表，所以不得表述为“相对机械零点的最终绝对杆角恒为±0.60°”。当前
+  trim约`+0.061°`，补偿phase相对机械零点的实际命令约`-0.539°..+0.661°`，对应raw约
+  `54917..53774`，完整位于11点表内。
+- 数据边界：本轮补偿只消费100 Hz `CAR`中的ICM45686 X/Z比力和Pitch角速度，经去重力及
+  20 ms一阶低通后使用；轮速字段虽保留在Task输入结构中，但底盘融合开关为0，补偿phase
+  直接选择处理后的ICM加速度，轮速不参与该角度计算。球Kalman也保持关闭。
+- 物理边界：`0.50`增益在小角度未饱和区只施加约一半的理想静态抵消角；`0.60°`杆角对应
+  完整理想静态抵消能力约`g*tan(0.60°)=103 mm/s²`，而当前0.50增益约在输入加速度
+  `g*tan(1.20°)=205 mm/s²`时触及角限。它不能保证任意加速度下小球静止；没有有效VIS时
+  也没有球位置误差闭环，水管中心只是冻结目标，不是仅靠IMU即可保证的结果。视觉与ICM
+  共用同一个`±0.60°`动态预算：例如`185 mm/s²`时ICM约占`0.540°`，同方向视觉只剩约
+  `0.060°`，并非两路各自都能输出`±0.60°`。
+- raw保护证据边界：低raw侧配置`49325`由用户明确标记的第二端实测`raw=49319`向内收
+  6 count；高raw侧`59233`保留此前落地侧约`59293`读数的内缩余量，但缺少同条件的新一轮
+  明确端点复测。两者都是保护边界，不是水管中心或杆角表端点；正常11点查表范围仍更窄。
+- 并发协作收口：此前20 ms只读`DBG`提案曾撤回；用户随后明确要求用串口持续送入VOFA，
+  因而当前源码已重新完成双端DBG并追加为G3519 FireWater CH22～CH31。该新方向覆盖旧撤回
+  结论，但截至本条更新仍未烧录或完成32列实物抓取。
+- 验证：当前源码Debug/Release clean-first完整链接零警告，FLASH/RAM分别为
+  `35348/17696 B`和`30836/17672 B`。9组主机测试以
+  `-Wall -Wextra -Wpedantic -Werror`重新编译运行并全部PASS，覆盖BallPositionControl、
+  BallStateEstimator、ChassisAccelerationFusion、ChassisImuAcceleration、LevelCurrentControl、
+  RodAngleMap、PeerLink CAR、VisionLink和QD4310 raw。当前Debug BIN为35348 B，SHA-256=
+  `3D8C9AF77B7BAF691760BD0F5581A7123A62B99F9BC305F9501578956A1917B6`；Release BIN为
+  30836 B，SHA-256=`6C1E42BC5FD0EEF5E8C0D059755CC47D6F2747770BDB23085681FAF51F95BF05`；
+  `git diff --check`无空白错误。Debug哈希与上一条已编程/整镜像verify并取得STOPPED/Disable
+  快照的镜像一致。
+- 本轮硬件复核限制：先清理残留OpenOCD PID 41628；随后三次50 kHz短连接均识别到Cortex-M4，
+  但目标在`halt`时报告`unknown state`，因此未读到任何新RAM快照，也未据此声称Peer/CAR计数
+  或电机状态再次通过。本轮没有擦除、编程、复位、按KEY或发送CAN控制命令，OpenOCD均已退出，
+  3333/4444端口无监听。
+
+## 2026-07-30：F407关键调试量经G3519送入VOFA
+
+- 修改原因：用户选择持续串口显示，要求将关键调试数据送入VOFA，避免SWD逐次读取。
+- 最终决策：F407在500 Hz Gateway计算之后每20 ms非阻塞提交一次只读`DBG`，字段依次为
+  处理后底盘加速度`mm/s²`、ICM补偿角`mdeg`、最终杆目标`mdeg`、目标/反馈raw、命令/反馈
+  电流`mA`、速度`0.01 rpm`、phase和bit0～bit8状态。DBG使用独立序号；BUSY整帧丢弃且
+  不推进序号，无ACK和重发，不作为控制输入。
+- 接收/显示：G3519检查节点、规范十进制、范围、phase、flags和重复/旧序号，以100 ms
+  本地年龄保存Latest Value，追加到原CH0～CH21后的CH22～CH31。G3519在CH31额外置bit9
+  表示DBG新鲜；101 ms起十列全0。VOFA使用COM5、115200、8N1、FireWater，名义50 Hz。
+- 涉及文件：`APP/Gateway`、`Device/PeerLink`、`Task/task_app.c`、`config/core_config.h`、
+  PeerLink测试/README、根README、板间协议、`COOPERATION.md`和本记录；未改500 Hz Task、
+  KEY状态机、QD4310控制参数、引脚、DMA或保护行为。
+- 验证方式和结果：F407 PeerLink host测试以`-Wall -Wextra -Wpedantic -Werror`编译运行PASS，
+  覆盖payload、边界、BUSY不推进序号和非法值；Debug/Release clean-first完整链接通过，
+  FLASH为`36936/32056 B`，RAM为`17744/17736 B`。G3519 Communication测试和双配置链接
+  结果记录在其`docs/PROCESS.md`。
+- 已知限制：双端探针当前均未枚举；Windows只看到COM5的`0D28:4001`串口复合设备，未见
+  F407 `0416:5051`或G3519 `0D28:0204` CMSIS-DAP，因此本轮没有擦写、复位或启动电机。
+  也尚无32列FireWater格式器host测试、双端字节互喂和实际串口带宽证据。
+- 待确认事项：重新连接两枚探针后，先确认phase=STOPPED、命令未使能、反馈Disable和电流
+  约0，再烧录双端Debug；随后连续抓COM5，确认严格32列、约50 Hz、CH31 bit9新鲜、
+  CH22～CH30动态正确，并观察DBG发送/接收/BUSY/解析计数无持续增长。
+
+## 2026-07-30：DBG首次实抓与角环KP第三档
+
+- 修改原因：用户提供292帧、5.82 s的F407 `DBG`实抓；小球持续滚动，要求确认90 mA不再
+  增力的原因，并明确决定先增大KP、保留先回零稳定再开启补偿，不采用按KEY立即补偿。
+- 实抓结论：DBG序号9919～10210连续，周期17～23 ms、均值20 ms；全程phase=1、flags=3，
+  目标raw固定54379，反馈raw为55353～55383，最终误差982 count/约5.394电机度。命令/反馈
+  电流均约-88 mA，速度基本为0，位置未向目标收敛；加速度、补偿角和杆目标字段均为0，
+  证明当时仍在ZEROING，尚未进入加速度补偿。
+- 控制器解释：原始误差约-5.394 deg，扣除0.20 deg死区后，P项为
+  `0.017*(-5.194)≈-0.088 A`。误差超过1 deg积分区时积分每周期清零，不是积分饱和；即使
+  进入积分区，积分分量也只允许`±0.010 A`。`±0.30 A`总电流限幅没有触发。
+- 最终决策：仅把`GATEWAY_LEVEL_KP_A_PER_DEG`从0.017提高到0.030 A/deg；相同误差下预计
+  P电流约-0.156 A。KEY状态机继续`STOPPED -> ZEROING(raw=54379) -> 稳定300 ms ->
+  ACCELERATION_COMPENSATION`，不实现直接启动补偿；KI、KD、死区、积分区、积分/总电流限幅、
+  raw保护、标定表和DBG协议均不变。
+- 涉及文件：`config/core_config.h`及本记录；工作树其他滚球、通信和协作文档改动不在本条
+  重复认领。
+- 验证方式和结果：LevelCurrentControl主机测试以`-Wall -Wextra -Wpedantic -Werror`重新
+  编译运行PASS；Debug/Release clean-first完整链接通过，FLASH/RAM分别为`36936/17744 B`
+  和`32056/17736 B`。新KP Debug/Release BIN SHA-256分别为
+  `F63C30F391A1073CF522477F13F7ECFCF732148E019FA25626B2C8496FDFB9F1`和
+  `3D1CA192161C0CF544FE051D990CA116C7DE779AE799739D1B5B5BBF923830EB`。
+- 已知限制：0.030在历史实机中出现过振动，本轮只完成软件验证；新KP镜像尚未烧录、复位或
+  启动电机。DBG在ZEROING中主动报告acceleration/ball无效，不能用flags=3单独证明相机断线。
+- 待确认事项：保持人员旁站，先确认旧固件已按KEY停止，再烧录新KP镜像。首次只做短时回零，
+  观察电流是否约升至156 mA、raw是否向54379收敛；若振动、方向异常或接近raw边界，立即
+  再按KEY执行0 A后Disable。进入phase=2后再分别检查acceleration_valid和ball_valid。
+
+## 2026-07-30：KP第三档与DBG版F407烧录
+
+- 修改原因：用户明确要求立即烧录当前最新F407 Debug镜像。
+- 烧录结果：Windows精确枚举`VID:PID 0416:5051`；xPack OpenOCD以200 kHz识别Cortex-M4、
+  DEV_ID尾码`0x413`和512 KiB Flash。写入当前Debug ELF并完成`Verified OK`、复位；对应BIN
+  SHA-256为`F63C30F391A1073CF522477F13F7ECFCF732148E019FA25626B2C8496FDFB9F1`。
+- 复位安全发现：MCU本地已为`phase=STOPPED`、命令电流0、Task故障0，但QD4310驱动器保留
+  烧录前使能状态，反馈电流约`-0.1004 A`。这证明“MCU复位后本地状态清零”不等于驱动器
+  已Disable。
+- 处置与复读：通过当前ELF和现有`Device_QD4310_Disable()`接口向主电机发送Disable，返回
+  true；0.8 s后复读为反馈`enabled=0`、电流约`-0.000305 A`、速度0、online=1、raw=59091，
+  `phase=0`、命令电流0、`g_TASK_Fault=0`、Task Ready=1。随后恢复运行并关闭OpenOCD。
+- 行为边界：全程未按KEY、未启动滚球控制。G3519 `0D28:0204`本轮未枚举，故未重复擦写；
+  其协作记录中的当前80768 B镜像已完成写入和回读。
+- 已知限制与待确认：当前启动路径只初始化本地STOPPED状态，没有在每次MCU复位时主动发送
+  QD4310 Disable，驱动器可能跨复位保留旧命令。若要永久修复，应经用户确认后在安全启动
+  顺序中增加一次显式Disable并重新测试断电、复位和CAN离线场景。
+
+## 2026-07-30：KP=0.030 Debug烧录与复位安全快照
+
+- 修改原因：用户在软件验证后明确授权烧录新KP镜像，但要求不立即开启补偿。
+- 最终决策：部署上一条记录的`GATEWAY_LEVEL_KP_A_PER_DEG=0.030 A/deg`；KEY状态机、
+  KI/KD、0.30 A电流限幅、raw保护、回零稳定门和补偿参数均不变。本轮不按KEY。
+- 烧录前证据：以50 kHz SWD非停核读取，phase=STOPPED、命令电流0、反馈Disable、速度0、
+  `command_enabled=0`、Task fault=0，raw=59023且位于`49325..59233`范围内。
+- 烧录与验证：Debug BIN 36936 B，SHA-256=
+  `F63C30F391A1073CF522477F13F7ECFCF732148E019FA25626B2C8496FDFB9F1`。OpenOCD锁定
+  `VID:PID 0416:5051`并识别Cortex-M4、DEV_ID尾码0x413和512 KiB Flash；编程完成、
+  整镜像`Verified OK`并复位。
+- 复位后证据：非停核读取phase=STOPPED、命令/反馈电流0、反馈Disable、速度0、
+  `command_enabled=0`、raw=59027、Task fault=0；约32.24 s内Task heartbeat=16119，约500 Hz。
+  OpenOCD已退出，3333/4444无监听。
+- 涉及文件：`config/core_config.h`、控制说明、`COOPERATION.md`和本记录；未改变通信、Task、
+  状态机或保护逻辑。
+- 已知限制与待确认：烧录/静态快照不等于KP=0.030动态通过；该值历史上出现过振动。首次
+  只做人员旁站的短时回零，确认电流约156 mA且raw向54379收敛；振动、方向错误或逼近边界
+  时立即按KEY执行0 A后Disable，再依据DBG决定降低P或提高阻尼。
+
+## 2026-07-30：ICM加速度补偿极性反向对照固件
+
+- 修改原因：用户提供DBG序号24506～24782并要求立即反转补偿极性后烧录，用于与原方向做
+  实机对照；本次“极性”明确限定为ICM底盘加速度到杆角的前馈符号，不是电机电流或D阻尼。
+- 数据证据：277帧全部为phase=2、flags=7，说明电机在线/使能且ICM加速度有效，球视觉位
+  始终无效。加速度范围-657～824 mm/s²，补偿角42/277帧触及±0.60°。末100帧目标raw均值
+  54302.4、反馈53796.6，平均误差505.8 count/2.778°；98帧速度为0，命令均值-46.3 mA。
+  末帧按当前控制律可还原为-90 mA静态前馈+42.5 mA P+0 mA D=-47.5 mA，与实测-48 mA
+  一致；该日志不支持反转电机位置环或D阻尼。
+- 最终决策：仅将`GATEWAY_CHASSIS_FF_POLARITY`从-1改为+1；增益0.50、补偿限幅±0.60°、
+  电机`CURRENT_POLARITY=+1`、P/I/D、静态承重前馈、状态机和全部保护保持不变。JY61P仍只
+  作为G3519 VOFA CH12/CH13指示，不进入该补偿或任何控制。
+- 验证方式和结果：Debug/Release clean-first完整链接通过，FLASH/RAM分别为36988/17752 B
+  和32124/17736 B。烧录前SWD读到phase=STOPPED、驱动Disable，并再次发送Disable成功；
+  Debug ELF写入后所有段`compare-sections`匹配。Debug BIN SHA-256为
+  `D68C3CD453845431C2686387C962AD35BE9A3F4118CBC8E60CB3A577A8FD51D1`。复位后快照为
+  phase=STOPPED、active=0、反馈Disable、电流约-0.00061 A、速度0、Task fault=0。
+- 已知限制：当前只完成反向镜像部署和静态安全检查，尚未启动电机，不能宣称反向更好。
+- 待确认：人员旁站做同方向、同力度的短时推车对照；观察CH22与CH23是否由原反号变为同号，
+  同时比较球位移和raw跟随。若球位移明显变大或机构趋向端点，立即按KEY执行0 A+Disable。
+
+## 2026-07-30：重力前馈实测、极性确认与大误差提速部署
+
+- 修改原因：KP=0.030短测能抬升机构，但目标附近仍需约-0.10 A承重；用户随后反馈响应偏慢，
+  并要求再次确认正负极性。
+- 当前有效控制参数：否决会振动的KP=0.030，恢复`KP=0.017 A/deg`；新增独立静态重力前馈
+  `-0.090 A`。KI/KD仍为`0.0010/0.0010`，总电流限幅仍为0.30 A，raw边界和KEY状态机不变。
+- 实机证据：旧KP=0.030短测从raw约59091运行0.8 s到55023，电流约-0.100 A，Disable后回落；
+  当前KP+前馈短测在0.3 s到raw=54343，距目标54379仅36 count，命令/反馈电流分别约
+  `-0.08997/-0.08972 A`，积分仅0.000033 A，速度0且Task fault=0。负电流使raw减小并把机构
+  向上送至目标，因此电机角环和静态承重前馈极性已确认；该证据不确认ICM加速度补偿极性。
+- 已部署镜像：上述KP+前馈的Debug镜像SHA-256为
+  `C90782B46B9571D11BE766456118CF2A6BF7691186E9766039136C057987B426`，已编程并`Verified OK`。
+- 提速修改：为提高远距离回零电流而不改变近目标刚度，仅把角误差限幅从8°提高到10°；
+  最大远端命令约由-0.223 A提高到-0.257 A，KP、死区、前馈和0.30 A总限流不变。Debug/Release
+  clean-first零警告，FLASH/RAM分别为`36988/17752 B`和`32124/17736 B`；BIN SHA-256分别为
+  `C1107165A4CA60C7DC070E6AB2DAB7AACF4556DED0A2275A011E2221E8B37967`和
+  `C7788ABCAC4CFF8B210BDAFBF6FD47EBBD1C33FA4521A69F42AE79820032B343`。Debug已烧录并
+  `Verified OK`；复位回读实际装载error limit=10°、KP=0.017、前馈=-0.090 A。
+- 烧录安全证据：CMSIS-DAP以50 kHz保守quirk模式连接。烧录前回读QD4310为online=1、
+  enabled=0、电流约-0.00061 A、速度0、raw=59033，MCU为STOPPED/inactive/command gate 0；
+  烧录后仍为STOPPED，主程序/Task fault=0，驱动反馈Disable。
+- 0.3 s短测：从落地侧启动后约0.3 s进入phase=ACCELERATION_COMPENSATION；当时目标/反馈raw为
+  `54231/54207`，命令/反馈电流约`-86.01/-86.37 mA`，速度约-4.00 rpm，积分近0，控制fault=0，
+  raw未触边。说明大误差回零方向正确且已到目标区；该帧含动态目标，但未同时读取带符号ICM
+  加速度和补偿角，因此仍不能单凭本次冻结ICM物理极性。
+- 停机复读：首次stop调用返回true后状态又一次进入phase=2，来源未冻结；再次调用现有
+  `stop_primary_level_control()`返回true，0.5 s后复读为phase=STOPPED、inactive、
+  `command_enabled=0`、enabled=0、电流约-0.00061 A、速度0、raw=59049、Task fault=0。
+  OpenOCD已退出；后续DAP短测期间禁止同时操作KEY，以免混淆启停边沿。
+- 协作复核：Agent A确认根目录`vofa+.csv`是旧`KP=0.017、FF=0`数据，全程ZEROING、ACC/补偿
+  均为0；只能确认负电流对应raw减小，不能用于评价当前重力前馈或ICM补偿，也不能据此加KP。
+- 待确认：使用VOFA同时记录phase、目标/反馈raw、电流、ICM加速度和补偿角，完成同方向起步/
+  制动对照；ICM动态极性和带球效果未验收前不得上赛道。近目标仍弱时先减少死区或做小步KP，
+  不直接恢复历史会振动的0.020/0.030。
+
+## 2026-07-30：视觉、JY61P、ICM45686与无刷全链路极性统一（未烧录）
+
+- 修改原因：用户要求暂不烧录，依据视觉、JY61P、车体IMU和QD4310无刷电机统一所有符号，
+  并避免把ICM补偿、电机角环和转速阻尼混为同一个“极性”。用户口述的ICM42688经源码和
+  `WHO_AM_I=0xE9`复核，当前实际器件/驱动仍是ICM45686。
+- 最终决策：统一物理坐标为右侧固定转轴指向左侧执行端`x>0`、执行端抬高`theta>0`。
+  MaixCAM2画面右正且画面右侧是固定转轴，所以`x=-x_camera`，VIS极性保持`-1`；11点上行
+  实测为raw减小、CH12增大、执行端上升，且负电流实测使raw减小，所以电机电流极性保持
+  `+1`，D项继续使用负速度反馈。ICM预处理保持车体X动态符号；在车体`+X`与杆轴`+x`
+  同向的安装约定下，底盘`a_parallel>0`要求`theta_ff<0`，因此源码将此前只用于对照的
+  `GATEWAY_CHASSIS_FF_POLARITY=+1`覆盖为`-1`。JY61P仍只作为CH12/CH13角度指示，不进入控制。
+- 涉及文件：`config/core_config.h`、`APP/Gateway/app_gateway.c`、根`README.md`、
+  `tests/control_polarity_chain/test_control_polarity_chain.c`、`COOPERATION.md`及本记录。
+  未修改CAR/VIS/DBG协议、Task周期、P/I/D、静态承重前馈、限幅、状态机或硬件配置。
+- 验证方式和结果：新增端到端主机测试同时覆盖相机左右位置、BallPositionControl逆模型、
+  ICM X/Z去重力符号、RodAngleMap正反变换和LevelCurrentControl电流符号，以
+  `-Wall -Wextra -Wpedantic -Werror`编译运行PASS。Debug/Release clean-first完整链接零警告，
+  FLASH/RAM分别为`36988/17752 B`和`32124/17736 B`。
+- 实时只读证据：COM5严格32列链路在线。首次4 s抓取中F407为`phase=1,flags=515`，目标/
+  反馈约`54379/54125`、命令/反馈约`-70/-70 mA`，未进入补偿且ACC/VIS有效位均为0；按要求
+  提醒用户停机后再次抓到`phase=0,flags=513`、命令0 mA、反馈约-1 mA、驱动失能。
+  JY61P CH12持续有效且CH13年龄约0 ms。该数据确认通信、JY指示和最终停机，不确认ICM/VIS
+  物理极性。Windows只枚举G3519串口`0D28:4001/COM5`；F407探针和MaixCAM2 ADB均未枚举。
+- 已知限制：本轮严格未烧录、未启动新极性固件；硬件仍运行此前ICM `+1`反向对照镜像。
+  MaixCAM工程仍为`TROUGH_POSITIVE_AT_RIGHT=True`、`F4_UART_CALIBRATION_VALID=False`，所以
+  F407不会放行视觉位置。G3519当前Device_IMU使用sensor到body默认同轴映射，但实物车体
+  `+X`究竟朝杆自由端还是固定轴没有实时原始量/照片证据，源码`-1`只能视为统一坐标下的
+  正确物理符号，不能写成实物轴向已通过。
+- 待确认事项：恢复F407探针和MaixCAM2连接后，先保持无刷失能完成相机九点/端点标定；再
+  以一次朝自由端和一次朝固定轴的手推对齐轮速、CAR X和杆轴。只有确认`+X`朝自由端后才
+  可烧录当前`-1`镜像；随后在视觉有效、人员旁站条件下短测，要求CH22与CH23反号，手把球
+  移到画面左侧时目标杆角为正、目标raw下降、命令电流为负。任一关系不符立即停机。
+
+## 2026-07-30：视觉/JY61P/ICM45686/无刷电机极性统一（未烧录）
+
+- 修改原因：当前源码把已经在上一轮决定为`+1`的ICM前馈重新写成`-1`，且README、极性测试
+  和未启用的球状态模型仍混用了“杆轴正方向”与“车辆前进正方向”。用户要求本轮不烧录，
+  先统一全部符号。用户口述的ICM42688与工程及实车数据源不符，当前器件继续按ICM45686记录。
+- 最终决策：杆轴`x>0`为右侧固定转轴指向左侧执行端；相机画面右正，故
+  `x=-x_camera`、`GATEWAY_BALL_MEASUREMENT_POLARITY=-1`。执行端抬升为`theta>0`；11点
+  JY61P+车体IMU表证明`theta>0 -> raw减小`，电机实测证明负电流使raw减小，故
+  `GATEWAY_LEVEL_CURRENT_POLARITY=+1`保持不变。处理后的ICM45686纵向加速度以车辆向前为
+  `a_fwd>0`；按用户确认的补偿动作冻结为`a_fwd>0 -> theta_ff>0 -> raw减小 -> 负电流`，
+  `GATEWAY_CHASSIS_FF_POLARITY=+1`。旧`-1`方向已否决。
+- 模型同步：三状态球估计器的底盘输入改为车辆前进正坐标：
+  `a_model=-kappa*(g*sin(theta)-a_fwd*cos(theta))`。因此正向车体加速度使球模型沿杆轴正方向
+  加速，正杆角产生反向重力分量；前馈正杆角可抵消该扰动。估计器开关仍为0。
+- 涉及文件：`config/core_config.h`、`README.md`、`APP/Algorithm/BallStateEstimator/`、
+  `tests/control_polarity_chain/`、`tests/ball_state_estimator/`、`COOPERATION.md`和本记录。
+  视觉PID保持开启；未改变Task、通信协议、状态机、增益、限幅或保护。
+- 验证方式和结果：严格主机测试`control_polarity_chain`、`ball_state_estimator`、
+  `ball_position_control`、`chassis_imu_acceleration`全部PASS。Debug/Release ARM clean-first完整
+  链接零警告，FLASH/RAM分别为`36988/17752 B`和`32124/17736 B`。
+- 已知限制：本轮没有连接探针、烧录、发送Enable/电流命令或驱动电机。视觉符号有Maix源码
+  “画面右正”和安装“画面左为执行端”的证据，但Maix仍未提供`CALIBRATION_VALID`实时帧，
+  因此不能把离线测试写成带球实物闭环通过。JY61P继续只用于杆角标定/指示，不直接进入控制。
+- 待确认：电机失能时把球分别放在画面左/右端，确认F407接收的物理位置分别为正/负；随后
+  人员旁站短时测试`a_fwd>0`时CH23为正、目标raw下降。任一方向不符立即停止，不调整增益掩盖。
+
+## 2026-07-30：ICM45686纵向动态极性双次实车确认
+
+- 结论：极性确认完成。执行端位于车头；车辆向前加速时应降低车头执行端，即`theta<0`。
+  两次向车头短推均确认当前安装的ICM mapped X先变负，F407预处理保留该动态符号，因此
+  `GATEWAY_CHASSIS_FF_POLARITY=+1`正确：`a_icm_x<0 -> theta_ff<0 -> raw增大 -> 车头端降低`。
+  旧的“车辆向前为正且应抬高车头执行端”方向已否决。
+- 修改原因：用户要求以两次同方向手推结果一致作为冻结条件，并允许根据实测修改极性；
+  当前数值已经是计算所得的`+1`，所以不做无意义翻转，只修正相反的注释、极性链测试和说明。
+- 实机证据：标定全程无刷失能，未按KEY、未发送Enable/电流命令。第一次有效采样静止基线
+  X约`-0.730400 m/s^2`，向车头推动段出现负向动态、回弹出现相反正向动态；第二次长窗口
+  基线X为`-0.697868 m/s^2`，运动范围`-4.582502..+1.667562 m/s^2`，负峰时左右轮速为
+  `+33/+123 mm/s`，与第一次符号一致。
+- 涉及文件：`config/core_config.h`、`tests/control_polarity_chain/test_control_polarity_chain.c`、
+  `README.md`、`COOPERATION.md`和本记录；未改变运行极性数值、增益、限幅、状态机、通信或保护。
+- 软件验证：更新后的`control_polarity_chain`以`-Wall -Wextra -Wpedantic -Werror`重新编译，
+  运行输出`PASS`；验证向车头加速使用负mapped X，并得到负杆角、raw增大和正电流方向。
+- 安全收尾：采样脚本已释放COM5；G3519 OpenOCD收到`shutdown`，3333/4444无监听；F407无
+  调试会话。两块板均未烧录、未驱动电机。
+- 已知限制：本次确认的是ICM纵向测量到杆角前馈的物理符号，不等于视觉毫米标定或带球闭环
+  已通过。当前关闭的Ball Kalman使用车辆向前正的`a_fwd`模型语义；启用前须先显式转换当前
+  向前为负的mapped X，不能直接混用。
+
+## 2026-07-30：F407本地BMI088替换ICM45686加速度控制源
+
+- 修改原因：用户决定保留F407与G3519通信，但彻底停止消费G3519 `CAR`中的ICM45686数据，
+  改由F407直连BMI088完成高速读取、去重力、滤波和无刷加速度补偿。
+- 最终决策：SPI1使用PA5/PA6/PA7、Mode3、5.25 MHz；ACC_CS=PA4、GYRO_CS=PC4，PC13保持高
+  隔离共享总线的板载W25Q128。SPI1_RX/TX分别使用DMA2 Stream0/Stream3 Channel3。
+  Device采用静态缓冲非阻塞Start/Poll状态机；Accel为1600 Hz+OSR4+±6 g，Gyro为
+  1000 Hz/116 Hz+±500 dps；1 ms Task形成约500 Hz完整六轴帧。控制Task只把BMI088最新有效
+  帧提交给现有ChassisImuAcceleration和Gateway，PeerLink仍运行但`CAR`不再进入控制。
+- 坐标与控制：实机静止原始读数约`X=+0.29、Z=-9.72 m/s²`，确认当前安装传感器Z朝下；映射
+  冻结为`body X=Sensor X`、`body Z=-Sensor Z`、Pitch积分输入`=+Sensor GyroY`。按+X朝车头
+  的安装约定，向前正加速度通过`FF_POLARITY=-1`映射为车头执行端降低。8 ms输出低通、
+  `±0.60°`动态限幅、杆角查表、绝对raw边界和电流保护全部保留。
+- 涉及文件：`BSP/bsp_spi.h`、`BSP/bsp_f407.c`、`Device/BMI088/`、`Task/task_app.[ch]`、
+  `config/core_config.h`、`CMakeLists.txt`及本记录。放弃的UART4/JY61P草稿已移除。
+- 验证方式和结果：Debug完整链接通过，FLASH/RAM为`40748/17920 B`。OpenOCD按VID:PID
+  `0416:5051`锁定F407，编程并`Verified OK`。运行快照中BMI状态`ONLINE(2)`，Heartbeat
+  `16816`时六轴序号`8331`，实测速率约495 Hz；坐标修正后处理加速度约`10 mm/s²`、Pitch
+  约`-1.731°`。Task fault=0，电机phase=STOPPED、命令电流0 A；OpenOCD随后已关闭。
+- 已知限制：尚未执行向车头手推，BMI088 X动态极性和陀螺Pitch动态符号仍需一次失能状态下
+  的短动作确认；8 ms滤波未按电机振动频谱整定。PA4同时连接开发板KEY3，运行时禁止按KEY3。
+- 待确认事项：保持无刷失能，向车头短推一次；若处理加速度先为正，则当前`FF=-1`正确，若
+  为负则只调整BMI轴映射，不修改电机、视觉、杆角表或保护极性。
+
+## 2026-07-30：BMI088极性冻结、1 kHz DMA链与加速度处理收口（离线）
+
+- 结论：两次无刷失能下向前短推的主动作分别为`+264 -> -219 mm/s²`和
+  `+1519 -> -2362 mm/s²`，符号一致，冻结完整链为`Sensor X正 -> 车辆向前加速度正 ->
+  FF_POLARITY=-1 -> theta<0 -> 目标raw增大 -> 车头执行端降低`。摆杆实测链仍为
+  `theta>0 -> raw减小 -> 车头执行端升高`，因此`BMI088 X_SIGN=+1`、前馈`-1`和
+  电机电流极性`+1`均不再翻转；`±0.60°`动态角限幅、杆角表、raw边界和电流保护全部保留。
+- 修改原因：旧实现每1 ms只能轮询推进一笔ACC或GYRO事务，完整六轴约495 Hz且固定多一拍；
+  8 ms低通响应偏慢，Pitch互补校正还会把持续纵向加速度逐渐误认为车体倾角。
+- 最终决策：BMI088保持Accel 1600 Hz/OSR4/±6 g和Gyro 1000 Hz/116 Hz/±500 dps；
+  SPI1 RX DMA终结ISR只按事务序号通知Gateway Task，Task以有限等待在同一1 ms周期依次推进
+  ACC/GYRO，健康稳态两笔，初始化或遗留相位最多三笔。迟到/重复IRQ由`active/event_sent`
+  去重，Abort清DMA标志和两个NVIC pending；若通知后SPI仍`BSY`则留到下周期Poll，不等待
+  不存在的第二个通知。完整帧和Gateway调度目标均为1 kHz，FreeRTOS Tick仍为1 kHz。
+- 数据处理：输出一阶低通由8 ms改为4 ms。离线回放中事件滞后约由6 ms降至2 ms，静止噪声
+  约由11.6增至14.3 mm/s² RMS，强动作削峰约由18%降至8%。Pitch先以Gyro Y预测，计算
+  `a_candidate=fx+g*sin(pitch_pred)`；仅当重力模长有效且`|a_candidate|<=150 mm/s²`时允许
+  加速度计校正，否则保持陀螺预测。没有运行中自适应消除约`+10.5 mm/s²`静态偏置。
+- 同步修正：默认关闭的Ball Kalman模型统一为
+  `a_model=-kappa*(g*sin(theta)+a_fwd*cos(theta))`，历史容量由64增至128，在1 ms周期下保留
+  约127 ms固定滞后窗口。按用户此前决定，ESP8266默认关闭，不初始化、不轮询、不收发；
+  G3519 PeerLink、MaixCAM视觉、CAN和本地BMI088链路不受影响。
+- 涉及文件：`BSP/bsp_f407.c`、`BSP/bsp_spi.h`、`Device/BMI088/`、`Task/task_app.c`、
+  `APP/Algorithm/ChassisImuAcceleration/`、`APP/Algorithm/BallStateEstimator/`、
+  `APP/Gateway/app_gateway.c`、`config/core_config.h`、对应测试、README及本记录。标定用8192点
+  双通道日志已删除，释放约64 KiB临时RAM。
+- 验证方式和结果：严格主机测试`chassis_imu_acceleration`、`control_polarity_chain`和
+  `ball_state_estimator`均PASS；持续`1000 mm/s²`达500 ms时Pitch保持0°且加速度不被吃掉。
+  Debug/Release均clean-first完整链接通过，FLASH/RAM分别为`37636/20064 B`和
+  `32696/20048 B`，无编译错误。
+- 已知限制与待确认：1 kHz是当前离线实现和读取目标，尚未上板按Heartbeat、BMI sequence、
+  QD反馈sequence和CAN成功率实测；未使用DRDY，Gyro 1 kHz读取可能偶发重复样本。实际电流
+  闭环率受`min(1 kHz, QD4310应答率, CAN成功率)`限制。采样结束后OpenOCD已关闭；本轮没有
+  连接、复位、烧录、发送Enable/电流命令或驱动电机，也未宣称视觉带球闭环已实物通过。
+
+## 2026-07-30～31：BMI088纵向加速度两级快速滤波与烧录
+
+- 结论：极性保持`BMI088 X_SIGN=+1`、`FF_POLARITY=-1`、电机电流极性`+1`不变。输出滤波
+  由单级Euler 4 ms改为两级相同的精确EMA，每级`tau=2.25 ms`、
+  `alpha=1-exp(-dt/tau)`；1 kHz下总截止约46 Hz、无过冲，冻结强推波形峰滞后约2 ms。
+- 修改原因：用户要求根据此前静止/手推冻结波形重新滤波，同时注重响应速度。旧单级滤波
+  高频滚降只有一阶，且`dt/(tau+dt)`没有精确表达配置的连续时间常数；超长采样间隔还可能
+  把间隔前的旧方向值作为当前样本发布。
+- 最终决策：两级使用本拍更新后的第一级值，增加一个`float`静态状态和每新样本一次额外
+  乘加；不新增Task、动态内存、通信字段或状态机。超过最大采样间隔后，两级直接以当前有效
+  去重力加速度重种，禁止继续发布旧方向。采样率、Pitch门控、前馈增益、`±0.60°`角限幅、
+  raw边界、电流限幅和全部安全行为不变。
+- 回放证据：旧单级Euler 4 ms在冻结日志上的静止RMS约`12.68 mm/s²`、强推正/负削峰约
+  `9.35%/7.45%`；两级2.25 ms为`14.24 mm/s²`、约`5.0%/4.3%`，峰滞后约2 ms。1 kHz理论
+  幅值在10/20/50/100/200/500 Hz依次约为`0.981/0.927/0.672/0.345/0.127/0.048`。
+- 涉及文件：`APP/Algorithm/ChassisImuAcceleration/`、`Task/task_app.c`、`config/core_config.h`、
+  两组相关测试、README、COOPERATION和本记录。
+- 验证方式和结果：新增冻结幅值正转负短脉冲、500 Hz交替噪声和断帧反向重种断言；两组
+  测试以ARM GCC `-Wall -Wextra -Wpedantic -Werror`完成编译。Debug/Release完整链接无警告，
+  FLASH/RAM分别为`38396/20072 B`和`33472/20048 B`。当前环境没有本机C运行器，因此没有
+  宣称测试运行PASS。2026-07-31用户允许烧录后，以VID:PID `0416:5051`锁定F407探针；
+  OpenOCD识别Cortex-M4、DEV_ID尾码`0x413`和512 KiB Flash，Debug ELF编程完成并复位。
+  按用户要求未做额外回读；未发送Enable/电流命令或启动无刷电机。
+- 已知限制与待确认：冻结静止段没有无刷启用后的振动谱，所以不增加固定陷波。VOFA仍只以
+  50 Hz抽取，极短峰可能在显示端漏采；这不影响1 kHz内部滤波。后续上板只需核对BMI序号率、
+  静止RMS、短推双峰和电机开启后的振动主频，再决定是否需要针对性陷波。
+## 2026-07-31：BMI088 Sensor Y纵向加速度链与F407烧录
+
+- 结论：控制加速度已改为`a_forward=(Sensor Y-Ay_bias)*+1`。启动前300个连续有效样本求Ay运行均值并冻结；标定完成前不提交控制加速度。旧Sensor X/Z、Pitch、Gyro Y和重力投影逻辑已从控制链删除。
+- 修改原因：实车VOFA确认CH23/Sensor Y平行车身，向前推动时先出现正主峰、停车时出现负反峰；旧Pitch链会把重力漂移误判为持续纵向加速度。
+- 最终决策：保持两级精确EMA，每级`tau=2.25 ms`；超过`5 ms`采样间隙时以当前`Ay-bias`重种两级滤波。前馈仍为`0.50*(-1)*atan2(a_forward,g)`，前馈角和视觉+B​​MI088总动态杆角限幅均保持`±0.60°`，杆角表、绝对raw边界和电流保护不变。
+- 涉及文件：`APP/Algorithm/ChassisImuAcceleration/`、`Task/task_app.[ch]`、`config/core_config.h`以及对应两组主机测试。VOFA CH22/CH23/CH24继续保持原始BMI088 X/Y/Z，便于实车观察；G3519固件未改、未烧录。
+- 验证方式和结果：F407 Debug完整链接通过，FLASH/RAM为`33308/20056 B`。OpenOCD按`VID:PID 0416:5051`锁定F407，写入当前Debug ELF并复位运行；按用户要求未执行额外verify或运行回读。
+- 已知限制：本轮只完成编译和部署，没有宣称带球闭环效果已通过。启动零偏假定复位后车辆至少静止约`0.3 s`；若启动阶段移动车辆，本次冻结偏置会错误，需重新复位并静止标定。
+- 待确认事项：静止约0.3 s后按KEY1，观察向前加速时车头执行端是否降低，以及带球稳态、7～10 Hz机构追振和`±0.60°`饱和占比。
+
+## 2026-07-31：无刷使能振动陷波与加速度前馈降增益
+
+- 结论：新`vofa+1.csv`证明旧版目标长时间撞`±0.60°`不是BMI088本底噪声，而是无刷/机构约9～14 Hz振动回灌。现在`Ay-bias`后先加1 kHz RBJ陷波，再进入原两级EMA；前馈增益由`0.50`降为`0.20`。
+- 数据证据：新phase2共3279帧/65.58 s，旧版目标端点占比`70.57%`，目标到反馈仍约滞后`40 ms`，主振在约`9.4～13.7 Hz`内漂移。电机失能时Ay标准差约`30～43 mm/s²`，使能后约`500～600 mm/s²`。视觉有效位未出现，这组数据不用于评价视觉闭环。
+- 最终决策：陷波参数为`fs=1000 Hz`、`f0=11.7 Hz`、`Q=1.2`；两级EMA仍为每级`tau=2.25 ms`。离线回放估计静车振动RMS约由`561`降至`187 mm/s²`，增益0.20时静车角目标限幅率约由`49.4%`降至`1.56%`。不改`±0.60°`、raw边界、电流保护、PID和任何极性。
+- 涉及文件：`APP/Algorithm/ChassisImuAcceleration/algorithm_chassis_imu_acceleration.[ch]`、`Task/task_app.c`、`config/core_config.h`及两组相关主机测试。
+- 验证方式和结果：Debug固件完整链接通过，FLASH/RAM为`38520/20096 B`。以F407探针`VID:PID 0416:5051`写入Debug ELF并复位，OpenOCD报告`Programming Finished`；按用户要求未执行额外回读。
+- 烧录后实机证据：最新`vofa+.csv`的phase2共2532帧/50.64 s，目标端点占比由上一组`70.57%`降至`34.32%`，跟踪MAE由`517.4`降至`227.8 raw`，转速RMS由`9.63`降至`4.65 rpm`，最大误差由`3896`降至`985 raw`；目标到反馈滞后仍约`40 ms`。旧的11.6～13.5 Hz不再主导目标，但仍有8.2～9.1 Hz残余，目标主能量现在0.75～1.34 Hz。VOFA I23依旧是陷波前的原始Sensor Y，其RMS不会直接显示陷波效果。
+- 已知限制与待确认：50 Hz VOFA抽取可能混叠高频分量；新版虽明显改善，但目标仍有`34.32%`时间在端点。最新数据全程无视觉有效位，不能用来评价球位置闭环；还需区分0.75～1.34 Hz成分是人为推车的真实加速度，还是电机使能后的低频自激。

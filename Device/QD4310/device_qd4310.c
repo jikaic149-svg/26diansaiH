@@ -94,7 +94,6 @@ bool Device_QD4310_Init(
         !valid_motor_id(config->motor_id) ||
         (config->feedback_timeout_ms == 0U) ||
         (config->feedback_timeout_ms > (UINT32_MAX / 2U)) ||
-        (config->send_timeout_ms == 0U) ||
         !isfinite(config->current_limit_a) ||
         (config->current_limit_a <= 0.0F) ||
         (config->current_limit_a > DEVICE_QD4310_PEAK_CURRENT_A) ||

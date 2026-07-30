@@ -10,25 +10,46 @@
 
 #define DEVICE_PEER_LINK_BAUD_RATE UINT32_C(115200)
 #define DEVICE_PEER_LINK_RX_CHUNK_CAPACITY ALGORITHM_PACKET_MAX_FRAME_SIZE
-#define DEVICE_PEER_LINK_TX_PAYLOAD_CAPACITY 40U
+#define DEVICE_PEER_LINK_TX_PAYLOAD_CAPACITY 72U
+
+#define DEVICE_PEER_LINK_CAR_SPEED_ABS_MAX_MM_PER_SECOND INT32_C(5000)
+#define DEVICE_PEER_LINK_CAR_ACCEL_ABS_MAX_MM_PER_SECOND2 INT32_C(50000)
+#define DEVICE_PEER_LINK_CAR_PITCH_RATE_ABS_MAX_CENTI_DPS INT32_C(100000)
 
 typedef struct {
-    uint8_t motor_id;
-    bool enabled;
-    int32_t current_milliamps;
-    int32_t speed_centi_rpm;
-    uint32_t angle_milliradians;
-    bool online;
-    uint32_t received_at_ms;
+    uint32_t sample_ms;
+    int32_t speed_x_mm_per_second;
+    int32_t acceleration_x_mm_per_second2;
+    int32_t acceleration_z_mm_per_second2;
+    int32_t pitch_rate_centi_dps;
     bool valid;
-} Device_PeerLink_Telemetry;
+    uint32_t received_at_ms;
+} Device_PeerLink_CarState;
 
+/* F407 -> G3519 fixed-point debug Latest Value for VOFA forwarding. */
 typedef struct {
-    uint8_t motor_id;
-    /* QD4310 CAN feedback data[6..7], no unit, exact uint16 protocol value. */
-    uint16_t angle_raw;
-    bool online;
-} Device_PeerLink_AbsoluteEncoder;
+    int32_t chassis_acceleration_mm_s2;
+    int32_t chassis_compensation_mdeg;
+    int32_t rod_command_mdeg;
+    uint16_t motor_target_raw;
+    uint16_t motor_feedback_raw;
+    int32_t motor_command_current_ma;
+    int32_t motor_feedback_current_ma;
+    int32_t motor_speed_centi_rpm;
+    uint8_t control_phase;
+    uint16_t status_flags;
+} Device_PeerLink_DebugTelemetry;
+
+#define DEVICE_PEER_LINK_DEBUG_MOTOR_ONLINE        UINT16_C(0x0001)
+#define DEVICE_PEER_LINK_DEBUG_MOTOR_ENABLED       UINT16_C(0x0002)
+#define DEVICE_PEER_LINK_DEBUG_ACCEL_VALID         UINT16_C(0x0004)
+#define DEVICE_PEER_LINK_DEBUG_ROD_SATURATED       UINT16_C(0x0008)
+#define DEVICE_PEER_LINK_DEBUG_RAW_BLOCKED          UINT16_C(0x0010)
+#define DEVICE_PEER_LINK_DEBUG_BALL_VALID           UINT16_C(0x0020)
+#define DEVICE_PEER_LINK_DEBUG_PEER_FAULT           UINT16_C(0x0040)
+#define DEVICE_PEER_LINK_DEBUG_VISION_FAULT         UINT16_C(0x0080)
+#define DEVICE_PEER_LINK_DEBUG_TASK_FAULT           UINT16_C(0x0100)
+#define DEVICE_PEER_LINK_DEBUG_STATUS_MASK          UINT16_C(0x01FF)
 
 typedef struct {
     size_t transport_index;
@@ -51,16 +72,16 @@ typedef struct {
     uint32_t heartbeat_payload_error_count;
     uint32_t heartbeat_source_error_count;
     uint32_t duplicate_sequence_count;
-    uint32_t telemetry_tx_count;
-    uint32_t telemetry_tx_drop_count;
-    uint32_t telemetry_tx_error_count;
-    uint32_t telemetry_rx_count;
-    uint32_t telemetry_payload_error_count;
-    uint32_t telemetry_source_error_count;
-    uint32_t telemetry_duplicate_sequence_count;
-    uint32_t encoder_tx_count;
-    uint32_t encoder_tx_drop_count;
-    uint32_t encoder_tx_error_count;
+    uint32_t remote_session_reset_count;
+    uint32_t car_state_rx_count;
+    uint32_t car_state_payload_error_count;
+    uint32_t car_state_source_error_count;
+    uint32_t car_state_duplicate_sequence_count;
+    uint32_t car_state_old_sequence_count;
+    uint32_t car_state_old_sample_count;
+    uint32_t debug_tx_count;
+    uint32_t debug_tx_drop_count;
+    uint32_t debug_tx_error_count;
     uint32_t step_error_count;
     BSP_UART_RxStatus uart_rx;
 } Device_PeerLink_Status;
@@ -76,15 +97,17 @@ typedef struct {
     uint8_t rx_chunk[DEVICE_PEER_LINK_RX_CHUNK_CAPACITY];
     uint8_t tx_payload[DEVICE_PEER_LINK_TX_PAYLOAD_CAPACITY];
     uint8_t tx_frame[ALGORITHM_PACKET_MAX_FRAME_SIZE];
-    Device_PeerLink_Telemetry remote_telemetry;
+    Device_PeerLink_CarState remote_car_state;
     uint32_t next_heartbeat_tx_ms;
     uint16_t heartbeat_tx_sequence;
-    uint16_t telemetry_tx_sequence;
-    uint16_t encoder_tx_sequence;
+    uint16_t debug_tx_sequence;
     uint16_t last_heartbeat_rx_sequence;
-    uint16_t last_telemetry_rx_sequence;
+    uint16_t last_car_state_rx_sequence;
+    uint32_t last_car_state_sample_ms;
     bool heartbeat_rx_sequence_seen;
-    bool telemetry_rx_sequence_seen;
+    bool car_state_rx_sequence_seen;
+    bool car_state_sample_seen;
+    bool remote_car_state_seen;
     bool initialized;
 } Device_PeerLink;
 
@@ -93,31 +116,21 @@ bool Device_PeerLink_Init(
     const Device_PeerLink_Config *config,
     uint32_t now_ms);
 
-/* Non-blocking periodic service. A false result records a local API/transport
- * error but never stops other product functions; call again next Task cycle. */
+/* Non-blocking periodic service. Unknown packet types are ignored. */
 bool Device_PeerLink_Step(Device_PeerLink *link, uint32_t now_ms);
 
-/* Queue one fixed-format F407 motor telemetry frame. BUSY drops the complete
- * frame without blocking or advancing its sequence and is reported in
- * status; false is reserved for invalid data or transport/API errors. */
-bool Device_PeerLink_SendTelemetry(
-    Device_PeerLink *link,
-    const Device_PeerLink_Telemetry *telemetry);
-
-/* Queue one F407 QD4310 absolute encoder frame:
- *   ENC=<node_id>,<motor_id>,<angle_raw>,<online>
- * BUSY drops the complete frame without blocking, retrying, or advancing
- * encoder_tx_sequence. */
-bool Device_PeerLink_SendAbsoluteEncoder(
-    Device_PeerLink *link,
-    const Device_PeerLink_AbsoluteEncoder *encoder);
-
-/* Copy the latest valid remote telemetry. Returns false when no frame has
- * arrived or its local receive age exceeds maximum_age_ms. */
-bool Device_PeerLink_GetRemoteTelemetry(
+/* Copy the latest source-valid CAR sample. Freshness uses the F407 local
+ * receive clock; maximum_age_ms is inclusive and supports uint32_t wrap. */
+bool Device_PeerLink_GetRemoteCarState(
     const Device_PeerLink *link,
     uint32_t now_ms,
     uint32_t maximum_age_ms,
-    Device_PeerLink_Telemetry *telemetry);
+    Device_PeerLink_CarState *state);
+
+/* BUSY drops the complete DBG frame, returns true, and keeps its sequence. */
+bool Device_PeerLink_SendDebugTelemetry(
+    Device_PeerLink *link,
+    const Device_PeerLink_DebugTelemetry *telemetry);
+
 
 #endif

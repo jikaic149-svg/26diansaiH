@@ -36,6 +36,7 @@ typedef struct {
     BSP_CAN_Handle can;
     uint8_t motor_id;
     uint32_t feedback_timeout_ms;
+    /* 0 selects a non-blocking CAN mailbox check. */
     uint32_t send_timeout_ms;
     /* Local command guards. Defaults use continuous ratings. Values may be
      * raised only as far as the V2.3 physical peak ratings. */

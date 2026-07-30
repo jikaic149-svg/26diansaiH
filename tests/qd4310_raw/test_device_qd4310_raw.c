@@ -90,10 +90,22 @@ static void test_raw_boundaries(void)
         6.2831853071795864769F) < 0.000001F);
 }
 
+static void test_nonblocking_send_timeout_is_valid(void)
+{
+    Device_QD4310 motor;
+    Device_QD4310_Config config;
+
+    assert(Device_QD4310_DefaultConfig(&s_can, 1U, &config));
+    config.send_timeout_ms = 0U;
+    assert(Device_QD4310_Init(&motor, &config));
+    assert(motor.config.send_timeout_ms == 0U);
+}
+
 int main(void)
 {
     test_raw_value_is_exact_and_angle_is_derived();
     test_raw_boundaries();
+    test_nonblocking_send_timeout_is_valid();
     puts("QD4310 raw encoder tests: PASS");
     return 0;
 }

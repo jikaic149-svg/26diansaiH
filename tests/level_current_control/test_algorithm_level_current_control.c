@@ -18,12 +18,16 @@ static Algorithm_LevelCurrentControl_Config default_config(void)
         .kp_a_per_deg = 0.010F,
         .ki_a_per_deg_s = 0.0002F,
         .kd_a_per_rpm = 0.0005F,
+        .feedforward_current_a = 0.0F,
         .error_limit_deg = 8.0F,
         .deadband_deg = 0.20F,
         .integral_zone_deg = 1.0F,
         .integral_limit_a = 0.010F,
         .current_limit_a = 0.30F,
         .current_polarity = 1.0F,
+        .raw_min_limit = 1000U,
+        .raw_max_limit = 2000U,
+        .raw_recovery_current_a = 0.10F,
     };
 }
 
@@ -146,6 +150,29 @@ static void test_speed_damping_current_limit_and_hard_limit(void)
     assert(close_enough(current_a, 0.0F));
 }
 
+static void test_static_feedforward_and_output_limit(void)
+{
+    Algorithm_LevelCurrentControl controller;
+    Algorithm_LevelCurrentControl_Config config = default_config();
+    float current_a;
+
+    config.feedforward_current_a = -0.090F;
+    start_at(&controller, &config, 0.0F);
+    assert(Algorithm_LevelCurrentControl_Update(
+        &controller, 0.0F, 0.0F, &current_a));
+    assert(close_enough(current_a, -0.090F));
+
+    assert(Algorithm_LevelCurrentControl_Update(
+        &controller, wrap_degrees(20.0F), 0.0F, &current_a));
+    assert(close_enough(current_a, -0.168F));
+
+    config = default_config();
+    config.feedforward_current_a = 0.31F;
+    assert(!Algorithm_LevelCurrentControl_Init(&controller, &config));
+    config.feedforward_current_a = NAN;
+    assert(!Algorithm_LevelCurrentControl_Init(&controller, &config));
+}
+
 static void test_runtime_target_update(void)
 {
     Algorithm_LevelCurrentControl controller;
@@ -165,6 +192,94 @@ static void test_runtime_target_update(void)
     assert(close_enough(controller.config.target_deg, 2.0F));
 }
 
+static void test_continuous_target_update_preserves_integral(void)
+{
+    Algorithm_LevelCurrentControl controller;
+    const Algorithm_LevelCurrentControl_Config config = default_config();
+
+    start_at(&controller, &config, 0.0F);
+    controller.integral_current_a = 0.005F;
+    assert(Algorithm_LevelCurrentControl_SetTrackingTargetDeg(
+        &controller, 1.5F));
+    assert(close_enough(controller.config.target_deg, 1.5F));
+    assert(close_enough(controller.integral_current_a, 0.005F));
+
+    assert(!Algorithm_LevelCurrentControl_SetTrackingTargetDeg(
+        &controller, 86.0F));
+    assert(!Algorithm_LevelCurrentControl_SetTrackingTargetDeg(
+        &controller, NAN));
+    assert(close_enough(controller.config.target_deg, 1.5F));
+    assert(close_enough(controller.integral_current_a, 0.005F));
+}
+
+static void test_integral_rate_scales_to_500_hz(void)
+{
+    Algorithm_LevelCurrentControl slow;
+    Algorithm_LevelCurrentControl fast;
+    Algorithm_LevelCurrentControl_Config slow_config = default_config();
+    Algorithm_LevelCurrentControl_Config fast_config = default_config();
+    float current_a;
+
+    slow_config.control_period_s = 0.010F;
+    fast_config.control_period_s = 0.002F;
+    start_at(&slow, &slow_config, 0.0F);
+    start_at(&fast, &fast_config, 0.0F);
+
+    assert(Algorithm_LevelCurrentControl_Update(
+        &slow, wrap_degrees(-0.5F), 0.0F, &current_a));
+    for (unsigned int count = 0U; count < 5U; ++count) {
+        assert(Algorithm_LevelCurrentControl_Update(
+            &fast, wrap_degrees(-0.5F), 0.0F, &current_a));
+    }
+    assert(close_enough(
+        slow.integral_current_a, fast.integral_current_a));
+}
+
+static void test_raw_recovery_is_inward_only(void)
+{
+    Algorithm_LevelCurrentControl controller;
+    Algorithm_LevelCurrentControl_Config config = default_config();
+    float current_a;
+    bool recovery_active;
+
+    start_at(&controller, &config, 0.0F);
+    controller.integral_current_a = 0.005F;
+    assert(Algorithm_LevelCurrentControl_ComputeRawRecoveryCurrent(
+        &controller, 999U, &current_a, &recovery_active));
+    assert(recovery_active);
+    assert(close_enough(current_a, 0.10F));
+    assert(close_enough(controller.integral_current_a, 0.0F));
+
+    assert(Algorithm_LevelCurrentControl_ComputeRawRecoveryCurrent(
+        &controller, 1000U, &current_a, &recovery_active));
+    assert(!recovery_active);
+    assert(close_enough(current_a, 0.0F));
+    assert(Algorithm_LevelCurrentControl_ComputeRawRecoveryCurrent(
+        &controller, 2000U, &current_a, &recovery_active));
+    assert(!recovery_active);
+
+    assert(Algorithm_LevelCurrentControl_ComputeRawRecoveryCurrent(
+        &controller, 2001U, &current_a, &recovery_active));
+    assert(recovery_active);
+    assert(close_enough(current_a, -0.10F));
+
+    config.current_polarity = -1.0F;
+    start_at(&controller, &config, 0.0F);
+    assert(Algorithm_LevelCurrentControl_ComputeRawRecoveryCurrent(
+        &controller, 999U, &current_a, &recovery_active));
+    assert(recovery_active);
+    assert(close_enough(current_a, -0.10F));
+    assert(Algorithm_LevelCurrentControl_ComputeRawRecoveryCurrent(
+        &controller, 2001U, &current_a, &recovery_active));
+    assert(close_enough(current_a, 0.10F));
+
+    Algorithm_LevelCurrentControl_Stop(&controller);
+    assert(!Algorithm_LevelCurrentControl_ComputeRawRecoveryCurrent(
+        &controller, 999U, &current_a, &recovery_active));
+    assert(!recovery_active);
+    assert(close_enough(current_a, 0.0F));
+}
+
 static void test_invalid_config_and_polarity(void)
 {
     Algorithm_LevelCurrentControl controller;
@@ -172,6 +287,15 @@ static void test_invalid_config_and_polarity(void)
     float current_a;
 
     config.target_deg = 86.0F;
+    assert(!Algorithm_LevelCurrentControl_Init(&controller, &config));
+
+    config = default_config();
+    config.raw_max_limit = config.raw_min_limit;
+    assert(!Algorithm_LevelCurrentControl_Init(&controller, &config));
+    config = default_config();
+    config.raw_recovery_current_a = 0.0F;
+    assert(!Algorithm_LevelCurrentControl_Init(&controller, &config));
+    config.raw_recovery_current_a = 0.31F;
     assert(!Algorithm_LevelCurrentControl_Init(&controller, &config));
 
     config = default_config();
@@ -191,7 +315,11 @@ int main(void)
     test_single_turn_wrap_and_proportional_current();
     test_deadband_integral_zone_and_integral_limit();
     test_speed_damping_current_limit_and_hard_limit();
+    test_static_feedforward_and_output_limit();
     test_runtime_target_update();
+    test_continuous_target_update_preserves_integral();
+    test_integral_rate_scales_to_500_hz();
+    test_raw_recovery_is_inward_only();
     test_invalid_config_and_polarity();
     puts("level current control tests: PASS");
     return 0;
