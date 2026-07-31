@@ -24,6 +24,13 @@
 #define TASK_BMI088_MAX_DMA_COMPLETIONS_PER_PUMP 3U
 #define TASK_BMI088_DMA_WAIT_TICKS              pdMS_TO_TICKS(1U)
 
+typedef enum {
+    TASK_VISION_LINK_FAULT_NONE = 0U,
+    TASK_VISION_LINK_FAULT_CONFIG = 1U,
+    TASK_VISION_LINK_FAULT_STEP = 2U,
+    TASK_VISION_LINK_FAULT_TX = 3U,
+} Task_VisionLinkFault;
+
 static StaticTask_t g_TASK_GatewayTCB;
 static StackType_t g_TASK_GatewayStack[GATEWAY_TASK_STACK_DEPTH];
 
@@ -37,7 +44,10 @@ static bool s_peer_link_ready;
 static uint32_t s_peer_link_fault;
 static Device_VisionLink s_vision_link;
 static bool s_vision_link_ready;
-static uint32_t s_vision_link_fault;
+static Task_VisionLinkFault s_vision_link_fault;
+static uint32_t s_vision_link_started_ms;
+static uint16_t s_last_used_vision_sequence;
+static bool s_vision_measurement_used_seen;
 static Device_BMI088 s_bmi088;
 static bool s_bmi088_ready;
 static uint32_t s_bmi088_fault;
@@ -45,6 +55,7 @@ static Algorithm_ChassisImuAcceleration s_chassis_imu_acceleration;
 static uint32_t s_last_chassis_imu_sample_ms;
 static bool s_chassis_imu_sample_seen;
 static uint32_t s_next_debug_tx_ms;
+static uint32_t s_next_vision_status_tx_ms;
 static uint32_t s_bmi088_terminal_sequence_consumed;
 
 volatile uint32_t g_TASK_Heartbeat = 0U;
@@ -57,6 +68,9 @@ volatile int32_t g_TASK_BMI088_AccelX_mm_s2 = 0;
 volatile int32_t g_TASK_BMI088_AccelY_mm_s2 = 0;
 volatile int32_t g_TASK_BMI088_AccelZ_mm_s2 = 0;
 volatile int32_t g_TASK_BMI088_ProcessedAccel_mm_s2 = 0;
+volatile uint32_t g_TASK_BallTargetCommandErrors = 0U;
+volatile uint32_t g_TASK_BallStopCommandErrors = 0U;
+volatile uint32_t g_TASK_BallPidTuningErrors = 0U;
 
 static void Task_KeyInit(uint32_t now_ms)
 {
@@ -116,7 +130,39 @@ static void Task_PeerLinkInit(uint32_t now_ms)
     }
 }
 
-static void Task_VisionLinkInit(void)
+static void Task_TakePeerBallCommands(void)
+{
+    Device_PeerLink_BallStopCommand stop_command;
+    Device_PeerLink_BallTargetCommand target_command;
+
+    if (!s_peer_link_ready) {
+        return;
+    }
+    if (Device_PeerLink_TakeBallStopRequest(
+            &s_peer_link, &stop_command)) {
+        if (!APP_Gateway_StopPrimaryMotor()) {
+            if (g_TASK_BallStopCommandErrors < UINT32_MAX) {
+                ++g_TASK_BallStopCommandErrors;
+            }
+        }
+        /* STOP has priority over every BTG parsed in the same Task cycle.
+         * Consume and discard that one-slot Latest Value so it cannot be
+         * applied after a later local restart. */
+        (void)Device_PeerLink_TakeBallTargetCommand(
+            &s_peer_link, &target_command);
+        return;
+    }
+    if (Device_PeerLink_TakeBallTargetCommand(
+            &s_peer_link, &target_command) &&
+        !APP_Gateway_SetBallTargetMm(
+            (float)target_command.target_0p1mm * 0.1F)) {
+        if (g_TASK_BallTargetCommandErrors < UINT32_MAX) {
+            ++g_TASK_BallTargetCommandErrors;
+        }
+    }
+}
+
+static void Task_VisionLinkInit(uint32_t now_ms)
 {
     const Device_VisionLink_Config config = {
         .transport_index = VISION_LINK_UART_INDEX,
@@ -128,11 +174,59 @@ static void Task_VisionLinkInit(void)
         .transport_bound_ms = VISION_LINK_TRANSPORT_BOUND_MS,
     };
 
-    s_vision_link_fault = 0U;
+    s_vision_link_fault = TASK_VISION_LINK_FAULT_NONE;
+    s_vision_link_started_ms = now_ms;
+    s_last_used_vision_sequence = 0U;
+    s_vision_measurement_used_seen = false;
     s_vision_link_ready = Device_VisionLink_Init(
         &s_vision_link, &config);
     if (!s_vision_link_ready) {
-        s_vision_link_fault = 1U;
+        s_vision_link_fault = TASK_VISION_LINK_FAULT_CONFIG;
+    }
+}
+
+static uint16_t Task_GainToMilli(float gain)
+{
+    const float scaled = gain * 1000.0F;
+
+    if (!isfinite(scaled) || (scaled <= 0.0F)) {
+        return 0U;
+    }
+    if (scaled >= (float)UINT16_MAX) {
+        return UINT16_MAX;
+    }
+    return (uint16_t)(scaled + 0.5F);
+}
+
+static void Task_TakeVisionPidTuning(void)
+{
+    Device_VisionLink_PidTuningCommand command;
+    float kp;
+    float ki;
+    float kd;
+    bool accepted;
+
+    if (!s_vision_link_ready ||
+        !Device_VisionLink_TakePidTuningCommand(
+            &s_vision_link, &command)) {
+        return;
+    }
+    accepted = APP_Gateway_SetBallPidGains(
+        (float)command.kp_milli_per_s2 * 0.001F,
+        (float)command.ki_milli_per_s3 * 0.001F,
+        (float)command.kd_milli_per_s * 0.001F);
+    if (!accepted && (g_TASK_BallPidTuningErrors < UINT32_MAX)) {
+        ++g_TASK_BallPidTuningErrors;
+    }
+    if (!APP_Gateway_GetBallPidGains(&kp, &ki, &kd) ||
+        !Device_VisionLink_SendPidTuningAck(
+            &s_vision_link,
+            command.sequence,
+            accepted,
+            Task_GainToMilli(kp),
+            Task_GainToMilli(ki),
+            Task_GainToMilli(kd))) {
+        s_vision_link_fault = TASK_VISION_LINK_FAULT_TX;
     }
 }
 
@@ -341,6 +435,164 @@ static int32_t Task_ScaleFloatToI32(float value, float scale)
     return (int32_t)(scaled + ((scaled >= 0.0F) ? 0.5F : -0.5F));
 }
 
+static int16_t Task_ClampI32ToI16(int32_t value)
+{
+    if (value > INT16_MAX) {
+        return INT16_MAX;
+    }
+    if (value < INT16_MIN) {
+        return INT16_MIN;
+    }
+    return (int16_t)value;
+}
+
+static void Task_SendVisionControlStatus(
+    uint32_t now_ms,
+    const APP_Gateway_ControlInput *input,
+    const APP_Gateway_Telemetry *gateway)
+{
+    Device_VisionLink_ControlStatus status = {0};
+    uint16_t flags = 0U;
+    uint16_t faults = 0U;
+    bool link_online;
+
+    if (!s_vision_link_ready || (gateway == NULL) ||
+        ((int32_t)(now_ms - s_next_vision_status_tx_ms) < 0)) {
+        return;
+    }
+    s_next_vision_status_tx_ms =
+        now_ms + VISION_LINK_STATUS_TX_PERIOD_MS;
+    link_online = (s_vision_link.status.vis_rx_count > 0U) &&
+        s_vision_link.measurement.valid &&
+        ((uint32_t)(now_ms - s_vision_link.status.last_vis_rx_ms) <
+            VISION_LINK_SESSION_TIMEOUT_MS);
+
+    if (gateway->ball_last_used_sequence_valid) {
+        s_last_used_vision_sequence =
+            gateway->ball_last_used_sequence;
+        s_vision_measurement_used_seen = true;
+    }
+
+    if (s_vision_link.status.vis_rx_count > 0U) {
+        flags |= DEVICE_VISION_LINK_STATUS_VIS_RX_SEEN;
+        status.last_rx_vis_sequence = s_vision_link.last_vis_sequence;
+    }
+    if (s_vision_measurement_used_seen) {
+        flags |= DEVICE_VISION_LINK_STATUS_MEASUREMENT_USED;
+        status.last_used_vis_sequence =
+            s_last_used_vision_sequence;
+    }
+    if (s_vision_link.measurement.valid &&
+        s_vision_link.measurement.usable) {
+        flags |= DEVICE_VISION_LINK_STATUS_LAST_VIS_USABLE;
+    }
+    if (gateway->ball_measurement_valid) {
+        flags |= DEVICE_VISION_LINK_STATUS_ESTIMATE_VALID |
+            DEVICE_VISION_LINK_STATUS_ESTIMATE_FRESH;
+    }
+    flags |= DEVICE_VISION_LINK_STATUS_TARGET_VALID;
+    if (gateway->level_control_phase != 0U) {
+        flags |= DEVICE_VISION_LINK_STATUS_CONTROL_ARMED |
+            DEVICE_VISION_LINK_STATUS_LEVEL_LOOP_ACTIVE;
+        if (!gateway->motor_raw_limit_blocked) {
+            flags |= DEVICE_VISION_LINK_STATUS_THETA_APPLIED;
+        }
+    }
+    if ((gateway->level_control_phase == 2U) &&
+        gateway->ball_measurement_valid) {
+        flags |= DEVICE_VISION_LINK_STATUS_BALL_OUTER_ACTIVE;
+    }
+    if (gateway->online) {
+        flags |= DEVICE_VISION_LINK_STATUS_MOTOR_ONLINE;
+    }
+    if (gateway->enabled) {
+        flags |= DEVICE_VISION_LINK_STATUS_MOTOR_ENABLED;
+    }
+    if (link_online) {
+        flags |= DEVICE_VISION_LINK_STATUS_LINK_ONLINE;
+    }
+    if (gateway->ball_velocity_valid) {
+        flags |= DEVICE_VISION_LINK_STATUS_VELOCITY_VALID;
+    }
+
+    if (!link_online &&
+        ((uint32_t)(now_ms - s_vision_link_started_ms) >=
+            VISION_LINK_SESSION_TIMEOUT_MS)) {
+        faults |= DEVICE_VISION_LINK_FAULT_LINK_TIMEOUT;
+    }
+    if ((s_vision_link.status.vis_rx_count > 0U) &&
+        !gateway->ball_measurement_valid) {
+        faults |= DEVICE_VISION_LINK_FAULT_MEASUREMENT_STALE;
+    }
+    if (s_vision_link.status.uart_rx.software_overflow_count > 0U) {
+        faults |= DEVICE_VISION_LINK_FAULT_UART_RX_OVERFLOW;
+    }
+    if ((s_vision_link.status.step_error_count > 0U) ||
+        (s_vision_link.status.uart_rx.hardware_overrun_count > 0U) ||
+        (s_vision_link.status.uart_rx.framing_error_count > 0U) ||
+        (s_vision_link.status.uart_rx.parity_error_count > 0U) ||
+        (s_vision_link.status.uart_rx.dma_error_count > 0U)) {
+        faults |= DEVICE_VISION_LINK_FAULT_UART_HW_ERROR;
+    }
+    if (s_vision_link.status.packet_parser_error_count > 0U) {
+        faults |= DEVICE_VISION_LINK_FAULT_PACKET_ERROR;
+    }
+    if (s_vision_link.status.vis_payload_error_count > 0U) {
+        faults |= DEVICE_VISION_LINK_FAULT_VIS_PAYLOAD_ERROR;
+    }
+    if ((s_vision_link.status.vis_duplicate_sequence_count > 0U) ||
+        (s_vision_link.status.vis_old_sequence_count > 0U)) {
+        faults |= DEVICE_VISION_LINK_FAULT_VIS_SEQUENCE_ERROR;
+    }
+    if (g_TASK_BallTargetCommandErrors > 0U) {
+        faults |= DEVICE_VISION_LINK_FAULT_TARGET_INVALID;
+    }
+    if (gateway->motor_raw_limit_blocked) {
+        faults |= DEVICE_VISION_LINK_FAULT_ANGLE_MAPPING;
+    }
+    if (gateway->level_control_fault_count > 0U) {
+        faults |= DEVICE_VISION_LINK_FAULT_LEVEL_CONTROL;
+    }
+    if (!gateway->online) {
+        faults |= DEVICE_VISION_LINK_FAULT_MOTOR_OFFLINE;
+    }
+    if ((s_vision_link.status.vst_tx_drop_count > 0U) ||
+        (s_vision_link.status.vst_tx_error_count > 0U) ||
+        (s_vision_link.status.vpa_tx_drop_count > 0U) ||
+        (s_vision_link.status.vpa_tx_error_count > 0U)) {
+        faults |= DEVICE_VISION_LINK_FAULT_TX_DROP_ERROR;
+    }
+    /* CONFIG_INVALID is reserved for Device_VisionLink_Init() rejecting the
+     * static transport/configuration contract. Runtime Step/TX failures have
+     * dedicated UART, packet and TX fault bits above. */
+    if (s_vision_link_fault == TASK_VISION_LINK_FAULT_CONFIG) {
+        faults |= DEVICE_VISION_LINK_FAULT_CONFIG_INVALID;
+    }
+    if (faults != 0U) {
+        flags |= DEVICE_VISION_LINK_STATUS_FAULT_PRESENT;
+    }
+
+    status.measurement_age_ms = ((input != NULL) &&
+        input->ball_measurement_valid) ?
+        (uint16_t)((input->ball_measurement_age_ms < UINT16_MAX) ?
+            input->ball_measurement_age_ms : UINT16_C(65534)) : UINT16_MAX;
+    status.estimate_mm = gateway->ball_measurement_valid ?
+        Task_ClampI32ToI16(Task_ScaleFloatToI32(
+            gateway->ball_position_mm, 1.0F)) : 0;
+    status.velocity_mm_s = gateway->ball_velocity_valid ?
+        Task_ClampI32ToI16(Task_ScaleFloatToI32(
+            gateway->ball_velocity_mm_s, 1.0F)) : 0;
+    status.target_mm = Task_ClampI32ToI16(Task_ScaleFloatToI32(
+        gateway->ball_target_mm, 1.0F));
+    status.theta_command_mdeg = (gateway->level_control_phase != 0U) ?
+        Task_ScaleFloatToI32(gateway->rod_command_deg, 1000.0F) : 0;
+    status.status_flags = flags;
+    status.fault_bits = faults;
+    if (!Device_VisionLink_SendControlStatus(&s_vision_link, &status)) {
+        s_vision_link_fault = TASK_VISION_LINK_FAULT_TX;
+    }
+}
+
 static void Task_SendDebugTelemetry(
     uint32_t now_ms,
     const APP_Gateway_Telemetry *gateway)
@@ -447,7 +699,10 @@ static void Task_Gateway(void *argument)
         (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS));
     s_next_debug_tx_ms =
         (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
-    Task_VisionLinkInit();
+    s_next_vision_status_tx_ms =
+        (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+    Task_VisionLinkInit(
+        (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS));
 
     for (;;) {
         APP_Gateway_Telemetry gateway_telemetry;
@@ -466,12 +721,16 @@ static void Task_Gateway(void *argument)
             !Device_PeerLink_Step(&s_peer_link, g_TASK_NowMs)) {
             s_peer_link_fault = 2U;
         }
+        Task_TakePeerBallCommands();
         if (s_vision_link_ready &&
             !Device_VisionLink_Step(&s_vision_link, g_TASK_NowMs)) {
-            s_vision_link_fault = 2U;
+            s_vision_link_fault = TASK_VISION_LINK_FAULT_STEP;
         }
+        Task_TakeVisionPidTuning();
         control_input = Task_MakeControlInput(g_TASK_NowMs);
         APP_Gateway_Step(
+            g_TASK_NowMs, &control_input, &gateway_telemetry);
+        Task_SendVisionControlStatus(
             g_TASK_NowMs, &control_input, &gateway_telemetry);
         Task_SendDebugTelemetry(g_TASK_NowMs, &gateway_telemetry);
         vTaskDelayUntil(
@@ -493,9 +752,16 @@ bool Task_Init(void)
     g_TASK_BMI088_AccelY_mm_s2 = 0;
     g_TASK_BMI088_AccelZ_mm_s2 = 0;
     g_TASK_BMI088_ProcessedAccel_mm_s2 = 0;
+    g_TASK_BallTargetCommandErrors = 0U;
+    g_TASK_BallStopCommandErrors = 0U;
+    g_TASK_BallPidTuningErrors = 0U;
     s_last_chassis_imu_sample_ms = 0U;
     s_chassis_imu_sample_seen = false;
     s_next_debug_tx_ms = 0U;
+    s_next_vision_status_tx_ms = 0U;
+    s_vision_link_started_ms = 0U;
+    s_last_used_vision_sequence = 0U;
+    s_vision_measurement_used_seen = false;
     s_bmi088_terminal_sequence_consumed = 0U;
 
     task = xTaskCreateStatic(

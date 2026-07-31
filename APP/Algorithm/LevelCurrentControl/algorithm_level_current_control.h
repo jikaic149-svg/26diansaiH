@@ -16,7 +16,9 @@ typedef struct {
     float kp_a_per_deg;
     float ki_a_per_deg_s;
     float kd_a_per_rpm;
-    /* Static current needed to carry the mechanism at the reference angle. */
+    /* Static current needed to carry the mechanism at the reference angle.
+     * If position error requests the opposite direction, this term is
+     * released linearly across deadband_deg and is zero before P takes over. */
     float feedforward_current_a;
     float error_limit_deg;
     float deadband_deg;
@@ -80,6 +82,14 @@ bool Algorithm_LevelCurrentControl_ComputeRawRecoveryCurrent(
     uint16_t raw,
     float *current_a,
     bool *recovery_active);
+/* Raise a non-zero command to a minimum magnitude without changing its sign.
+ * If the existing command is zero, raw_error and current_polarity select the
+ * same direction that the position controller would request. */
+bool Algorithm_LevelCurrentControl_ApplyMinimumCurrent(
+    const Algorithm_LevelCurrentControl *controller,
+    int32_t raw_error,
+    float minimum_current_a,
+    float *current_a);
 bool Algorithm_LevelCurrentControl_Update(
     Algorithm_LevelCurrentControl *controller,
     float absolute_angle_rad,

@@ -71,9 +71,16 @@ static float visual_rod_target(float camera_position_mm)
     Algorithm_BallPositionControl controller;
     const Algorithm_BallPositionControl_Config config = {
         .target_position_mm = GATEWAY_BALL_TARGET_MM,
+        .maximum_absolute_target_position_mm =
+            GATEWAY_BALL_TARGET_LIMIT_MM,
+        .target_slew_rate_mm_s = GATEWAY_BALL_TARGET_SLEW_MM_S,
         .measurement_polarity = GATEWAY_BALL_MEASUREMENT_POLARITY,
         .position_gain_per_s2 = GATEWAY_BALL_POSITION_KP_PER_S2,
+        .position_integral_gain_per_s3 =
+            GATEWAY_BALL_POSITION_KI_PER_S3,
         .velocity_gain_per_s = GATEWAY_BALL_VELOCITY_KD_PER_S,
+        .maximum_integral_acceleration_mm_s2 =
+            GATEWAY_BALL_INTEGRAL_ACCEL_LIMIT_MM_S2,
         .velocity_filter_tau_s = GATEWAY_BALL_VELOCITY_FILTER_TAU_S,
         .gravity_mm_s2 = GATEWAY_BALL_GRAVITY_MM_S2,
         .inertia_ratio = GATEWAY_BALL_INERTIA_RATIO,

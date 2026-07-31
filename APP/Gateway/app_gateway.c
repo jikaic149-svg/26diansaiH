@@ -52,9 +52,14 @@ static uint16_t s_tx_sequence;
 static uint32_t s_last_feedback_sequence[GATEWAY_MOTOR_COUNT];
 static uint32_t s_last_control_feedback_sequence;
 static uint32_t s_level_control_fault_count;
-static const float s_level_calibration_targets_deg[] =
-    GATEWAY_LEVEL_CALIBRATION_TARGETS_DEG;
+static uint32_t s_level_enable_requested_ms;
 static size_t s_level_calibration_index;
+static bool s_level_calibration_active;
+static bool s_level_calibration_target_reached;
+static bool s_level_calibration_stable_seen;
+static uint32_t s_level_calibration_point_started_ms;
+static uint32_t s_level_calibration_stable_since_ms;
+static uint32_t s_level_calibration_hold_since_ms;
 static float s_rod_trim_angle_deg;
 static float s_rod_minimum_angle_deg;
 static float s_rod_maximum_angle_deg;
@@ -77,6 +82,7 @@ static Gateway_LevelPhase s_level_phase;
 static bool s_zero_entry_stable_seen;
 static uint32_t s_zero_entry_stable_since_ms;
 static float s_chassis_compensation_angle_deg;
+static uint32_t s_last_ball_target_update_ms;
 
 static float clamp_float(float value, float minimum, float maximum)
 {
@@ -100,6 +106,53 @@ static float raw_target_to_relative_motor_deg(float raw)
         delta += 65536.0F;
     }
     return delta * (360.0F / 65535.0F);
+}
+
+static size_t level_calibration_one_way_point_count(void)
+{
+    return GATEWAY_LEVEL_CALIBRATION_ONE_WAY_POINTS;
+}
+
+static size_t level_calibration_total_point_count(void)
+{
+    return 2U * level_calibration_one_way_point_count() - 1U;
+}
+
+static uint16_t level_calibration_target_raw(size_t index)
+{
+    const size_t one_way_count =
+        level_calibration_one_way_point_count();
+    const size_t total_count =
+        level_calibration_total_point_count();
+    const size_t progress_index = (index < one_way_count) ?
+        index : (total_count - 1U - index);
+    const uint32_t interval_count = (uint32_t)(one_way_count - 1U);
+    const uint32_t offset =
+        (GATEWAY_LEVEL_CALIBRATION_SPAN_RAW *
+            (uint32_t)progress_index + (interval_count / 2U)) /
+        interval_count;
+
+    return (uint16_t)(GATEWAY_LEVEL_CALIBRATION_START_RAW + offset);
+}
+
+static int32_t raw_signed_error(uint16_t target, uint16_t feedback)
+{
+    int32_t delta = (int32_t)target - (int32_t)feedback;
+
+    if (delta > INT16_MAX) {
+        delta -= INT32_C(65536);
+    }
+    else if (delta < INT16_MIN) {
+        delta += INT32_C(65536);
+    }
+    return delta;
+}
+
+static uint16_t raw_distance(uint16_t first, uint16_t second)
+{
+    const int32_t delta = raw_signed_error(first, second);
+
+    return (uint16_t)((delta < 0) ? -delta : delta);
 }
 
 static bool apply_rod_target_deg(float requested_rod_angle_deg)
@@ -318,6 +371,12 @@ static bool update_primary_tracking_target(
     bool target_applied;
 
     s_chassis_compensation_angle_deg = 0.0F;
+    if (s_level_calibration_active) {
+        s_chassis_acceleration_valid = false;
+        s_selected_chassis_acceleration_mm_s2 = 0;
+        s_ball_measurement_valid = false;
+        return true;
+    }
     if (s_level_phase == GATEWAY_LEVEL_PHASE_ZEROING) {
         s_chassis_acceleration_valid = false;
         s_selected_chassis_acceleration_mm_s2 = 0;
@@ -387,8 +446,8 @@ static bool update_primary_tracking_target(
     requested_offset_deg = ball_angle_deg + chassis_angle_deg;
     limited_offset_deg = clamp_float(
         requested_offset_deg,
-        -GATEWAY_TOTAL_ROD_COMMAND_LIMIT_DEG,
-        GATEWAY_TOTAL_ROD_COMMAND_LIMIT_DEG);
+        GATEWAY_TOTAL_ROD_COMMAND_MIN_DEG,
+        GATEWAY_TOTAL_ROD_COMMAND_MAX_DEG);
     total_angle_saturated = limited_offset_deg != requested_offset_deg;
     target_applied = apply_rod_target_deg(
         s_rod_trim_angle_deg + limited_offset_deg);
@@ -414,9 +473,15 @@ static bool stop_primary_level_control(void)
     bool disabled = false;
 
     s_level_phase = GATEWAY_LEVEL_PHASE_STOPPED;
+    s_level_calibration_active = false;
+    s_level_calibration_target_reached = false;
+    s_level_calibration_stable_seen = false;
     s_zero_entry_stable_seen = false;
+    s_level_enable_requested_ms = 0U;
     s_chassis_compensation_angle_deg = 0.0F;
     s_motor_command_current_a = 0.0F;
+    (void)Algorithm_BallPositionControl_ResetTargetPositionMm(
+        &s_ball_controller, GATEWAY_BALL_TARGET_MM);
     if (motor->initialized) {
         if (motor->command_enabled) {
             zero_sent = Device_QD4310_SetCurrent(motor, 0.0F);
@@ -425,6 +490,73 @@ static bool stop_primary_level_control(void)
     }
     Algorithm_LevelCurrentControl_Stop(&s_level_controller);
     return zero_sent && disabled;
+}
+
+static bool apply_level_calibration_target(size_t index, uint32_t now_ms)
+{
+    const uint16_t target_raw = level_calibration_target_raw(index);
+
+    if ((index >= level_calibration_total_point_count()) ||
+        !Algorithm_LevelCurrentControl_SetTargetDeg(
+            &s_level_controller,
+            raw_target_to_relative_motor_deg((float)target_raw))) {
+        return false;
+    }
+    s_level_calibration_index = index;
+    s_motor_target_raw = target_raw;
+    s_level_calibration_target_reached = false;
+    s_level_calibration_stable_seen = false;
+    s_level_calibration_point_started_ms = now_ms;
+    s_level_phase = GATEWAY_LEVEL_PHASE_ZEROING;
+    return true;
+}
+
+static bool update_level_calibration(
+    uint32_t now_ms, const Device_QD4310_Feedback *feedback)
+{
+    const bool stable = (feedback != NULL) &&
+        (raw_distance(
+            feedback->single_turn_angle_raw, s_motor_target_raw) <=
+            GATEWAY_LEVEL_CALIBRATION_STABLE_TOL_RAW) &&
+        (fabsf(feedback->speed_rpm) <=
+            GATEWAY_LEVEL_CALIBRATION_STABLE_MAX_RPM);
+
+    if (!s_level_calibration_active) {
+        return true;
+    }
+    if ((uint32_t)(now_ms - s_level_calibration_point_started_ms) >=
+        GATEWAY_LEVEL_CALIBRATION_POINT_TIMEOUT_MS) {
+        return false;
+    }
+    if (!stable) {
+        s_level_calibration_stable_seen = false;
+        s_level_phase = GATEWAY_LEVEL_PHASE_ZEROING;
+        return true;
+    }
+    if (!s_level_calibration_stable_seen) {
+        s_level_calibration_stable_seen = true;
+        s_level_calibration_stable_since_ms = now_ms;
+        return true;
+    }
+    if (s_level_phase == GATEWAY_LEVEL_PHASE_ZEROING) {
+        if ((uint32_t)(now_ms - s_level_calibration_stable_since_ms) >=
+            GATEWAY_LEVEL_CALIBRATION_STABLE_TIME_MS) {
+            s_level_phase =
+                GATEWAY_LEVEL_PHASE_ACCELERATION_COMPENSATION;
+            s_level_calibration_hold_since_ms = now_ms;
+        }
+        return true;
+    }
+    if ((uint32_t)(now_ms - s_level_calibration_hold_since_ms) <
+        GATEWAY_LEVEL_CALIBRATION_HOLD_TIME_MS) {
+        return true;
+    }
+    if ((s_level_calibration_index + 1U) >=
+        level_calibration_total_point_count()) {
+        return stop_primary_level_control();
+    }
+    return apply_level_calibration_target(
+        s_level_calibration_index + 1U, now_ms);
 }
 
 static void enforce_primary_motor_disabled_when_stopped(uint32_t now_ms)
@@ -468,7 +600,112 @@ static void run_primary_level_control(uint32_t now_ms)
         return;
     }
     s_last_control_feedback_sequence = feedback.sequence;
-    if ((s_level_phase == GATEWAY_LEVEL_PHASE_ZEROING) &&
+    if (s_level_calibration_active) {
+        if (GATEWAY_LEVEL_CALIBRATION_MANUAL_MODE != 0U) {
+            if (!feedback.enabled) {
+                ++s_level_control_fault_count;
+                (void)stop_primary_level_control();
+                return;
+            }
+            s_motor_target_raw = feedback.single_turn_angle_raw;
+            s_level_phase =
+                ((uint32_t)(now_ms - s_level_calibration_point_started_ms) >=
+                    GATEWAY_LEVEL_CALIBRATION_MANUAL_ARM_MS) ?
+                GATEWAY_LEVEL_PHASE_ACCELERATION_COMPENSATION :
+                GATEWAY_LEVEL_PHASE_ZEROING;
+            s_motor_command_current_a = 0.0F;
+            if (!Device_QD4310_SetCurrent(motor, 0.0F)) {
+                ++s_level_control_fault_count;
+                (void)stop_primary_level_control();
+            }
+            return;
+        }
+        const int32_t raw_error = raw_signed_error(
+            s_motor_target_raw, feedback.single_turn_angle_raw);
+        const uint16_t distance_raw = raw_distance(
+            s_motor_target_raw, feedback.single_turn_angle_raw);
+        const bool downward_leg = (s_level_calibration_index != 0U) &&
+            (s_level_calibration_index <
+                level_calibration_one_way_point_count());
+        float control_current_a;
+
+        current_a = 0.0F;
+        if (!feedback.enabled) {
+            ++s_level_control_fault_count;
+            (void)stop_primary_level_control();
+            return;
+        }
+        if (distance_raw <= GATEWAY_LEVEL_CALIBRATION_STABLE_TOL_RAW) {
+            s_level_calibration_target_reached = true;
+        }
+        if (s_level_calibration_target_reached) {
+            /* Closed-loop holding removes the old 0/0.20 A chatter at each
+             * sample. The feedforward carries gravity while raw P and speed D
+             * keep the actual sample close to its target. */
+            control_current_a = GATEWAY_LEVEL_FEEDFORWARD_CURRENT_A +
+                GATEWAY_LEVEL_CALIBRATION_HOLD_KP_A_PER_RAW *
+                    (float)raw_error -
+                GATEWAY_LEVEL_CALIBRATION_SPEED_KD_A_PER_RPM *
+                    feedback.speed_rpm;
+            control_current_a = clamp_float(
+                control_current_a,
+                -GATEWAY_LEVEL_CALIBRATION_MIN_CURRENT_A,
+                GATEWAY_LEVEL_CALIBRATION_MIN_CURRENT_A);
+        }
+        else {
+            const float approach_scale = clamp_float(
+                (float)distance_raw /
+                    (float)GATEWAY_LEVEL_CALIBRATION_SLOWDOWN_RAW,
+                GATEWAY_LEVEL_CALIBRATION_APPROACH_MIN_CURRENT_A /
+                    GATEWAY_LEVEL_CALIBRATION_MIN_CURRENT_A,
+                1.0F);
+            const float approach_current_a =
+                GATEWAY_LEVEL_CALIBRATION_MIN_CURRENT_A * approach_scale;
+
+            control_current_a = 0.0F;
+            /* Raw decrease is upward. Index zero is upward-only; the first
+             * scan leg is downward-only and the return leg is upward-only. */
+            if (!downward_leg && (raw_error < 0)) {
+                control_current_a = -approach_current_a -
+                    GATEWAY_LEVEL_CALIBRATION_SPEED_KD_A_PER_RPM *
+                        feedback.speed_rpm;
+                if (control_current_a > 0.0F) {
+                    control_current_a = 0.0F;
+                }
+            }
+            else if (downward_leg && (raw_error > 0)) {
+                control_current_a = approach_current_a -
+                    GATEWAY_LEVEL_CALIBRATION_SPEED_KD_A_PER_RPM *
+                        feedback.speed_rpm;
+                if (control_current_a < 0.0F) {
+                    control_current_a = 0.0F;
+                }
+            }
+            control_current_a = clamp_float(
+                control_current_a,
+                -GATEWAY_LEVEL_CALIBRATION_MIN_CURRENT_A,
+                GATEWAY_LEVEL_CALIBRATION_MIN_CURRENT_A);
+        }
+        current_a = control_current_a * GATEWAY_LEVEL_CURRENT_POLARITY;
+        if (((feedback.single_turn_angle_raw <=
+                    GATEWAY_LEVEL_RAW_MIN_LIMIT) &&
+                (control_current_a < 0.0F)) ||
+            ((feedback.single_turn_angle_raw >=
+                    GATEWAY_LEVEL_RAW_MAX_LIMIT) &&
+                (control_current_a > 0.0F))) {
+            current_a = 0.0F;
+            s_motor_raw_limit_blocked = true;
+        }
+        s_motor_command_current_a = current_a;
+        if (!Device_QD4310_SetCurrent(motor, current_a) ||
+            !update_level_calibration(now_ms, &feedback)) {
+            ++s_level_control_fault_count;
+            (void)stop_primary_level_control();
+        }
+        return;
+    }
+    if (!s_level_calibration_active &&
+        (s_level_phase == GATEWAY_LEVEL_PHASE_ZEROING) &&
         Algorithm_LevelCurrentControl_GetRelativeAngleDeg(
             &s_level_controller,
             feedback.single_turn_angle_rad,
@@ -485,13 +722,32 @@ static void run_primary_level_control(uint32_t now_ms)
             GATEWAY_LEVEL_ZERO_ENTRY_SETTLE_MS) {
             s_level_phase =
                 GATEWAY_LEVEL_PHASE_ACCELERATION_COMPENSATION;
+            if (!APP_Gateway_SetBallTargetMm(GATEWAY_BALL_TARGET_MM)) {
+                ++s_level_control_fault_count;
+                (void)stop_primary_level_control();
+                return;
+            }
         }
     }
     else {
         s_zero_entry_stable_seen = false;
     }
-    if (!feedback.enabled ||
-        !Algorithm_LevelCurrentControl_ComputeRawRecoveryCurrent(
+    if (!feedback.enabled) {
+        if (motor->command_enabled &&
+            ((uint32_t)(now_ms - s_level_enable_requested_ms) <
+                GATEWAY_LEVEL_ENABLE_CONFIRM_TIMEOUT_MS)) {
+            s_motor_command_current_a = 0.0F;
+            if (!Device_QD4310_RequestFeedback(motor)) {
+                ++s_level_control_fault_count;
+                (void)stop_primary_level_control();
+            }
+            return;
+        }
+        ++s_level_control_fault_count;
+        (void)stop_primary_level_control();
+        return;
+    }
+    if (!Algorithm_LevelCurrentControl_ComputeRawRecoveryCurrent(
             &s_level_controller,
             feedback.single_turn_angle_raw,
             &current_a,
@@ -519,7 +775,8 @@ static void run_primary_level_control(uint32_t now_ms)
         s_motor_raw_limit_blocked = true;
     }
     s_motor_command_current_a = current_a;
-    if (!Device_QD4310_SetCurrent(motor, current_a)) {
+    if (!Device_QD4310_SetCurrent(motor, current_a) ||
+        !update_level_calibration(now_ms, &feedback)) {
         ++s_level_control_fault_count;
         (void)stop_primary_level_control();
     }
@@ -709,6 +966,10 @@ static void make_primary_telemetry(
         .command_current_a = s_motor_command_current_a,
         .ball_position_mm = s_ball_controller.position_mm,
         .ball_velocity_mm_s = s_ball_controller.velocity_mm_s,
+        .ball_integral_acceleration_mm_s2 =
+            s_ball_controller.integral_acceleration_mm_s2,
+        .ball_target_mm = s_ball_controller.target_command_mm,
+        .ball_active_target_mm = s_ball_controller.target_position_mm,
         .ball_acceleration_bias_mm_s2 = estimator_state_valid ?
             estimator_state.acceleration_bias_mm_s2 : 0.0F,
         .ball_position_variance_mm2 = estimator_state_valid ?
@@ -727,6 +988,7 @@ static void make_primary_telemetry(
             fusion_covariance.p11 : 0.0F,
         .ball_measurement_valid = s_ball_measurement_valid,
         .ball_velocity_valid = s_ball_controller.velocity_valid,
+        .ball_last_used_sequence_valid = s_last_ball_sequence_seen,
         .ball_estimator_trusted =
             (GATEWAY_BALL_KALMAN_ENABLE != 0U) &&
             Algorithm_BallStateEstimator_IsTrusted(
@@ -736,6 +998,7 @@ static void make_primary_telemetry(
         .rod_angle_saturated = s_rod_angle_saturated,
         .motor_raw_limit_blocked = s_motor_raw_limit_blocked,
         .level_control_phase = (uint8_t)s_level_phase,
+        .ball_last_used_sequence = s_last_ball_sequence,
         .chassis_compensation_angle_deg =
             s_chassis_compensation_angle_deg,
         .ball_estimator_innovation_reject_count =
@@ -743,6 +1006,7 @@ static void make_primary_telemetry(
         .chassis_fusion_innovation_reject_count =
             s_chassis_fusion.wheel_innovation_reject_count +
             s_chassis_fusion.imu_innovation_reject_count,
+        .level_control_fault_count = s_level_control_fault_count,
     };
     if (!Device_QD4310_GetFeedback(
             &s_motors[0], now_ms, &feedback)) {
@@ -857,15 +1121,22 @@ bool APP_Gateway_Init(uint32_t now_ms)
         .current_limit_a = GATEWAY_LEVEL_CURRENT_LIMIT_A,
         .current_polarity = GATEWAY_LEVEL_CURRENT_POLARITY,
         .raw_min_limit = GATEWAY_LEVEL_RAW_MIN_LIMIT,
-        .raw_max_limit = GATEWAY_LEVEL_RAW_MAX_LIMIT,
+        .raw_max_limit = GATEWAY_LEVEL_RAW_CONTROL_MAX,
         .raw_recovery_current_a =
             GATEWAY_LEVEL_RAW_RECOVERY_CURRENT_A,
     };
     const Algorithm_BallPositionControl_Config ball_config = {
         .target_position_mm = GATEWAY_BALL_TARGET_MM,
+        .maximum_absolute_target_position_mm =
+            GATEWAY_BALL_TARGET_LIMIT_MM,
+        .target_slew_rate_mm_s = GATEWAY_BALL_TARGET_SLEW_MM_S,
         .measurement_polarity = GATEWAY_BALL_MEASUREMENT_POLARITY,
         .position_gain_per_s2 = GATEWAY_BALL_POSITION_KP_PER_S2,
+        .position_integral_gain_per_s3 =
+            GATEWAY_BALL_POSITION_KI_PER_S3,
         .velocity_gain_per_s = GATEWAY_BALL_VELOCITY_KD_PER_S,
+        .maximum_integral_acceleration_mm_s2 =
+            GATEWAY_BALL_INTEGRAL_ACCEL_LIMIT_MM_S2,
         .velocity_filter_tau_s = GATEWAY_BALL_VELOCITY_FILTER_TAU_S,
         .gravity_mm_s2 = GATEWAY_BALL_GRAVITY_MM_S2,
         .inertia_ratio = GATEWAY_BALL_INERTIA_RATIO,
@@ -959,6 +1230,22 @@ bool APP_Gateway_Init(uint32_t now_ms)
             GATEWAY_LEVEL_CONTROL_PERIOD_MS) ||
         (GATEWAY_LEVEL_CURRENT_LIMIT_A >
             GATEWAY_MOTOR_CURRENT_LIMIT_A) ||
+        !isfinite(GATEWAY_LEVEL_CALIBRATION_MIN_CURRENT_A) ||
+        (GATEWAY_LEVEL_CALIBRATION_MIN_CURRENT_A <= 0.0F) ||
+        (GATEWAY_LEVEL_CALIBRATION_MIN_CURRENT_A >
+            GATEWAY_LEVEL_CURRENT_LIMIT_A) ||
+        !isfinite(GATEWAY_LEVEL_CALIBRATION_APPROACH_MIN_CURRENT_A) ||
+        (GATEWAY_LEVEL_CALIBRATION_APPROACH_MIN_CURRENT_A <= 0.0F) ||
+        (GATEWAY_LEVEL_CALIBRATION_APPROACH_MIN_CURRENT_A >
+            GATEWAY_LEVEL_CALIBRATION_MIN_CURRENT_A) ||
+        (GATEWAY_LEVEL_CALIBRATION_SLOWDOWN_RAW <=
+            GATEWAY_LEVEL_CALIBRATION_STABLE_TOL_RAW) ||
+        !isfinite(GATEWAY_LEVEL_CALIBRATION_HOLD_KP_A_PER_RAW) ||
+        (GATEWAY_LEVEL_CALIBRATION_HOLD_KP_A_PER_RAW <= 0.0F) ||
+        !isfinite(GATEWAY_LEVEL_CALIBRATION_SPEED_KD_A_PER_RPM) ||
+        (GATEWAY_LEVEL_CALIBRATION_SPEED_KD_A_PER_RPM < 0.0F) ||
+        !isfinite(GATEWAY_LEVEL_CALIBRATION_START_MAX_SPEED_RPM) ||
+        (GATEWAY_LEVEL_CALIBRATION_START_MAX_SPEED_RPM < 0.0F) ||
         !isfinite(GATEWAY_LEVEL_ZERO_ENTRY_TOL_DEG) ||
         (GATEWAY_LEVEL_ZERO_ENTRY_TOL_DEG <= 0.0F) ||
         !isfinite(GATEWAY_LEVEL_ZERO_ENTRY_MAX_RPM) ||
@@ -995,9 +1282,9 @@ bool APP_Gateway_Init(uint32_t now_ms)
             &s_rod_angle_map,
             (float)GATEWAY_LEVEL_TRIM_RAW,
             &s_rod_trim_angle_deg) ||
-        ((s_rod_trim_angle_deg - GATEWAY_TOTAL_ROD_COMMAND_LIMIT_DEG) <
+        ((s_rod_trim_angle_deg + GATEWAY_TOTAL_ROD_COMMAND_MIN_DEG) <
             s_rod_minimum_angle_deg) ||
-        ((s_rod_trim_angle_deg + GATEWAY_TOTAL_ROD_COMMAND_LIMIT_DEG) >
+        ((s_rod_trim_angle_deg + GATEWAY_TOTAL_ROD_COMMAND_MAX_DEG) >
             s_rod_maximum_angle_deg) ||
         !apply_rod_target_deg(s_rod_trim_angle_deg)) {
         return false;
@@ -1040,7 +1327,14 @@ bool APP_Gateway_Init(uint32_t now_ms)
     s_tx_sequence = 0U;
     s_last_control_feedback_sequence = 0U;
     s_level_control_fault_count = 0U;
+    s_level_enable_requested_ms = 0U;
     s_level_calibration_index = 0U;
+    s_level_calibration_active = false;
+    s_level_calibration_target_reached = false;
+    s_level_calibration_stable_seen = false;
+    s_level_calibration_point_started_ms = 0U;
+    s_level_calibration_stable_since_ms = 0U;
+    s_level_calibration_hold_since_ms = 0U;
     s_motor_command_current_a = 0.0F;
     s_selected_chassis_acceleration_mm_s2 = 0;
     s_planned_chassis_acceleration_mm_s2 = 0;
@@ -1056,6 +1350,7 @@ bool APP_Gateway_Init(uint32_t now_ms)
     s_zero_entry_stable_seen = false;
     s_zero_entry_stable_since_ms = 0U;
     s_chassis_compensation_angle_deg = 0.0F;
+    s_last_ball_target_update_ms = now_ms;
     return true;
 }
 
@@ -1066,6 +1361,14 @@ void APP_Gateway_Step(
 {
     uint8_t byte;
     size_t processed = 0U;
+    const uint32_t target_elapsed_ms =
+        now_ms - s_last_ball_target_update_ms;
+
+    s_last_ball_target_update_ms = now_ms;
+    if (!Algorithm_BallPositionControl_AdvanceTarget(
+            &s_ball_controller, target_elapsed_ms)) {
+        ++s_level_control_fault_count;
+    }
 
     if (GATEWAY_ESP8266_ENABLE != 0U) {
         esp8266_poll(&s_wireless, now_ms);
@@ -1143,6 +1446,8 @@ bool APP_Gateway_TogglePrimaryMotor(uint32_t now_ms)
         !isfinite(feedback.speed_rpm) ||
         (fabsf(feedback.speed_rpm) >
             GATEWAY_LEVEL_START_MAX_SPEED_RPM) ||
+        !Algorithm_BallPositionControl_ResetTargetPositionMm(
+            &s_ball_controller, GATEWAY_BALL_TARGET_MM) ||
         !apply_rod_target_deg(0.0F) ||
         !Algorithm_LevelCurrentControl_Start(&s_level_controller)) {
         return false;
@@ -1151,6 +1456,7 @@ bool APP_Gateway_TogglePrimaryMotor(uint32_t now_ms)
     s_level_phase = GATEWAY_LEVEL_PHASE_ZEROING;
     s_zero_entry_stable_seen = false;
     s_last_control_feedback_sequence = feedback.sequence;
+    s_level_enable_requested_ms = now_ms;
     if (Device_QD4310_Enable(motor) &&
         Device_QD4310_SetCurrent(motor, 0.0F)) {
         s_motor_command_current_a = 0.0F;
@@ -1160,42 +1466,109 @@ bool APP_Gateway_TogglePrimaryMotor(uint32_t now_ms)
     return false;
 }
 
+bool APP_Gateway_StopPrimaryMotor(void)
+{
+    return stop_primary_level_control();
+}
+
+bool APP_Gateway_SetBallTargetMm(float target_mm)
+{
+    if ((s_level_phase !=
+            GATEWAY_LEVEL_PHASE_ACCELERATION_COMPENSATION) ||
+        !Algorithm_LevelCurrentControl_IsActive(&s_level_controller) ||
+        !s_ball_measurement_valid) {
+        return false;
+    }
+    return Algorithm_BallPositionControl_SetTargetPositionMm(
+        &s_ball_controller, target_mm);
+}
+
+bool APP_Gateway_SetBallPidGains(
+    float kp_per_s2, float ki_per_s3, float kd_per_s)
+{
+    if (!isfinite(kp_per_s2) || !isfinite(ki_per_s3) ||
+        !isfinite(kd_per_s) ||
+        (kp_per_s2 < 0.0F) ||
+        (kp_per_s2 > GATEWAY_BALL_TUNING_KP_MAX_PER_S2) ||
+        (ki_per_s3 < 0.0F) ||
+        (ki_per_s3 > GATEWAY_BALL_TUNING_KI_MAX_PER_S3) ||
+        (kd_per_s < 0.0F) ||
+        (kd_per_s > GATEWAY_BALL_TUNING_KD_MAX_PER_S)) {
+        return false;
+    }
+    return Algorithm_BallPositionControl_SetGains(
+        &s_ball_controller, kp_per_s2, ki_per_s3, kd_per_s);
+}
+
+bool APP_Gateway_GetBallPidGains(
+    float *kp_per_s2, float *ki_per_s3, float *kd_per_s)
+{
+    if ((kp_per_s2 == NULL) || (ki_per_s3 == NULL) ||
+        (kd_per_s == NULL) || !s_ball_controller.initialized) {
+        return false;
+    }
+    *kp_per_s2 = s_ball_controller.config.position_gain_per_s2;
+    *ki_per_s3 = s_ball_controller.config.position_integral_gain_per_s3;
+    *kd_per_s = s_ball_controller.config.velocity_gain_per_s;
+    return true;
+}
+
 bool APP_Gateway_AdvancePrimaryMotorCalibration(uint32_t now_ms)
 {
     Device_QD4310 *motor = &s_motors[0];
-    const bool active =
-        Algorithm_LevelCurrentControl_IsActive(&s_level_controller);
+    Device_QD4310_Feedback feedback;
+    bool target_configured;
 
     if (!motor->initialized ||
-        (GATEWAY_ARRAY_COUNT(s_level_calibration_targets_deg) == 0U)) {
+        !isfinite(GATEWAY_LEVEL_CALIBRATION_STABLE_MAX_RPM) ||
+        (GATEWAY_LEVEL_CALIBRATION_STABLE_MAX_RPM < 0.0F)) {
         return false;
     }
-    if (active || motor->command_enabled) {
-        if (!active || !motor->command_enabled) {
-            (void)stop_primary_level_control();
-            return false;
-        }
-        if ((s_level_calibration_index + 1U) >=
-            GATEWAY_ARRAY_COUNT(s_level_calibration_targets_deg)) {
-            s_level_calibration_index = 0U;
-            return stop_primary_level_control();
-        }
-        if (!Algorithm_LevelCurrentControl_SetTargetDeg(
-                &s_level_controller,
-                s_level_calibration_targets_deg[
-                    s_level_calibration_index + 1U])) {
-            return false;
-        }
-        ++s_level_calibration_index;
+    if (s_level_calibration_active ||
+        Algorithm_LevelCurrentControl_IsActive(&s_level_controller) ||
+        motor->command_enabled) {
+        return stop_primary_level_control();
+    }
+    if (!Device_QD4310_GetFeedback(motor, now_ms, &feedback) ||
+        !feedback.online || feedback.enabled ||
+        ((uint32_t)(now_ms - feedback.received_at_ms) >=
+            GATEWAY_LEVEL_FEEDBACK_TIMEOUT_MS) ||
+        !isfinite(feedback.speed_rpm) ||
+        (fabsf(feedback.speed_rpm) >
+            GATEWAY_LEVEL_CALIBRATION_START_MAX_SPEED_RPM) ||
+        !Algorithm_BallPositionControl_ResetTargetPositionMm(
+            &s_ball_controller, GATEWAY_BALL_TARGET_MM)) {
+        return false;
+    }
+    Algorithm_BallPositionControl_ResetMeasurement(&s_ball_controller);
+    if (GATEWAY_LEVEL_CALIBRATION_MANUAL_MODE != 0U) {
+        target_configured = Algorithm_LevelCurrentControl_SetTargetDeg(
+            &s_level_controller,
+            raw_target_to_relative_motor_deg(
+                (float)feedback.single_turn_angle_raw));
+        s_motor_target_raw = feedback.single_turn_angle_raw;
+        s_level_calibration_point_started_ms = now_ms;
+        s_level_phase = GATEWAY_LEVEL_PHASE_ZEROING;
+    }
+    else {
+        target_configured = apply_level_calibration_target(0U, now_ms);
+    }
+    if (!target_configured ||
+        !Algorithm_LevelCurrentControl_Start(&s_level_controller)) {
+        (void)stop_primary_level_control();
+        return false;
+    }
+    s_level_calibration_active = true;
+    s_motor_raw_limit_blocked = false;
+    s_zero_entry_stable_seen = false;
+    s_last_control_feedback_sequence = feedback.sequence;
+    if (Device_QD4310_Enable(motor) &&
+        Device_QD4310_SetCurrent(motor, 0.0F)) {
+        s_motor_command_current_a = 0.0F;
         return true;
     }
-
-    if (!Algorithm_LevelCurrentControl_SetTargetDeg(
-            &s_level_controller, s_level_calibration_targets_deg[0])) {
-        return false;
-    }
-    s_level_calibration_index = 0U;
-    return APP_Gateway_TogglePrimaryMotor(now_ms);
+    (void)stop_primary_level_control();
+    return false;
 }
 
 uint32_t APP_Gateway_CommandCount(void)

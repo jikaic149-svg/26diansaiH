@@ -97,7 +97,7 @@ static void fake_reset(void)
     s_rx_length = 0U;
 }
 
-static void queue_packet(
+static void append_packet(
     const char *type, uint16_t sequence, const char *payload)
 {
     size_t frame_length = 0U;
@@ -105,9 +105,16 @@ static void queue_packet(
     assert(Algorithm_Packet_Encode(
         type, sequence,
         (const uint8_t *)payload, strlen(payload),
-        s_rx, sizeof(s_rx), &frame_length) ==
+        &s_rx[s_rx_length], sizeof(s_rx) - s_rx_length, &frame_length) ==
         ALGORITHM_PACKET_ENCODE_OK);
-    s_rx_length = frame_length;
+    s_rx_length += frame_length;
+}
+
+static void queue_packet(
+    const char *type, uint16_t sequence, const char *payload)
+{
+    s_rx_length = 0U;
+    append_packet(type, sequence, payload);
 }
 
 static Device_PeerLink_Config make_config(void)
@@ -277,6 +284,149 @@ static void test_local_freshness_wrap(void)
         &link, received_at + 51U, 50U, &state));
 }
 
+static void test_ball_target_latest_value_bounds_and_order(void)
+{
+    Device_PeerLink link;
+    const Device_PeerLink_Config config = make_config();
+    Device_PeerLink_BallTargetCommand command;
+
+    fake_reset();
+    assert(Device_PeerLink_Init(&link, &config, 0U));
+    queue_packet("BTG", UINT16_MAX, "2,1250");
+    assert(Device_PeerLink_Step(&link, 10U));
+    queue_packet("BTG", 0U, "2,-1250");
+    assert(Device_PeerLink_Step(&link, 11U));
+    assert(link.status.ball_target_rx_count == 2U);
+    assert(Device_PeerLink_TakeBallTargetCommand(&link, &command));
+    assert(command.target_0p1mm == -1250);
+    assert(command.sequence == 0U);
+    assert(command.received_at_ms == 11U);
+    assert(!Device_PeerLink_TakeBallTargetCommand(&link, &command));
+
+    queue_packet("BTG", 0U, "2,100");
+    assert(Device_PeerLink_Step(&link, 12U));
+    queue_packet("BTG", UINT16_MAX, "2,100");
+    assert(Device_PeerLink_Step(&link, 13U));
+    assert(link.status.ball_target_duplicate_sequence_count == 1U);
+    assert(link.status.ball_target_old_sequence_count == 1U);
+    assert(!Device_PeerLink_TakeBallTargetCommand(&link, &command));
+}
+
+static void test_ball_target_rejections_and_session_restart(void)
+{
+    Device_PeerLink link;
+    const Device_PeerLink_Config config = make_config();
+    Device_PeerLink_BallTargetCommand command;
+
+    fake_reset();
+    assert(Device_PeerLink_Init(&link, &config, 0U));
+    queue_packet("BTG", 0U, "1,0");
+    assert(Device_PeerLink_Step(&link, 1U));
+    queue_packet("BTG", 0U, "2,+1");
+    assert(Device_PeerLink_Step(&link, 2U));
+    queue_packet("BTG", 0U, "2,01");
+    assert(Device_PeerLink_Step(&link, 3U));
+    queue_packet("BTG", 0U, "2,-0");
+    assert(Device_PeerLink_Step(&link, 4U));
+    queue_packet("BTG", 0U, "2,1251");
+    assert(Device_PeerLink_Step(&link, 5U));
+    queue_packet("BTG", 0U, "2,-1251");
+    assert(Device_PeerLink_Step(&link, 6U));
+    queue_packet("BTG", 0U, "2,0,1");
+    assert(Device_PeerLink_Step(&link, 7U));
+    assert(link.status.ball_target_source_error_count == 1U);
+    assert(link.status.ball_target_payload_error_count == 6U);
+    assert(link.status.ball_target_rx_count == 0U);
+
+    queue_packet("HB", 0U, "2,5000");
+    assert(Device_PeerLink_Step(&link, 8U));
+    queue_packet("BTG", 42U, "2,1200");
+    assert(Device_PeerLink_Step(&link, 9U));
+    queue_packet("HB", 1U, "2,5");
+    assert(Device_PeerLink_Step(&link, 10U));
+    queue_packet("BTG", 0U, "2,-1200");
+    assert(Device_PeerLink_Step(&link, 11U));
+    assert(link.status.remote_session_reset_count == 1U);
+    assert(link.status.ball_target_rx_count == 2U);
+    assert(Device_PeerLink_TakeBallTargetCommand(&link, &command));
+    assert(command.target_0p1mm == -1200);
+    assert(command.sequence == 0U);
+}
+
+static void test_ball_stop_slot_independent_sequence_and_rejections(void)
+{
+    Device_PeerLink link;
+    const Device_PeerLink_Config config = make_config();
+    Device_PeerLink_BallTargetCommand target;
+    Device_PeerLink_BallStopCommand stop;
+
+    fake_reset();
+    assert(Device_PeerLink_Init(&link, &config, 0U));
+    queue_packet("BTG", 123U, "2,500");
+    append_packet("BST", UINT16_MAX, "2");
+    assert(Device_PeerLink_Step(&link, 20U));
+    assert(Device_PeerLink_TakeBallStopRequest(&link, &stop));
+    assert(stop.sequence == UINT16_MAX);
+    assert(stop.received_at_ms == 20U);
+    assert(Device_PeerLink_TakeBallTargetCommand(&link, &target));
+    assert(target.sequence == 123U);
+    assert(target.target_0p1mm == 500);
+
+    queue_packet("BST", 0U, "2");
+    assert(Device_PeerLink_Step(&link, 21U));
+    queue_packet("BST", 0U, "2");
+    assert(Device_PeerLink_Step(&link, 22U));
+    queue_packet("BST", UINT16_MAX, "2");
+    assert(Device_PeerLink_Step(&link, 23U));
+    assert(link.status.ball_stop_rx_count == 2U);
+    assert(link.status.ball_stop_duplicate_sequence_count == 1U);
+    assert(link.status.ball_stop_old_sequence_count == 1U);
+    assert(Device_PeerLink_TakeBallStopRequest(&link, &stop));
+    assert(stop.sequence == 0U);
+    assert(!Device_PeerLink_TakeBallStopRequest(&link, &stop));
+
+    queue_packet("BST", 1U, "1");
+    assert(Device_PeerLink_Step(&link, 24U));
+    queue_packet("BST", 1U, "02");
+    assert(Device_PeerLink_Step(&link, 25U));
+    queue_packet("BST", 1U, "2,0");
+    assert(Device_PeerLink_Step(&link, 26U));
+    assert(link.status.ball_stop_source_error_count == 1U);
+    assert(link.status.ball_stop_payload_error_count == 2U);
+}
+
+static void test_ball_stop_pending_cleared_on_session_restart(void)
+{
+    Device_PeerLink link;
+    const Device_PeerLink_Config config = make_config();
+    Device_PeerLink_BallStopCommand stop;
+
+    fake_reset();
+    assert(Device_PeerLink_Init(&link, &config, 0U));
+    queue_packet("HB", 10U, "2,5000");
+    assert(Device_PeerLink_Step(&link, 1U));
+    queue_packet("BST", 42U, "2");
+    assert(Device_PeerLink_Step(&link, 2U));
+    assert(link.ball_stop_pending);
+
+    /* A heartbeat uptime rollback starts a new remote session. The old
+     * session's untaken STOP must not survive into it. */
+    queue_packet("HB", 0U, "2,5");
+    assert(Device_PeerLink_Step(&link, 3U));
+    assert(link.status.remote_session_reset_count == 1U);
+    assert(!link.ball_stop_pending);
+    assert(!Device_PeerLink_TakeBallStopRequest(&link, &stop));
+    assert(link.pending_ball_stop.sequence == 0U);
+    assert(link.pending_ball_stop.received_at_ms == 0U);
+
+    /* The reset also reopens the independent BST sequence baseline. */
+    queue_packet("BST", 0U, "2");
+    assert(Device_PeerLink_Step(&link, 4U));
+    assert(Device_PeerLink_TakeBallStopRequest(&link, &stop));
+    assert(stop.sequence == 0U);
+    assert(stop.received_at_ms == 4U);
+}
+
 static Device_PeerLink_DebugTelemetry make_debug_telemetry(void)
 {
     return (Device_PeerLink_DebugTelemetry){
@@ -377,8 +527,12 @@ int main(void)
     test_car_rejects_malformed_and_unknown_types();
     test_car_order_wrap_and_restart();
     test_local_freshness_wrap();
+    test_ball_target_latest_value_bounds_and_order();
+    test_ball_target_rejections_and_session_restart();
+    test_ball_stop_slot_independent_sequence_and_rejections();
+    test_ball_stop_pending_cleared_on_session_restart();
     test_debug_payload_and_busy_sequence();
     test_debug_boundaries_and_rejections();
-    puts("device_peer_link CAR/DBG tests: PASS");
+    puts("device_peer_link CAR/BTG/BST/DBG tests: PASS");
     return 0;
 }

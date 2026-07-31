@@ -36,3 +36,8 @@ ball_measurement_valid、peer_fault、vision_fault、task_fault。数值均为AS
 该帧只读，不作为任何控制输入。F407发送成功只表示整帧进入本地TX队列，不证明G3519
 已经接收、转发或显示。当前G3519接收端已实现来源、范围、序号和100 ms新鲜度校验，
 并转发到VOFA CH22～CH31；仍须以双端计数和实际32列串口抓取完成硬件验收。
+
+G3519→F407新增Packet V1控制类型：`BTG=2,<target_0p1mm>`（协议域±1250，独立
+16位序号、单槽Latest Value）和`BST=2`（独立序号、单槽停止事件）。Task在PeerLink
+Step后消费，BST优先并丢弃同周期BTG，执行原有`0 A -> Disable`；BTG只在phase 2且
+上一周期视觉测量有效时SetTarget，不隐式启动。产品目标安全域为±1200（0.1 mm）。

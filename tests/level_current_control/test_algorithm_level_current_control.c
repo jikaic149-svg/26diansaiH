@@ -173,6 +173,45 @@ static void test_static_feedforward_and_output_limit(void)
     assert(!Algorithm_LevelCurrentControl_Init(&controller, &config));
 }
 
+static void test_opposing_feedforward_releases_continuously(void)
+{
+    Algorithm_LevelCurrentControl controller;
+    Algorithm_LevelCurrentControl_Config config = default_config();
+    const float raw_error_deg = 160.0F * 360.0F / 65535.0F;
+    float current_a;
+
+    config.kp_a_per_deg = 0.014F;
+    config.ki_a_per_deg_s = 0.0F;
+    config.kd_a_per_rpm = 0.0F;
+    config.feedforward_current_a = -0.072F;
+    start_at(&controller, &config, 0.0F);
+
+    assert(Algorithm_LevelCurrentControl_Update(
+        &controller, 0.0F, 0.0F, &current_a));
+    assert(close_enough(current_a, -0.072F));
+
+    assert(Algorithm_LevelCurrentControl_Update(
+        &controller, wrap_degrees(-0.10F), 0.0F, &current_a));
+    assert(close_enough(current_a, -0.036F));
+
+    assert(Algorithm_LevelCurrentControl_Update(
+        &controller, wrap_degrees(-0.20F), 0.0F, &current_a));
+    assert(close_enough(current_a, 0.0F));
+
+    assert(Algorithm_LevelCurrentControl_Update(
+        &controller, wrap_degrees(-raw_error_deg), 0.0F, &current_a));
+    assert(close_enough(
+        current_a,
+        0.014F * (raw_error_deg - config.deadband_deg)));
+    assert(current_a > 0.0F);
+
+    assert(Algorithm_LevelCurrentControl_Update(
+        &controller, wrap_degrees(raw_error_deg), 0.0F, &current_a));
+    assert(close_enough(
+        current_a,
+        -0.072F - 0.014F * (raw_error_deg - config.deadband_deg)));
+}
+
 static void test_runtime_target_update(void)
 {
     Algorithm_LevelCurrentControl controller;
@@ -309,6 +348,30 @@ static void test_invalid_config_and_polarity(void)
     assert(close_enough(controller.integral_current_a, 0.0F));
 }
 
+static void test_minimum_current_preserves_direction(void)
+{
+    Algorithm_LevelCurrentControl controller;
+    Algorithm_LevelCurrentControl_Config config = default_config();
+    float current_a = -0.073F;
+
+    start_at(&controller, &config, 0.0F);
+    assert(Algorithm_LevelCurrentControl_ApplyMinimumCurrent(
+        &controller, -75, 0.12F, &current_a));
+    assert(close_enough(current_a, -0.12F));
+
+    current_a = 0.0F;
+    assert(Algorithm_LevelCurrentControl_ApplyMinimumCurrent(
+        &controller, 75, 0.12F, &current_a));
+    assert(close_enough(current_a, 0.12F));
+
+    config.current_polarity = -1.0F;
+    start_at(&controller, &config, 0.0F);
+    current_a = 0.0F;
+    assert(Algorithm_LevelCurrentControl_ApplyMinimumCurrent(
+        &controller, 75, 0.12F, &current_a));
+    assert(close_enough(current_a, -0.12F));
+}
+
 int main(void)
 {
     test_boot_zero_is_captured_once();
@@ -316,11 +379,13 @@ int main(void)
     test_deadband_integral_zone_and_integral_limit();
     test_speed_damping_current_limit_and_hard_limit();
     test_static_feedforward_and_output_limit();
+    test_opposing_feedforward_releases_continuously();
     test_runtime_target_update();
     test_continuous_target_update_preserves_integral();
     test_integral_rate_scales_to_500_hz();
     test_raw_recovery_is_inward_only();
     test_invalid_config_and_polarity();
+    test_minimum_current_preserves_direction();
     puts("level current control tests: PASS");
     return 0;
 }

@@ -15,6 +15,7 @@
 #define DEVICE_PEER_LINK_CAR_SPEED_ABS_MAX_MM_PER_SECOND INT32_C(5000)
 #define DEVICE_PEER_LINK_CAR_ACCEL_ABS_MAX_MM_PER_SECOND2 INT32_C(50000)
 #define DEVICE_PEER_LINK_CAR_PITCH_RATE_ABS_MAX_CENTI_DPS INT32_C(100000)
+#define DEVICE_PEER_LINK_BALL_TARGET_ABS_MAX_0P1MM INT32_C(1250)
 
 typedef struct {
     uint32_t sample_ms;
@@ -25,6 +26,19 @@ typedef struct {
     bool valid;
     uint32_t received_at_ms;
 } Device_PeerLink_CarState;
+
+/* G3519 -> F407 ball command copies. Packet V1 and the packet Header SEQ
+ * carry the explicit schema version and independent command sequence. */
+typedef struct {
+    int16_t target_0p1mm;
+    uint16_t sequence;
+    uint32_t received_at_ms;
+} Device_PeerLink_BallTargetCommand;
+
+typedef struct {
+    uint16_t sequence;
+    uint32_t received_at_ms;
+} Device_PeerLink_BallStopCommand;
 
 /* F407 -> G3519 fixed-point debug Latest Value for VOFA forwarding. */
 typedef struct {
@@ -79,6 +93,16 @@ typedef struct {
     uint32_t car_state_duplicate_sequence_count;
     uint32_t car_state_old_sequence_count;
     uint32_t car_state_old_sample_count;
+    uint32_t ball_target_rx_count;
+    uint32_t ball_target_payload_error_count;
+    uint32_t ball_target_source_error_count;
+    uint32_t ball_target_duplicate_sequence_count;
+    uint32_t ball_target_old_sequence_count;
+    uint32_t ball_stop_rx_count;
+    uint32_t ball_stop_payload_error_count;
+    uint32_t ball_stop_source_error_count;
+    uint32_t ball_stop_duplicate_sequence_count;
+    uint32_t ball_stop_old_sequence_count;
     uint32_t debug_tx_count;
     uint32_t debug_tx_drop_count;
     uint32_t debug_tx_error_count;
@@ -98,16 +122,24 @@ typedef struct {
     uint8_t tx_payload[DEVICE_PEER_LINK_TX_PAYLOAD_CAPACITY];
     uint8_t tx_frame[ALGORITHM_PACKET_MAX_FRAME_SIZE];
     Device_PeerLink_CarState remote_car_state;
+    Device_PeerLink_BallTargetCommand pending_ball_target;
+    Device_PeerLink_BallStopCommand pending_ball_stop;
     uint32_t next_heartbeat_tx_ms;
     uint16_t heartbeat_tx_sequence;
     uint16_t debug_tx_sequence;
     uint16_t last_heartbeat_rx_sequence;
     uint16_t last_car_state_rx_sequence;
+    uint16_t last_ball_target_rx_sequence;
+    uint16_t last_ball_stop_rx_sequence;
     uint32_t last_car_state_sample_ms;
     bool heartbeat_rx_sequence_seen;
     bool car_state_rx_sequence_seen;
     bool car_state_sample_seen;
     bool remote_car_state_seen;
+    bool ball_target_rx_sequence_seen;
+    bool ball_stop_rx_sequence_seen;
+    bool ball_target_pending;
+    bool ball_stop_pending;
     bool initialized;
 } Device_PeerLink;
 
@@ -126,6 +158,18 @@ bool Device_PeerLink_GetRemoteCarState(
     uint32_t now_ms,
     uint32_t maximum_age_ms,
     Device_PeerLink_CarState *state);
+
+/* BTG is a one-slot Latest Value. A newer accepted BTG replaces an untaken
+ * value; Take copies the latest value once and clears the slot. */
+bool Device_PeerLink_TakeBallTargetCommand(
+    Device_PeerLink *link,
+    Device_PeerLink_BallTargetCommand *command);
+
+/* BST is a bounded discrete stop request. Multiple new BST frames received
+ * before Take coalesce to the latest metadata because one stop is sufficient. */
+bool Device_PeerLink_TakeBallStopRequest(
+    Device_PeerLink *link,
+    Device_PeerLink_BallStopCommand *command);
 
 /* BUSY drops the complete DBG frame, returns true, and keeps its sequence. */
 bool Device_PeerLink_SendDebugTelemetry(

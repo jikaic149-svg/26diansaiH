@@ -17,6 +17,9 @@ typedef struct {
     float rod_command_deg;
     float ball_position_mm;
     float ball_velocity_mm_s;
+    float ball_integral_acceleration_mm_s2;
+    float ball_target_mm;
+    float ball_active_target_mm;
     float ball_acceleration_bias_mm_s2;
     float ball_position_variance_mm2;
     float ball_velocity_variance_mm2_s2;
@@ -27,15 +30,18 @@ typedef struct {
     float chassis_acceleration_variance_mm2_s4;
     bool ball_measurement_valid;
     bool ball_velocity_valid;
+    bool ball_last_used_sequence_valid;
     bool ball_estimator_trusted;
     bool chassis_acceleration_valid;
     bool chassis_acceleration_fusion_trusted;
     bool rod_angle_saturated;
     bool motor_raw_limit_blocked;
     uint8_t level_control_phase;
+    uint16_t ball_last_used_sequence;
     float chassis_compensation_angle_deg;
     uint32_t ball_estimator_innovation_reject_count;
     uint32_t chassis_fusion_innovation_reject_count;
+    uint32_t level_control_fault_count;
 } APP_Gateway_Telemetry;
 
 typedef struct {
@@ -91,9 +97,28 @@ void APP_Gateway_Step(
  * uses bounded inward-only recovery. Stopping sends zero before Disable. */
 bool APP_Gateway_TogglePrimaryMotor(uint32_t now_ms);
 
-/* Temporary five-point mechanism calibration: first call starts at point 1,
- * following calls advance one target, and the call after the final point
- * sends zero current then Disable. */
+/* Unconditionally end the primary level/ball loop through the existing safe
+ * path: command zero current before disabling the QD4310. This never starts
+ * the motor when already stopped. */
+bool APP_Gateway_StopPrimaryMotor(void);
+
+/* During the active visual-control phase and only after a usable visual
+ * measurement in the preceding Gateway step, request a physical ball
+ * position within the configured safe range. The active reference moves at
+ * the configured slew rate; changing it does not clear ball state. */
+bool APP_Gateway_SetBallTargetMm(float target_mm);
+
+/* Apply bounded runtime ball-position PID gains without starting the motor or
+ * changing the target. Product limits remain owned by core_config.h. */
+bool APP_Gateway_SetBallPidGains(
+    float kp_per_s2, float ki_per_s3, float kd_per_s);
+bool APP_Gateway_GetBallPidGains(
+    float *kp_per_s2, float *ki_per_s3, float *kd_per_s);
+
+/* Temporary automatic bidirectional mechanism calibration. The first call
+ * prepositions upward to the contracted upper endpoint, then starts the
+ * configured down/up raw sweep. A second call stops immediately through
+ * zero-current then Disable. The final held point also stops automatically. */
 bool APP_Gateway_AdvancePrimaryMotorCalibration(uint32_t now_ms);
 
 /* 遥测：命令计数/错误计数，调试用。 */

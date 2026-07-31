@@ -35,6 +35,23 @@ static float apply_deadband(float error, float deadband)
     return 0.0F;
 }
 
+static float release_opposing_feedforward(
+    float feedforward, float original_error, float deadband)
+{
+    float release_ratio;
+
+    if ((feedforward * original_error) >= 0.0F) {
+        return feedforward;
+    }
+    if ((deadband <= 0.0F) ||
+        (absolute_value(original_error) >= deadband)) {
+        return 0.0F;
+    }
+
+    release_ratio = absolute_value(original_error) / deadband;
+    return feedforward * (1.0F - release_ratio);
+}
+
 static bool valid_single_turn_angle(float angle_rad)
 {
     return isfinite(angle_rad) && (angle_rad >= 0.0F) &&
@@ -250,6 +267,35 @@ bool Algorithm_LevelCurrentControl_ComputeRawRecoveryCurrent(
     return true;
 }
 
+bool Algorithm_LevelCurrentControl_ApplyMinimumCurrent(
+    const Algorithm_LevelCurrentControl *controller,
+    int32_t raw_error,
+    float minimum_current_a,
+    float *current_a)
+{
+    if ((controller == NULL) || !controller->initialized ||
+        !isfinite(minimum_current_a) || (minimum_current_a <= 0.0F) ||
+        (minimum_current_a > controller->config.current_limit_a) ||
+        (current_a == NULL) || !isfinite(*current_a)) {
+        return false;
+    }
+    if ((raw_error == 0) ||
+        (absolute_value(*current_a) >= minimum_current_a)) {
+        return true;
+    }
+    if (*current_a > 0.0F) {
+        *current_a = minimum_current_a;
+    }
+    else if (*current_a < 0.0F) {
+        *current_a = -minimum_current_a;
+    }
+    else {
+        *current_a = ((raw_error > 0) ? 1.0F : -1.0F) *
+            controller->config.current_polarity * minimum_current_a;
+    }
+    return true;
+}
+
 bool Algorithm_LevelCurrentControl_Update(
     Algorithm_LevelCurrentControl *controller,
     float absolute_angle_rad,
@@ -259,6 +305,7 @@ bool Algorithm_LevelCurrentControl_Update(
     float angle_deg;
     float original_error;
     float controlled_error;
+    float applied_feedforward;
     float effort;
 
     if (current_a != NULL) {
@@ -280,6 +327,10 @@ bool Algorithm_LevelCurrentControl_Update(
     controlled_error = apply_deadband(
         limit_symmetric(original_error, controller->config.error_limit_deg),
         controller->config.deadband_deg);
+    applied_feedforward = release_opposing_feedforward(
+        controller->config.feedforward_current_a,
+        original_error,
+        controller->config.deadband_deg);
 
     if (absolute_value(original_error) <=
         controller->config.integral_zone_deg) {
@@ -294,7 +345,7 @@ bool Algorithm_LevelCurrentControl_Update(
         reset_runtime_state(controller);
     }
 
-    effort = controller->config.feedforward_current_a +
+    effort = applied_feedforward +
         controller->config.kp_a_per_deg * controlled_error +
         controller->integral_current_a -
         controller->config.kd_a_per_rpm * speed_rpm;

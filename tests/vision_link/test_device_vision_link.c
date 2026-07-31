@@ -11,6 +11,9 @@ struct BSP_UART_Resource {
 static struct BSP_UART_Resource s_uart;
 static uint8_t s_rx[ALGORITHM_PACKET_MAX_FRAME_SIZE];
 static size_t s_rx_length;
+static uint8_t s_tx[ALGORITHM_PACKET_MAX_FRAME_SIZE];
+static size_t s_tx_length;
+static BSP_UART_Result s_tx_result;
 
 BSP_UART_Handle BSP_UART_GetHandle(size_t index)
 {
@@ -67,6 +70,21 @@ bool BSP_UART_GetRxStatus(
     return true;
 }
 
+BSP_UART_Result BSP_UART_WriteBuffered(
+    BSP_UART_Handle uart, const uint8_t *data, size_t length)
+{
+    if ((uart != &s_uart) || ((data == NULL) && (length != 0U)) ||
+        (length > sizeof(s_tx))) {
+        return BSP_UART_RESULT_INVALID_ARGUMENT;
+    }
+    if (s_tx_result != BSP_UART_RESULT_OK) {
+        return s_tx_result;
+    }
+    memcpy(s_tx, data, length);
+    s_tx_length = length;
+    return BSP_UART_RESULT_OK;
+}
+
 static Device_VisionLink_Config default_config(void)
 {
     return (Device_VisionLink_Config){
@@ -89,6 +107,40 @@ static void queue_vis(uint16_t sequence, const char *payload)
         s_rx, sizeof(s_rx), &frame_length) ==
         ALGORITHM_PACKET_ENCODE_OK);
     s_rx_length = frame_length;
+}
+
+static void queue_packet(
+    const char *type, uint16_t sequence, const char *payload)
+{
+    size_t frame_length = 0U;
+
+    assert(Algorithm_Packet_Encode(
+        type, sequence,
+        (const uint8_t *)payload, strlen(payload),
+        s_rx, sizeof(s_rx), &frame_length) ==
+        ALGORITHM_PACKET_ENCODE_OK);
+    s_rx_length = frame_length;
+}
+
+static Algorithm_Packet_View parse_tx(
+    Algorithm_Packet_Parser *parser, uint8_t *storage)
+{
+    Algorithm_Packet_View view = {0};
+
+    assert(Algorithm_Packet_Parser_Init(
+        parser, storage, ALGORITHM_PACKET_PARSER_STORAGE_SIZE));
+    for (size_t index = 0U; index < s_tx_length; ++index) {
+        const Algorithm_Packet_FeedResult result =
+            Algorithm_Packet_Parser_Feed(parser, s_tx[index], &view);
+
+        if (index + 1U == s_tx_length) {
+            assert(result == ALGORITHM_PACKET_FEED_FRAME_READY);
+        }
+        else {
+            assert(result == ALGORITHM_PACKET_FEED_IN_PROGRESS);
+        }
+    }
+    return view;
 }
 
 static void test_valid_flags_and_age_boundary(void)
@@ -149,11 +201,91 @@ static void test_session_timeout_accepts_camera_restart(void)
     assert(measurement.position_mm == -5);
 }
 
+static void test_pid_tuning_latest_value_and_ack(void)
+{
+    Device_VisionLink link;
+    Device_VisionLink_PidTuningCommand command;
+    Algorithm_Packet_Parser parser;
+    Algorithm_Packet_View view;
+    uint8_t storage[ALGORITHM_PACKET_PARSER_STORAGE_SIZE];
+    char payload[64];
+    const Device_VisionLink_Config config = default_config();
+
+    s_rx_length = 0U;
+    s_tx_length = 0U;
+    s_tx_result = BSP_UART_RESULT_OK;
+    assert(Device_VisionLink_Init(&link, &config));
+    queue_packet("VTP", 7U, "1200,150,1800");
+    assert(Device_VisionLink_Step(&link, 10U));
+    assert(Device_VisionLink_TakePidTuningCommand(&link, &command));
+    assert(command.sequence == 7U);
+    assert(command.kp_milli_per_s2 == 1200U);
+    assert(command.ki_milli_per_s3 == 150U);
+    assert(command.kd_milli_per_s == 1800U);
+    assert(!Device_VisionLink_TakePidTuningCommand(&link, &command));
+
+    queue_packet("VTP", 7U, "2000,200,2000");
+    assert(Device_VisionLink_Step(&link, 20U));
+    assert(link.status.vtp_duplicate_sequence_count == 1U);
+    assert(!Device_VisionLink_TakePidTuningCommand(&link, &command));
+
+    assert(Device_VisionLink_SendPidTuningAck(
+        &link, 7U, true, 1200U, 150U, 1800U));
+    view = parse_tx(&parser, storage);
+    assert((view.type_length == 3U) &&
+        (memcmp(view.type, "VPA", 3U) == 0));
+    assert(view.payload_length < sizeof(payload));
+    memcpy(payload, view.payload, view.payload_length);
+    payload[view.payload_length] = '\0';
+    assert(strcmp(payload, "7,1,1200,150,1800") == 0);
+}
+
+static void test_vst_encoding_and_busy_drop(void)
+{
+    Device_VisionLink link;
+    Algorithm_Packet_Parser parser;
+    Algorithm_Packet_View view;
+    uint8_t storage[ALGORITHM_PACKET_PARSER_STORAGE_SIZE];
+    char payload[96];
+    const Device_VisionLink_Config config = default_config();
+    const Device_VisionLink_ControlStatus status = {
+        .last_rx_vis_sequence = 10U,
+        .last_used_vis_sequence = 9U,
+        .measurement_age_ms = 25U,
+        .estimate_mm = -12,
+        .velocity_mm_s = 34,
+        .target_mm = 0,
+        .theta_command_mdeg = -456,
+        .status_flags = UINT16_C(0xBFFF),
+        .fault_bits = UINT16_C(0x0003),
+    };
+
+    s_tx_length = 0U;
+    s_tx_result = BSP_UART_RESULT_OK;
+    assert(Device_VisionLink_Init(&link, &config));
+    assert(Device_VisionLink_SendControlStatus(&link, &status));
+    assert(link.status.vst_tx_count == 1U);
+    view = parse_tx(&parser, storage);
+    assert((view.type_length == 3U) &&
+        (memcmp(view.type, "VST", 3U) == 0));
+    assert(view.payload_length < sizeof(payload));
+    memcpy(payload, view.payload, view.payload_length);
+    payload[view.payload_length] = '\0';
+    assert(strcmp(payload, "10,9,25,-12,34,0,-456,49151,3") == 0);
+
+    s_tx_result = BSP_UART_RESULT_BUSY;
+    assert(Device_VisionLink_SendControlStatus(&link, &status));
+    assert(link.status.vst_tx_drop_count == 1U);
+    assert(link.vst_tx_sequence == 1U);
+}
+
 int main(void)
 {
     test_valid_flags_and_age_boundary();
     test_duplicate_old_and_unusable_do_not_drive();
     test_session_timeout_accepts_camera_restart();
+    test_pid_tuning_latest_value_and_ack();
+    test_vst_encoding_and_busy_drop();
     puts("vision link tests: PASS");
     return 0;
 }

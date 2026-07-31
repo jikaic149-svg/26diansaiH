@@ -62,13 +62,27 @@
 /* 板载 KEY1(PA0，高有效)的消抖时间，单位 ms；稳定按下只触发一次。 */
 #define GATEWAY_KEY_DEBOUNCE_MS           UINT32_C(30)
 
-/* 临时五点机构标定模式：1时KEY依次切换水平附近5个电机相对角，第6次执行0 A + Disable；
- * 0时恢复正常的一次启动、一次停止。滚球闭环使用正常模式。
- * 角度单位deg，均须位于TARGET_LIMIT内。
- * 以零点54379换算，五点约为raw=53579/53979/54379/54779/55179。 */
-#define GATEWAY_LEVEL_CALIBRATION_KEY_MODE 0U
-#define GATEWAY_LEVEL_CALIBRATION_TARGETS_DEG \
-    { -4.395F, -2.197F, 0.0F, 2.197F, 4.395F }
+/* 手动连杆标定已经完成，KEY恢复普通视觉闭环启停。保留下面的标定参数，
+ * 仅供后续显式重新进入标定固件时使用。 */
+#define GATEWAY_LEVEL_CALIBRATION_KEY_MODE                 0U
+#define GATEWAY_LEVEL_CALIBRATION_MANUAL_MODE              1U
+#define GATEWAY_LEVEL_CALIBRATION_MANUAL_ARM_MS UINT32_C(100)
+#define GATEWAY_LEVEL_CALIBRATION_START_RAW    UINT16_C(53577)
+#define GATEWAY_LEVEL_CALIBRATION_TURN_RAW     UINT16_C(58499)
+#define GATEWAY_LEVEL_CALIBRATION_SPAN_RAW      UINT32_C(4922)
+#define GATEWAY_LEVEL_CALIBRATION_ONE_WAY_POINTS           125U
+#define GATEWAY_LEVEL_CALIBRATION_STABLE_TOL_RAW   UINT16_C(15)
+#define GATEWAY_LEVEL_CALIBRATION_MIN_CURRENT_A              0.20F
+#define GATEWAY_LEVEL_CALIBRATION_APPROACH_MIN_CURRENT_A      0.12F
+#define GATEWAY_LEVEL_CALIBRATION_SLOWDOWN_RAW       UINT16_C(800)
+#define GATEWAY_LEVEL_CALIBRATION_HOLD_KP_A_PER_RAW          0.0015F
+#define GATEWAY_LEVEL_CALIBRATION_SPEED_KD_A_PER_RPM         0.0080F
+#define GATEWAY_LEVEL_CALIBRATION_START_MAX_SPEED_RPM       12.0F
+#define GATEWAY_LEVEL_CALIBRATION_STABLE_MAX_RPM           1.0F
+#define GATEWAY_LEVEL_CALIBRATION_STABLE_TIME_MS UINT32_C(100)
+#define GATEWAY_LEVEL_CALIBRATION_HOLD_TIME_MS   UINT32_C(120)
+#define GATEWAY_LEVEL_CALIBRATION_POINT_TIMEOUT_MS \
+    UINT32_C(10000)
 
 /* 周期性向电机发 NOP 请求反馈并把反馈帧回传 TCP 的周期，单位 ms。
  * QD4310 是应答式：只有收到控制/NOP 帧才回反馈帧。 */
@@ -93,42 +107,54 @@
  * 名义周期参与积分计算，必须与当前 Gateway Task 周期一致。 */
 #define GATEWAY_LEVEL_CONTROL_PERIOD_MS    UINT32_C(1)
 #define GATEWAY_LEVEL_FEEDBACK_TIMEOUT_MS UINT32_C(100)
+#define GATEWAY_LEVEL_ENABLE_CONFIRM_TIMEOUT_MS UINT32_C(200)
 
 /* 旧机械水平零点继续固定为raw=54379；本轮IMU向上扫描不会覆盖它。
  * TRIM_RAW=54329保留此前约-0.275电机度的工作微调。改变安装关系后必须重新标定。 */
 #define GATEWAY_LEVEL_ZERO_RAW             UINT16_C(54379)
 #define GATEWAY_LEVEL_TRIM_RAW             UINT16_C(54329)
 
-/* 2026-07-30绝对编码器正常控制边界。低raw侧49325由用户明确标记的第二端
- * raw=49319向内收6 count；高raw侧59233保留此前落地侧约59293读数的内缩余量。
- * 目标raw始终必须在范围内；允许从任意单圈raw启动，但反馈在范围外时暂停PID，
- * 仅以RECOVERY_CURRENT向范围内部回收，位于边界时也只允许向内电流。 */
-#define GATEWAY_LEVEL_RAW_MIN_LIMIT         UINT16_C(49325)
-#define GATEWAY_LEVEL_RAW_MAX_LIMIT         UINT16_C(59233)
+/* 2026-07-31手动往返标定覆盖raw=47707..58831。JY61 Pitch与raw相关系数
+ * -0.962；raw约57500后Pitch不再继续下降，进入机构死区并产生此前的端部震荡。
+ * 杆角目标查表只使用单调区48000..57500，绝不命令进入高raw死区；59025仅是
+ * 反馈/启动硬边界，用于容纳任意安全起始位置。反馈越过该硬边界时暂停PID，
+ * 仅以RECOVERY_CURRENT向范围内部回收，位于硬边界时也只允许向内电流。 */
+#define GATEWAY_LEVEL_RAW_MIN_LIMIT         UINT16_C(48000)
+#define GATEWAY_LEVEL_RAW_CONTROL_MAX       UINT16_C(57500)
+#define GATEWAY_LEVEL_RAW_MAX_LIMIT         UINT16_C(59025)
 #define GATEWAY_LEVEL_RAW_RECOVERY_CURRENT_A          0.10F
 
 /* KEY启动后先回到固定机械零点。位置/转速连续满足条件达到settle时间后，
  * 才允许使用F407本地BMI088纵向加速度补偿。单位依次为电机deg、rpm、ms。 */
-#define GATEWAY_LEVEL_ZERO_ENTRY_TOL_DEG       1.00F
+#define GATEWAY_LEVEL_ZERO_ENTRY_TOL_DEG       1.50F
 #define GATEWAY_LEVEL_ZERO_ENTRY_MAX_RPM       1.00F
 #define GATEWAY_LEVEL_ZERO_ENTRY_SETTLE_MS UINT32_C(300)
 
-/* 向上运动分支的实测表：raw减小、杆执行端上升、双IMU/CH12示值增大。
- * 初始化时在旧机械零点54379处分段插值并减去该示值，因此常量安装偏置不会被
- * 当作杆角；只在58499..53577内插值，不外推。反向回差仍待下行扫描。 */
+/* 2026-07-31手动往返的JY61 Pitch中值表：raw减小、杆执行端抬升、Pitch增大。
+ * 初始化时仍在机械零点54379处分段插值并减去安装偏置。表只覆盖严格单调的
+ * 48000..57500；已剔除高raw机构死区，双向往返的剩余回差由内环吸收。 */
 #define GATEWAY_ROD_ANGLE_CALIBRATION_POINTS \
     { \
-        { UINT16_C(58499), 20.640F }, \
-        { UINT16_C(57999), 21.160F }, \
-        { UINT16_C(57499), 21.650F }, \
-        { UINT16_C(56999), 22.110F }, \
-        { UINT16_C(56499), 22.570F }, \
-        { UINT16_C(55999), 23.030F }, \
-        { UINT16_C(55499), 23.460F }, \
-        { UINT16_C(54999), 24.000F }, \
-        { UINT16_C(54499), 24.470F }, \
-        { UINT16_C(53999), 25.080F }, \
-        { UINT16_C(53577), 25.450F }, \
+        { UINT16_C(57500), 13.510F }, \
+        { UINT16_C(57000), 13.800F }, \
+        { UINT16_C(56500), 13.960F }, \
+        { UINT16_C(56000), 14.380F }, \
+        { UINT16_C(55500), 14.620F }, \
+        { UINT16_C(55000), 15.200F }, \
+        { UINT16_C(54500), 15.610F }, \
+        { UINT16_C(54000), 16.040F }, \
+        { UINT16_C(53500), 16.290F }, \
+        { UINT16_C(53000), 16.790F }, \
+        { UINT16_C(52500), 17.310F }, \
+        { UINT16_C(52000), 17.520F }, \
+        { UINT16_C(51500), 18.050F }, \
+        { UINT16_C(51000), 18.440F }, \
+        { UINT16_C(50500), 18.970F }, \
+        { UINT16_C(50000), 19.730F }, \
+        { UINT16_C(49500), 20.070F }, \
+        { UINT16_C(49000), 20.275F }, \
+        { UINT16_C(48500), 20.580F }, \
+        { UINT16_C(48000), 21.110F }, \
     }
 
 /* KEY启动闭环时允许的最大绝对转速，单位rpm；必须>=0。 */
@@ -157,20 +183,35 @@
 #define GATEWAY_BALL_MEASUREMENT_POLARITY  -1.0F
 #define GATEWAY_BALL_TARGET_MM               0.0F
 
-/* a_cmd=Kp*(target-x)-Kd*v。单位分别为1/s^2、1/s；速度一阶滤波tau为s。
- * 首版为低动态台架初值，需由真实VIS日志整定。 */
-#define GATEWAY_BALL_POSITION_KP_PER_S2      1.2F
-#define GATEWAY_BALL_VELOCITY_KD_PER_S       1.8F
-#define GATEWAY_BALL_VELOCITY_FILTER_TAU_S   0.080F
+/* 25 cm水管和直径1 cm球对应球心几何域[-120,+120] mm。该值仅是软件
+ * 安全边界，扩大实机目标仍须从小范围逐级验证。目标参考按50 mm/s线性
+ * 推进，避免阶跃换向冲击。 */
+#define GATEWAY_BALL_TARGET_LIMIT_MM        120.0F
+#define GATEWAY_BALL_TARGET_SLEW_MM_S        50.0F
+
+/* a_cmd=Kp*(target-x)+I-Kd*v。Kp/Ki/Kd单位分别为1/s^2、1/s^3、1/s；
+ * I直接保存为加速度贡献并做对称抗饱和。首版为低动态台架初值，需由真实VIS日志整定。 */
+#define GATEWAY_BALL_POSITION_KP_PER_S2      0.6F
+#define GATEWAY_BALL_POSITION_KI_PER_S3      0.03F
+#define GATEWAY_BALL_VELOCITY_KD_PER_S       0.55F
+#define GATEWAY_BALL_INTEGRAL_ACCEL_LIMIT_MM_S2 10.0F
+#define GATEWAY_BALL_VELOCITY_FILTER_TAU_S   0.180F
 #define GATEWAY_BALL_MAX_VELOCITY_DT_MS      UINT32_C(100)
 
-/* 实心钢球逆模型参数与球反馈对称杆角限幅。TOTAL限制视觉反馈与BMI088补偿相加后的
- * 动态偏移；水平trim在该限幅之后相加，因此TOTAL不是相对机械零点的绝对杆角边界。
- * 当前取0.60deg，避免两个已限幅动态分量叠加后越界。 */
+/* 视觉串口实时调参的产品边界。协议值只有通过这些边界后才能进入控制器；
+ * 角度、电流和raw保护仍在更下游独立生效。 */
+#define GATEWAY_BALL_TUNING_KP_MAX_PER_S2     5.0F
+#define GATEWAY_BALL_TUNING_KI_MAX_PER_S3     1.0F
+#define GATEWAY_BALL_TUNING_KD_MAX_PER_S      5.0F
+
+/* 实心钢球逆模型参数与球反馈杆角限幅。新标定证明负向机械单调余量约2.2deg，
+ * 因此动态偏移限制为-2.0deg；正向仍按已整定的+0.75deg。水平trim在限幅后
+ * 相加，两端均留在48000..57500实测单调表内。 */
 #define GATEWAY_BALL_GRAVITY_MM_S2            9807.0F
 #define GATEWAY_BALL_INERTIA_RATIO             0.4F
-#define GATEWAY_BALL_ROD_ANGLE_LIMIT_DEG       0.60F
-#define GATEWAY_TOTAL_ROD_COMMAND_LIMIT_DEG    0.60F
+#define GATEWAY_BALL_ROD_ANGLE_LIMIT_DEG       2.00F
+#define GATEWAY_TOTAL_ROD_COMMAND_MIN_DEG      (-2.00F)
+#define GATEWAY_TOTAL_ROD_COMMAND_MAX_DEG        0.75F
 
 /* 三状态[x,v,模型残差加速度]固定滞后Kalman。代码已接入，但在用户审核
  * 公式、极性、延迟和Q/R前必须保持0，此时完全沿用原VIS差分速度路径。 */
@@ -253,13 +294,12 @@
 
 /* 实机水平闭环参数：角度 P、电流积分 I、转速反馈阻尼 D。
  * 单位依次为 A/deg、A/(deg*s)、A/rpm；增益均需>=0。
- * 0.8s短测表明0.030能够快速抬升，但目标附近机构需要约-0.10A静态承重电流；
- * 单纯提高P只会以静差换取承重并增加振动风险。因此P退回0.017，并用独立静态
- * 前馈承担约-0.09A，余下误差由现有最多-0.01A积分补足。 */
-#define GATEWAY_LEVEL_KP_A_PER_DEG          0.017F
+ * 目标点使用负静态前馈承重；当位置误差请求相反方向时，前馈在DEADBAND范围内
+ * 连续释放，并在P项开始作用前降为0，避免负前馈压过raw增大的下行请求。 */
+#define GATEWAY_LEVEL_KP_A_PER_DEG          0.014F
 #define GATEWAY_LEVEL_KI_A_PER_DEG_S        0.0010F
 #define GATEWAY_LEVEL_KD_A_PER_RPM          0.0010F
-#define GATEWAY_LEVEL_FEEDFORWARD_CURRENT_A (-0.067F)
+#define GATEWAY_LEVEL_FEEDFORWARD_CURRENT_A (-0.072F)
 
 /* 角误差限幅、死区和积分作用区，单位 deg。先限幅再扣除死区；仅在
  * |原始误差|<=INTEGRAL_ZONE 时积分，离开该区立即清积分。 */
@@ -281,6 +321,11 @@
 #error "Level raw limits must be strictly increasing"
 #endif
 
+#if (GATEWAY_LEVEL_RAW_CONTROL_MAX <= GATEWAY_LEVEL_RAW_MIN_LIMIT) || \
+    (GATEWAY_LEVEL_RAW_CONTROL_MAX >= GATEWAY_LEVEL_RAW_MAX_LIMIT)
+#error "Level raw control maximum must be inside the hard raw limits"
+#endif
+
 #if (GATEWAY_LEVEL_ZERO_RAW < GATEWAY_LEVEL_RAW_MIN_LIMIT) || \
     (GATEWAY_LEVEL_ZERO_RAW > GATEWAY_LEVEL_RAW_MAX_LIMIT)
 #error "Level zero raw value must be inside manual raw limits"
@@ -293,6 +338,38 @@
 
 #if GATEWAY_LEVEL_CALIBRATION_KEY_MODE > 1U
 #error "Level calibration key mode must be 0 or 1"
+#endif
+
+#if (GATEWAY_LEVEL_CALIBRATION_START_RAW > GATEWAY_LEVEL_RAW_MAX_LIMIT) || \
+    (GATEWAY_LEVEL_CALIBRATION_START_RAW <= GATEWAY_LEVEL_RAW_MIN_LIMIT)
+#error "Calibration start raw must be at or below the maximum raw limit"
+#endif
+
+#if (GATEWAY_LEVEL_CALIBRATION_SPAN_RAW == 0U) || \
+    (GATEWAY_LEVEL_CALIBRATION_SPAN_RAW >= UINT32_C(32768))
+#error "Calibration raw span must be non-zero and below half a turn"
+#endif
+
+#if GATEWAY_LEVEL_CALIBRATION_ONE_WAY_POINTS < 2U
+#error "Calibration scan needs at least two points"
+#endif
+
+#if (GATEWAY_LEVEL_CALIBRATION_START_RAW + \
+     GATEWAY_LEVEL_CALIBRATION_SPAN_RAW) != \
+        GATEWAY_LEVEL_CALIBRATION_TURN_RAW
+#error "Calibration turn raw must match the contracted downward span"
+#endif
+
+#if GATEWAY_LEVEL_CALIBRATION_STABLE_TOL_RAW == 0U
+#error "Calibration stable raw tolerance must be non-zero"
+#endif
+
+#if (GATEWAY_LEVEL_CALIBRATION_STABLE_TIME_MS == 0U) || \
+    (GATEWAY_LEVEL_CALIBRATION_HOLD_TIME_MS == 0U) || \
+    (GATEWAY_LEVEL_CALIBRATION_POINT_TIMEOUT_MS <= \
+        (GATEWAY_LEVEL_CALIBRATION_STABLE_TIME_MS + \
+         GATEWAY_LEVEL_CALIBRATION_HOLD_TIME_MS))
+#error "Calibration timing must allow stable confirmation and reporting hold"
 #endif
 
 #if GATEWAY_BALL_VISUAL_CONTROL_ENABLE > 1U
@@ -343,5 +420,6 @@
  * 尚未实测，所以CAL先置0，只能用于功能调试。 */
 #define VISION_LINK_CAMERA_PIPELINE_CAL_MS UINT32_C(0)
 #define VISION_LINK_TRANSPORT_BOUND_MS     UINT32_C(5)
+#define VISION_LINK_STATUS_TX_PERIOD_MS    UINT32_C(20)
 
 #endif

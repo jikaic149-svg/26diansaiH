@@ -1,12 +1,13 @@
 # BallPositionControl
 
 这是无MCU/RTOS依赖的球位置外环。每个新VIS样本按真实`sample_ms`差分速度，再用一阶滤波；
-采样间隔不在`1..maximum_velocity_dt_ms`时保留位置、清零速度并等待下一对有效样本。
+采样间隔不在`1..maximum_velocity_dt_ms`时保留位置和有界积分状态、清零速度并等待
+下一对有效样本；VIS真正过期时仍由Gateway调用`ResetMeasurement()`清除全部测量状态。
 
 控制律和实心球纯滚动逆模型为：
 
 ```text
-a_cmd = Kp * (x_target - x) - Kd * v
+a_cmd = Kp * (x_target - x) + I - Kd * v
 theta_ball = -asin((1 + 0.4) * a_cmd / g)
 ```
 
@@ -18,6 +19,11 @@ MaixCAM当前输出画面左负右正，所以配置`measurement_polarity=-1`后
 YOLO来源、毫米标定、clamp和100 ms年龄门，也不等于启用Kalman。输出按配置杆角限幅。
 当前参数只是低动态首版初值，视觉延迟、速度噪声、带球负载和双向机构响应尚未实物整定。
 VIS过期时Gateway清测量状态并令该反馈项归零，不自动失能电机。
+
+运行时目标由`SetTargetPositionMm()`只更新指令值，再由`AdvanceTarget()`按配置斜率推进
+活动参考；切换目标不会清位置、差分速度或速度有效位。Gateway当前只在水平环进入phase 2
+后接受目标，停机和下一次启动都会把目标立即恢复为`0 mm`。当前第3项测试范围为
+`[-50,+50] mm`，斜率为`50 mm/s`，所以`0→+50`约1 s、`+50→-50`约2 s。
 
 `SetEstimatedState()`是默认关闭的BallStateEstimator接入边界：输入已是物理坐标的
 `x/v`，不再应用相机极性，也不再做差分。当前`GATEWAY_BALL_KALMAN_ENABLE=0`，

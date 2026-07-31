@@ -198,13 +198,33 @@ static bool is_car_state(const Algorithm_Packet_View *packet)
            (memcmp(packet->type, "CAR", 3U) == 0);
 }
 
+static bool is_ball_target(const Algorithm_Packet_View *packet)
+{
+    return (packet->type_length == 3U) &&
+           (memcmp(packet->type, "BTG", 3U) == 0);
+}
+
+static bool is_ball_stop(const Algorithm_Packet_View *packet)
+{
+    return (packet->type_length == 3U) &&
+           (memcmp(packet->type, "BST", 3U) == 0);
+}
+
 static void reset_remote_session(Device_PeerLink *link)
 {
     link->heartbeat_rx_sequence_seen = false;
     link->car_state_rx_sequence_seen = false;
     link->car_state_sample_seen = false;
     link->remote_car_state_seen = false;
+    link->ball_target_rx_sequence_seen = false;
+    link->ball_stop_rx_sequence_seen = false;
+    link->ball_target_pending = false;
+    link->ball_stop_pending = false;
     memset(&link->remote_car_state, 0, sizeof(link->remote_car_state));
+    memset(&link->pending_ball_target, 0,
+        sizeof(link->pending_ball_target));
+    memset(&link->pending_ball_stop, 0,
+        sizeof(link->pending_ball_stop));
     increment_saturating(&link->status.remote_session_reset_count);
 }
 
@@ -359,6 +379,105 @@ static void consume_car_state(
     increment_saturating(&link->status.car_state_rx_count);
 }
 
+static void consume_ball_target(
+    Device_PeerLink *link,
+    const Algorithm_Packet_View *packet,
+    uint32_t now_ms)
+{
+    size_t comma = 0U;
+    uint32_t node_id;
+    int32_t target_0p1mm;
+
+    while ((comma < packet->payload_length) &&
+           (packet->payload[comma] != ',')) {
+        ++comma;
+    }
+    if ((comma == 0U) || ((comma + 1U) >= packet->payload_length) ||
+        !parse_u32_canonical(packet->payload, comma, &node_id) ||
+        !parse_i32_canonical(
+            &packet->payload[comma + 1U],
+            packet->payload_length - comma - 1U,
+            &target_0p1mm) ||
+        !absolute_i32_within(
+            target_0p1mm,
+            DEVICE_PEER_LINK_BALL_TARGET_ABS_MAX_0P1MM)) {
+        increment_saturating(
+            &link->status.ball_target_payload_error_count);
+        return;
+    }
+    if ((link->config.local_node_id != 1U) ||
+        (link->config.remote_node_id != 2U) ||
+        (node_id != 2U)) {
+        increment_saturating(
+            &link->status.ball_target_source_error_count);
+        return;
+    }
+    if (link->ball_target_rx_sequence_seen) {
+        if (packet->sequence == link->last_ball_target_rx_sequence) {
+            increment_saturating(
+                &link->status.ball_target_duplicate_sequence_count);
+            return;
+        }
+        if (!serial_u16_is_new(
+                packet->sequence,
+                link->last_ball_target_rx_sequence)) {
+            increment_saturating(
+                &link->status.ball_target_old_sequence_count);
+            return;
+        }
+    }
+    link->last_ball_target_rx_sequence = packet->sequence;
+    link->ball_target_rx_sequence_seen = true;
+    link->pending_ball_target = (Device_PeerLink_BallTargetCommand){
+        .target_0p1mm = (int16_t)target_0p1mm,
+        .sequence = packet->sequence,
+        .received_at_ms = now_ms,
+    };
+    link->ball_target_pending = true;
+    increment_saturating(&link->status.ball_target_rx_count);
+}
+
+static void consume_ball_stop(
+    Device_PeerLink *link,
+    const Algorithm_Packet_View *packet,
+    uint32_t now_ms)
+{
+    uint32_t node_id;
+
+    if (!parse_u32_canonical(
+            packet->payload, packet->payload_length, &node_id)) {
+        increment_saturating(&link->status.ball_stop_payload_error_count);
+        return;
+    }
+    if ((link->config.local_node_id != 1U) ||
+        (link->config.remote_node_id != 2U) ||
+        (node_id != 2U)) {
+        increment_saturating(&link->status.ball_stop_source_error_count);
+        return;
+    }
+    if (link->ball_stop_rx_sequence_seen) {
+        if (packet->sequence == link->last_ball_stop_rx_sequence) {
+            increment_saturating(
+                &link->status.ball_stop_duplicate_sequence_count);
+            return;
+        }
+        if (!serial_u16_is_new(
+                packet->sequence, link->last_ball_stop_rx_sequence)) {
+            increment_saturating(
+                &link->status.ball_stop_old_sequence_count);
+            return;
+        }
+    }
+    link->last_ball_stop_rx_sequence = packet->sequence;
+    link->ball_stop_rx_sequence_seen = true;
+    link->pending_ball_stop = (Device_PeerLink_BallStopCommand){
+        .sequence = packet->sequence,
+        .received_at_ms = now_ms,
+    };
+    link->ball_stop_pending = true;
+    increment_saturating(&link->status.ball_stop_rx_count);
+}
+
 static bool send_heartbeat(Device_PeerLink *link, uint32_t now_ms)
 {
     size_t payload_length;
@@ -479,6 +598,12 @@ bool Device_PeerLink_Step(Device_PeerLink *link, uint32_t now_ms)
             else if (is_car_state(&packet)) {
                 consume_car_state(link, &packet, now_ms);
             }
+            else if (is_ball_target(&packet)) {
+                consume_ball_target(link, &packet, now_ms);
+            }
+            else if (is_ball_stop(&packet)) {
+                consume_ball_stop(link, &packet, now_ms);
+            }
         }
     }
     link->status.packet_parser_error_count =
@@ -517,6 +642,32 @@ bool Device_PeerLink_GetRemoteCarState(
         return false;
     }
     *state = link->remote_car_state;
+    return true;
+}
+
+bool Device_PeerLink_TakeBallTargetCommand(
+    Device_PeerLink *link,
+    Device_PeerLink_BallTargetCommand *command)
+{
+    if ((link == NULL) || (command == NULL) || !link->initialized ||
+        !link->ball_target_pending) {
+        return false;
+    }
+    *command = link->pending_ball_target;
+    link->ball_target_pending = false;
+    return true;
+}
+
+bool Device_PeerLink_TakeBallStopRequest(
+    Device_PeerLink *link,
+    Device_PeerLink_BallStopCommand *command)
+{
+    if ((link == NULL) || (command == NULL) || !link->initialized ||
+        !link->ball_stop_pending) {
+        return false;
+    }
+    *command = link->pending_ball_stop;
+    link->ball_stop_pending = false;
     return true;
 }
 
