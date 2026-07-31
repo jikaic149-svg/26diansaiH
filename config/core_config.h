@@ -187,29 +187,43 @@
  * 安全边界，扩大实机目标仍须从小范围逐级验证。目标参考按80 mm/s线性
  * 推进，避免阶跃换向冲击。 */
 #define GATEWAY_BALL_TARGET_LIMIT_MM        120.0F
-#define GATEWAY_BALL_TARGET_SLEW_MM_S        80.0F
+#define GATEWAY_BALL_TARGET_SLEW_MM_S       120.0F
+#define GATEWAY_BALL_MAX_TARGET_VELOCITY_MM_S 50.0F
+#define GATEWAY_BALL_MAX_TARGET_ACCELERATION_MM_S2 200.0F
 
-/* a_cmd=Kp*(target-x)+I-Kd*v。Kp/Ki/Kd单位分别为1/s^2、1/s^3、1/s；
- * I直接保存为加速度贡献并做对称抗饱和。首版为低动态台架初值，需由真实VIS日志整定。 */
-#define GATEWAY_BALL_POSITION_KP_PER_S2      1.00F
-#define GATEWAY_BALL_POSITION_KI_PER_S3      0.030F
-#define GATEWAY_BALL_VELOCITY_KD_PER_S       1.00F
+/* 位置PID直接生成目标球加速度：Kp*位置误差+Ki积分-Kd*视觉球速。
+ * VTP字段名保持兼容；速度环不再参与正常运动和停车。 */
+#define GATEWAY_BALL_POSITION_KP_PER_S2      0.60F
+#define GATEWAY_BALL_POSITION_KI_PER_S3      0.000F
+#define GATEWAY_BALL_VELOCITY_KD_PER_S       0.55F
 #define GATEWAY_BALL_INTEGRAL_ACCEL_LIMIT_MM_S2 10.0F
-#define GATEWAY_BALL_VELOCITY_FILTER_TAU_S   0.180F
+/* 球速只由真实视觉位置计算：120 ms多帧差分适配当前约33 Hz有效视觉帧，
+ * 再做60 ms一阶低通，避免两帧差分尖峰把杆角反复推向限幅。 */
+#define GATEWAY_BALL_VELOCITY_ESTIMATION_WINDOW_MS UINT32_C(120)
+#define GATEWAY_BALL_VELOCITY_FILTER_TAU_S   0.060F
 #define GATEWAY_BALL_MAX_VELOCITY_DT_MS      UINT32_C(100)
+/* 目标附近同时满足位置误差不超过3 mm、球速不超过8 mm/s并保持60 ms时，
+ * 进入安静死区并锁定清零球环输出；
+ * 锁定后不再因测量变化自动退出，仅在目标改变或测量状态复位时解锁。 */
+#define GATEWAY_BALL_HOLD_POSITION_ERROR_MM     3.0F
+#define GATEWAY_BALL_HOLD_MAX_VELOCITY_MM_S     8.0F
+#define GATEWAY_BALL_HOLD_STABLE_DURATION_MS UINT32_C(60)
+/* 实测近目标Kd跳变形成低频极限环，当前禁用该调度并统一使用基础Kd=2.5。 */
+#define GATEWAY_BALL_NEAR_TARGET_ERROR_MM        0.0F
+#define GATEWAY_BALL_NEAR_TARGET_KD_MULTIPLIER   0.0F
 
-/* 钢球破静摩擦阶梯脉冲。仅在位置误差超过3 mm且滤波球速不超过12 mm/s
- * 持续150 ms后，沿目标方向从0.45 deg开始额外倾斜；未推动时每次增加
- * 0.10 deg，最高0.70 deg。最长150 ms，检测到球开始移动或进入误差
- * 禁用区时立即撤销并重置阶梯。脉冲间至少冷却200 ms。 */
-#define GATEWAY_BALL_STICTION_KICK_ANGLE_DEG          0.45F
-#define GATEWAY_BALL_STICTION_KICK_STEP_ANGLE_DEG     0.10F
-#define GATEWAY_BALL_STICTION_KICK_MAX_ANGLE_DEG      0.70F
-#define GATEWAY_BALL_STICTION_MIN_ERROR_MM             3.0F
-#define GATEWAY_BALL_STICTION_MAX_VELOCITY_MM_S       12.0F
-#define GATEWAY_BALL_STICTION_STATIONARY_MS        UINT32_C(150)
-#define GATEWAY_BALL_STICTION_DURATION_MS          UINT32_C(150)
-#define GATEWAY_BALL_STICTION_COOLDOWN_MS          UINT32_C(200)
+/* 离散角度脉冲保持禁用。大误差且低速持续120 ms后，短暂启用限幅速度辅助；
+ * 一旦视觉检测到球移动立即撤销，正常运动和停车仍完全由位置PID负责。 */
+#define GATEWAY_BALL_STICTION_KICK_ANGLE_DEG          0.00F
+#define GATEWAY_BALL_STICTION_KICK_STEP_ANGLE_DEG     0.00F
+#define GATEWAY_BALL_STICTION_KICK_MAX_ANGLE_DEG      0.00F
+#define GATEWAY_BALL_STICTION_ASSIST_VELOCITY_KP_PER_S 3.50F
+#define GATEWAY_BALL_STICTION_ASSIST_EXIT_DISTANCE_MM  18.0F
+#define GATEWAY_BALL_STICTION_MIN_ERROR_MM            12.0F
+#define GATEWAY_BALL_STICTION_MAX_VELOCITY_MM_S       20.0F
+#define GATEWAY_BALL_STICTION_STATIONARY_MS        UINT32_C(100)
+#define GATEWAY_BALL_STICTION_DURATION_MS          UINT32_C(250)
+#define GATEWAY_BALL_STICTION_COOLDOWN_MS          UINT32_C(100)
 
 /* 视觉串口实时调参的产品边界。协议值只有通过这些边界后才能进入控制器；
  * 角度、电流和raw保护仍在更下游独立生效。 */
@@ -226,24 +240,30 @@
 #define GATEWAY_TOTAL_ROD_COMMAND_MIN_DEG      (-2.00F)
 #define GATEWAY_TOTAL_ROD_COMMAND_MAX_DEG        0.75F
 
-/* 三状态[x,v,模型残差加速度]固定滞后Kalman。代码已接入，但在用户审核
- * 公式、极性、延迟和Q/R前必须保持0，此时完全沿用原VIS差分速度路径。 */
+/* 三状态[x,v,模型残差加速度]固定滞后Kalman保留用于离线对照，当前关闭。
+ * 正常控制只使用真实视觉多帧差分球速，底盘加速度独立做杆角前馈。 */
 #ifndef GATEWAY_BALL_KALMAN_ENABLE
-#define GATEWAY_BALL_KALMAN_ENABLE                     1U
+#define GATEWAY_BALL_KALMAN_ENABLE                     0U
 #endif
-#define GATEWAY_BALL_KALMAN_POSITION_R_MM2             9.0F
-#define GATEWAY_BALL_KALMAN_MODEL_ACCEL_Q_MM2_S3   90000.0F
-#define GATEWAY_BALL_KALMAN_BIAS_WALK_Q_MM2_S4_S   10000.0F
+#define GATEWAY_BALL_KALMAN_POSITION_R_MM2            36.0F
+#define GATEWAY_BALL_KALMAN_MODEL_ACCEL_Q_MM2_S3    2000.0F
+#define GATEWAY_BALL_KALMAN_BIAS_WALK_Q_MM2_S4_S     100.0F
 #define GATEWAY_BALL_KALMAN_INITIAL_POSITION_P_MM2     25.0F
 #define GATEWAY_BALL_KALMAN_INITIAL_VELOCITY_P_MM2_S2 90000.0F
 #define GATEWAY_BALL_KALMAN_INITIAL_BIAS_P_MM2_S4  250000.0F
-#define GATEWAY_BALL_KALMAN_INNOVATION_GATE_SIGMA       5.0F
+#define GATEWAY_BALL_KALMAN_INNOVATION_GATE_SIGMA       2.5F
+/* Independent hard gate prevents a large covariance from accepting a
+ * physically impossible inter-frame vision jump into the velocity state. */
+#define GATEWAY_BALL_KALMAN_MAX_INNOVATION_MM           12.0F
 #define GATEWAY_BALL_KALMAN_MAX_POSITION_MM            150.0F
 #define GATEWAY_BALL_KALMAN_MAX_VELOCITY_MM_S         1500.0F
 #define GATEWAY_BALL_KALMAN_MAX_BIAS_MM_S2            1000.0F
-#define GATEWAY_BALL_KALMAN_TRUST_POSITION_P_MM2        25.0F
-#define GATEWAY_BALL_KALMAN_TRUST_VELOCITY_P_MM2_S2 100000.0F
+#define GATEWAY_BALL_KALMAN_TRUST_POSITION_P_MM2       100.0F
+#define GATEWAY_BALL_KALMAN_TRUST_VELOCITY_P_MM2_S2   3600.0F
 #define GATEWAY_BALL_KALMAN_MAX_PREDICT_STEP_MS UINT32_C(10)
+/* 无新视觉校正时继续使用杆球模型预测的最长时间。它只控制估计输出保持，
+ * 不放宽VisionLink对单帧测量年龄的100 ms入帧校验。 */
+#define GATEWAY_BALL_KALMAN_MAX_COAST_MS        UINT32_C(300)
 #define GATEWAY_BALL_KALMAN_MIN_ACCEPTED_VIS          UINT32_C(3)
 
 /* 底盘三状态[v,a,IMU零偏]融合器。首轮参数仅依据100 Hz轮速/IMU数据源和旧电机响应
@@ -278,13 +298,13 @@
  * 连续样本求静止Ay零偏并冻结；完成前不向电机控制提交加速度。1kHz下约
  * 需300ms。控制链不使用Pitch、Gyro Y或Z轴重力补偿。 */
 #define GATEWAY_BMI088_ACCEL_Y_BIAS_CALIBRATION_SAMPLES UINT32_C(300)
-/* 纵向输出先用1kHz RBJ陷波抑制实测约14Hz机构回灌，再使用12Hz二阶
+/* 纵向输出先用1kHz RBJ陷波抑制实测约14Hz机构回灌，再使用10Hz二阶
  * Butterworth低通。实测噪声主要来自电机使能后的机构耦合；该组合保留
  * 1~3Hz加速度前馈响应，同时压低机械高频振动。截止频率单位Hz。 */
 #define GATEWAY_BMI088_ACCEL_NOTCH_SAMPLE_HZ       1000.0F
 #define GATEWAY_BMI088_ACCEL_NOTCH_CENTER_HZ         14.0F
 #define GATEWAY_BMI088_ACCEL_NOTCH_QUALITY_FACTOR     0.7F
-#define GATEWAY_BMI088_ACCEL_LOWPASS_CUTOFF_HZ        12.0F
+#define GATEWAY_BMI088_ACCEL_LOWPASS_CUTOFF_HZ        10.0F
 #define GATEWAY_BMI088_ACCEL_MAX_ABS_OUTPUT_MM_S2    40000.0F
 #define GATEWAY_BMI088_ACCEL_MAX_SAMPLE_STEP_MS   UINT32_C(5)
 #define GATEWAY_BMI088_ACCEL_MAX_INPUT_AGE_MS     UINT32_C(10)

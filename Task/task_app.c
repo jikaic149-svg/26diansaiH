@@ -602,8 +602,19 @@ static void Task_SendVisionControlStatus(
         gateway->ball_target_mm, 1.0F));
     status.theta_command_mdeg = (gateway->level_control_phase != 0U) ?
         Task_ScaleFloatToI32(gateway->rod_command_deg, 1000.0F) : 0;
+    status.motor_target_raw = gateway->target_single_turn_angle_raw;
+    status.motor_feedback_raw = gateway->single_turn_angle_raw;
+    status.motor_command_ma = Task_ClampI32ToI16(Task_ScaleFloatToI32(
+        gateway->command_current_a, 1000.0F));
+    status.motor_speed_centi_rpm = Task_ClampI32ToI16(Task_ScaleFloatToI32(
+        gateway->speed_rpm, 100.0F));
+    status.stiction_kick_mdeg = Task_ClampI32ToI16(Task_ScaleFloatToI32(
+        gateway->ball_stiction_kick_deg, 1000.0F));
     status.status_flags = flags;
     status.fault_bits = faults;
+    (void)Device_PeerLink_GetRemoteCompetitionMode(
+        &s_peer_link, now_ms, PEER_LINK_OFFLINE_TIMEOUT_MS,
+        &status.competition_mode);
     if (!Device_VisionLink_SendControlStatus(&s_vision_link, &status)) {
         s_vision_link_fault = TASK_VISION_LINK_FAULT_TX;
     }

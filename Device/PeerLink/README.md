@@ -1,18 +1,20 @@
 # PeerLink
 
 PeerLink 由现有 1 ms Gateway Task 单一拥有，通过 USART1 与 G3519 交换 Packet V1。
-当前处理双向 `HB`、G3519→F407 的七字段 `CAR` Latest Value，以及F407→G3519的
+当前处理双向 `HB`、G3519→F407 的八字段 `CAR` Latest Value，以及F407→G3519的
 50 Hz只读`DBG`；F407不再发送QD4310/CAN `TEL/ENC`，也不接收旧`ACC/ACC_MEAS`：
 
 ```text
 CAR=<node_id>,<sample_ms>,<speed_x_mm_s>,<specific_force_x_mm_s2>,
-    <specific_force_z_mm_s2>,<pitch_rate_centi_dps>,<valid>
+    <specific_force_z_mm_s2>,<pitch_rate_centi_dps>,<valid>,<competition_mode>
 ```
 
 F407 只接受节点 2、规范十进制字段、车速 `±5000 mm/s`、X/Z 比力
 `±50000 mm/s²`、Pitch/Y 角速度 `±100000`（单位 `0.01 deg/s`）和合法 valid 组合。
 `valid=0` 时四个物理量必须全为0。X/Z 是加速度计比力；静止水平且轴符号正确时 Z
 约为 `+9807 mm/s²`，不是去重力线加速度。
+`competition_mode`独立于valid且只接受G3519赛题号`2..6`；F407按本地接收年龄保存该
+只读信息并转发给Maix，不据此启动、停止或切换滚球控制。
 
 独立 Header 序号与远端 `sample_ms` 都按前半区规则前进；重复、倒序或旧样本不刷新本地
 接收时刻。对端 HB 离线恢复或 uptime 非回绕倒退时清序号/样本会话，使 G3519 独立重启

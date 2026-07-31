@@ -515,6 +515,12 @@ bool Device_VisionLink_SendControlStatus(
         (status->target_mm > VISION_LINK_POSITION_ABS_MAX_MM) ||
         (status->theta_command_mdeg < -VISION_LINK_THETA_ABS_MAX_MDEG) ||
         (status->theta_command_mdeg > VISION_LINK_THETA_ABS_MAX_MDEG) ||
+        ((status->competition_mode !=
+          DEVICE_VISION_LINK_COMPETITION_MODE_UNKNOWN) &&
+         ((status->competition_mode <
+           DEVICE_VISION_LINK_COMPETITION_MODE_MIN) ||
+          (status->competition_mode >
+           DEVICE_VISION_LINK_COMPETITION_MODE_MAX))) ||
         ((status->status_flags & UINT16_C(0x4000)) != 0U) ||
         ((status->fault_bits & UINT16_C(0x8000)) != 0U)) {
         return false;
@@ -541,9 +547,21 @@ bool Device_VisionLink_SendControlStatus(
         !APPEND_VST_COMMA() ||
         !APPEND_VST_SIGNED(status->theta_command_mdeg) ||
         !APPEND_VST_COMMA() ||
+        !APPEND_VST_UNSIGNED(status->motor_target_raw) ||
+        !APPEND_VST_COMMA() ||
+        !APPEND_VST_UNSIGNED(status->motor_feedback_raw) ||
+        !APPEND_VST_COMMA() ||
+        !APPEND_VST_SIGNED(status->motor_command_ma) ||
+        !APPEND_VST_COMMA() ||
+        !APPEND_VST_SIGNED(status->motor_speed_centi_rpm) ||
+        !APPEND_VST_COMMA() ||
+        !APPEND_VST_SIGNED(status->stiction_kick_mdeg) ||
+        !APPEND_VST_COMMA() ||
         !APPEND_VST_UNSIGNED(status->status_flags) ||
         !APPEND_VST_COMMA() ||
-        !APPEND_VST_UNSIGNED(status->fault_bits)) {
+        !APPEND_VST_UNSIGNED(status->fault_bits) ||
+        !APPEND_VST_COMMA() ||
+        !APPEND_VST_UNSIGNED(status->competition_mode)) {
         increment_saturating(&link->status.vst_tx_error_count);
         return false;
     }

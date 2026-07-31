@@ -17,6 +17,7 @@ static Algorithm_BallStateEstimator_Config default_config(void)
         .initial_velocity_variance_mm2_s2 = 90000.0F,
         .initial_bias_variance_mm2_s4 = 250000.0F,
         .innovation_gate_sigma = 5.0F,
+        .maximum_position_innovation_mm = 12.0F,
         .maximum_absolute_position_mm = 200.0F,
         .maximum_absolute_velocity_mm_s = 3000.0F,
         .maximum_absolute_bias_mm_s2 = 3000.0F,
@@ -202,6 +203,35 @@ static void test_polarity_gate_and_trust(void)
     assert(fabsf(state.position_mm + 10.0F) < 1.0F);
 }
 
+static void test_absolute_innovation_gate_and_initial_seed(void)
+{
+    Algorithm_BallStateEstimator estimator;
+    Algorithm_BallStateEstimator_State state;
+    Algorithm_BallStateEstimator_Config config = default_config();
+
+    /* Make the sigma gate deliberately loose so this isolates the absolute
+     * gate. The first measurement must still be allowed to seed the state. */
+    config.innovation_gate_sigma = 100.0F;
+    assert(Algorithm_BallStateEstimator_Init(&estimator, &config, 0U));
+    assert(Algorithm_BallStateEstimator_CorrectPosition(
+        &estimator, 0U, 0U, 50.0F));
+    assert(Algorithm_BallStateEstimator_GetState(&estimator, &state, NULL));
+    assert(close_enough(state.position_mm, 50.0F, 0.001F));
+
+    assert(Algorithm_BallStateEstimator_Predict(
+        &estimator, 2U, 0.0F, 0.0F));
+    assert(Algorithm_BallStateEstimator_CorrectPosition(
+        &estimator, 2U, 0U, 63.0F));
+    assert(estimator.innovation_reject_count == 1U);
+    assert(Algorithm_BallStateEstimator_GetState(&estimator, &state, NULL));
+    assert(close_enough(state.position_mm, 50.0F, 0.001F));
+
+    assert(Algorithm_BallStateEstimator_CorrectPosition(
+        &estimator, 2U, 0U, 61.0F));
+    assert(estimator.innovation_reject_count == 1U);
+    assert(estimator.accepted_measurements_since_reset == 2U);
+}
+
 static void test_prediction_gap_and_stale_history(void)
 {
     Algorithm_BallStateEstimator estimator;
@@ -227,6 +257,41 @@ static void test_prediction_gap_and_stale_history(void)
     assert(estimator.stale_measurement_count == 1U);
 }
 
+static void test_high_noise_delayed_measurements_remain_continuous(void)
+{
+    Algorithm_BallStateEstimator estimator;
+    Algorithm_BallStateEstimator_Config config = default_config();
+
+    config.position_measurement_variance_mm2 = 9.0F;
+    config.model_acceleration_noise_density_mm2_s3 = 90000.0F;
+    config.bias_walk_variance_mm2_s4_per_s = 10000.0F;
+    config.trusted_position_variance_mm2 = 625.0F;
+    config.maximum_measurement_age_ms = 300U;
+
+    assert(Algorithm_BallStateEstimator_Init(&estimator, &config, 0U));
+    for (uint32_t now_ms = 1U; now_ms <= 430U; ++now_ms) {
+        assert(Algorithm_BallStateEstimator_Predict(
+            &estimator, now_ms, 0.0F, 0.0F));
+        if ((now_ms >= 50U) && (((now_ms - 50U) % 20U) == 0U)) {
+            assert(Algorithm_BallStateEstimator_CorrectPosition(
+                &estimator, now_ms, 50U, 0.0F));
+        }
+    }
+    assert(Algorithm_BallStateEstimator_IsTrusted(&estimator, 430U));
+
+    for (uint32_t now_ms = 431U; now_ms <= 570U; ++now_ms) {
+        assert(Algorithm_BallStateEstimator_Predict(
+            &estimator, now_ms, 0.0F, 0.0F));
+    }
+    assert(Algorithm_BallStateEstimator_IsTrusted(&estimator, 570U));
+
+    for (uint32_t now_ms = 571U; now_ms <= 620U; ++now_ms) {
+        assert(Algorithm_BallStateEstimator_Predict(
+            &estimator, now_ms, 0.0F, 0.0F));
+    }
+    assert(!Algorithm_BallStateEstimator_IsTrusted(&estimator, 620U));
+}
+
 int main(void)
 {
     test_rigid_model_prediction();
@@ -234,7 +299,9 @@ int main(void)
     test_mid_step_delayed_correction_matches_split_reference();
     test_delayed_first_measurement_is_propagated_to_now();
     test_polarity_gate_and_trust();
+    test_absolute_innovation_gate_and_initial_seed();
     test_prediction_gap_and_stale_history();
+    test_high_noise_delayed_measurements_remain_continuous();
     puts("ball state estimator tests: PASS");
     return 0;
 }

@@ -316,8 +316,14 @@ static void test_vst_encoding_and_busy_drop(void)
         .velocity_mm_s = 34,
         .target_mm = 0,
         .theta_command_mdeg = -456,
+        .motor_target_raw = 54329U,
+        .motor_feedback_raw = 54340U,
+        .motor_command_ma = -91,
+        .motor_speed_centi_rpm = 325,
+        .stiction_kick_mdeg = -450,
         .status_flags = UINT16_C(0xBFFF),
         .fault_bits = UINT16_C(0x0003),
+        .competition_mode = 6U,
     };
 
     s_tx_length = 0U;
@@ -331,7 +337,9 @@ static void test_vst_encoding_and_busy_drop(void)
     assert(view.payload_length < sizeof(payload));
     memcpy(payload, view.payload, view.payload_length);
     payload[view.payload_length] = '\0';
-    assert(strcmp(payload, "10,9,25,-12,34,0,-456,49151,3") == 0);
+    assert(strcmp(
+        payload,
+        "10,9,25,-12,34,0,-456,54329,54340,-91,325,-450,49151,3,6") == 0);
 
     s_tx_result = BSP_UART_RESULT_BUSY;
     assert(Device_VisionLink_SendControlStatus(&link, &status));

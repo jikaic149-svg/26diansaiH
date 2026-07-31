@@ -18,6 +18,7 @@ typedef struct {
     float ball_position_mm;
     float ball_velocity_mm_s;
     float ball_integral_acceleration_mm_s2;
+    float ball_stiction_kick_deg;
     float ball_target_mm;
     float ball_active_target_mm;
     float ball_acceleration_bias_mm_s2;

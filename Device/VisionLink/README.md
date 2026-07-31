@@ -68,13 +68,19 @@ F407每20 ms最多发送一帧异步Latest Value，不逐帧确认VIS：
 TYPE=VST
 Payload=<last_rx_vis_seq>,<last_used_vis_seq>,<measurement_age_ms>,
         <estimate_mm>,<velocity_mm_s>,<target_mm>,<theta_cmd_mdeg>,
-        <status_flags>,<fault_bits>
+        <motor_target_raw>,<motor_feedback_raw>,<motor_command_ma>,
+        <motor_speed_centi_rpm>,<stiction_kick_mdeg>,
+        <status_flags>,<fault_bits>,<competition_mode>
 ```
 
 - `last_rx_vis_seq`是最后一个Packet/Payload合法且序号新的VIS；b0有效；
 - `last_used_vis_seq`是最后真正进入球状态更新的VIS，跨暂时失效保持；b1有效；
 - `measurement_age_ms`为当前可用测量的保守年龄，`65535`表示当前无可用测量；
 - 估计、速度、目标单位分别为mm、mm/s、mm，杆角命令单位为mdeg；无效动态量发0；
+- 电机目标/反馈为QD4310单圈raw，命令电流单位mA，编码器转速单位0.01 rpm；
+  `stiction_kick_mdeg`仅报告当前实际叠加的破静摩擦杆角脉冲，非活动时为0；
+- `competition_mode`为G3519当前赛题号`2..6`；`0`表示F407没有1500 ms内的新鲜mode。
+  该字段只供Maix显示和诊断，不授予视觉侧切换模式或启动控制的权限；
 - VST Header序号仅在整帧进入本地TX环后增加；BUSY整帧丢弃、不重试。
 
 `status_flags`：

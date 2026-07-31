@@ -1824,3 +1824,148 @@
 - 验证方式和结果：BallStateEstimator严格主机测试PASS；Maix 12项Python测试PASS；ARM Debug clean-first完整链接成功，FLASH/RAM为`47732/20648 B`。烧录前VST为`status=0x323F`、`theta=0`且电机未使能；CMSIS-DAP `0416:5051`写入并复位，OpenOCD报告`Programming Finished`，按要求未做verify/readback。
 - 已知限制：1 kHz结果是模型状态预测，不是1 kHz新视觉测量；首次可信输出需要可靠杆角反馈并接受至少3帧真实视觉。底盘三状态融合、自适应高低通权重和目标轮速差分均未启用。
 - 待确认事项：用户按KEY后观察VST的估计有效/速度有效位、短时`NO_BALL`期间杆角连续性、超调和稳定时间；异常立即再按KEY停机。
+
+## 2026-07-31：G3519赛题mode只读转发至视觉
+
+- 修改原因：用户要求F407接收G3519当前赛题mode，并同步给Maix视觉程序。
+- 最终决策：PeerLink把`CAR`扩展为八字段并只接受尾字段`competition_mode=2..6`；F407按
+  本地接收时间提供1500 ms新鲜度读取。VisionLink在既有14个VST状态字段之后追加第15字段
+  `competition_mode`，`0`表示没有新鲜mode，`2..6`表示有效赛题号。Task只把该只读状态
+  组装进VST，不据此切换F407控制、启停电机或修改滚球目标；未新增Task、ACK、重发或
+  状态机。
+- 涉及文件：`Device/PeerLink/device_peer_link.[ch]`、`Device/VisionLink/device_vision_link.[ch]`、
+  `Task/task_app.c`、对应README与PeerLink/VisionLink主机测试；并行存在的电机遥测扩展不属于
+  本次mode同步成果。
+- 验证方式和结果：PeerLink与VisionLink主机测试均PASS；F407 Debug/Release完整链接通过，
+  BIN分别为`48196/41112 B`；`git diff --check`通过。
+- 已知限制与待确认：本轮未烧录F407；G3519→F407的八字段`CAR`实收、1500 ms过期后回退
+  `0`以及F407→Maix的15字段`VST`仍需双端UART联机验证。
+
+## 2026-07-31：mode同步实物分段验证与F407部署
+
+- 修改原因：用户要求立即验证G3519→F407→Maix的mode实物链路。
+- 部署与安全状态：当前Debug clean-first完整链接通过，FLASH/RAM为`48724/20648 B`，BIN
+  SHA-256为`556679897711A47BD625D88ABBA880DD154656AC21265EE48052B58F69F57D0B`。
+  烧录前COM3为`phase=0`、命令`0 mA`、速度`0`、驱动未使能；OpenOCD锁定
+  `VID:PID 0416:5051`写入ELF并`Verified OK`、复位。复位后再次抓到`phase=0`、命令
+  `0 mA`、反馈约`-1 mA`、速度`0`、flags仅bit0 motor_online。
+- 分段验证：Maix持续收到当前15字段VST。为隔离链路，使用SWD仅向F407的只读PeerLink
+  接收缓存临时注入新鲜`mode=2`；Maix日志连续记录3条`mode=2`，超过1500 ms后自动恢复
+  `mode=0`，证明F407→Maix转发和新鲜度回退生效。临时mode、时间戳和seen位随后均已清零，
+  未改Flash、未按KEY、未启用电机。
+- 未通过项：F407非停核运行快照显示`heartbeat_rx_count=0`、`car_state_rx_count=0`、
+  `packet_parser_error_count=1`、USART1 framing error为1，未收到任何合法G3519帧。指定G3519
+  DAPLink当前未枚举，故本次不能证明G3519→F407实物链路。
+- 待确认事项：重新连接G3519指定DAPLink/目标电源并核对G3519 TX→F407 PA10及共地后，
+  要求F407的heartbeat/CAR计数持续增长且Maix无需SWD注入即可稳定显示`M2..M6`。
+
+## 2026-07-31：近目标速度阻尼增强与安静保持
+
+- 结论：近目标阻尼调度已被两轮实测否决；当前统一使用基础`Kd=2.5`，静止保持改为
+  位置滞回锁定。最终固件已烧录，电机保持失能，等待用户按KEY做动态验证。
+- 修改原因：实测基础`Kp/Ki/Kd=2.0/0.30/2.5`能明显降低振荡但仍可能在目标附近抖动；
+  用户明确纠正“小距离更强调加速度”为“小距离更强调阻尼”。此前准备的近目标Kp增益
+  方案已被否决，未烧录。
+- 最终决策：首轮近目标`Kd=4.0`和第二轮`Kd=3.0`均被实测否决，近目标调度现已禁用，
+  全域统一使用基础`Kp/Ki/Kd=2.0/0.30/2.5`，球速一阶低通保持`30 ms`。静止保持在
+  `|位置误差|<=2 mm`且`|滤波球速|<=8 mm/s`时进入；进入后忽略速度估计噪声并持续清零
+  目标球速、积分、加速度和滚球杆角，只有位置误差超过`3 mm`才释放。破静摩擦脉冲继续关闭。
+- 涉及文件：`APP/Algorithm/BallPositionControl/algorithm_ball_position_control.[ch]`、
+  `APP/Gateway/app_gateway.c`、`config/core_config.h`及滚球算法/全链路极性测试。
+- 验证方式和结果：首轮`Kd=4.0/60 ms/5 mm/s`动态采样约20秒，位置持续约
+  `-17..+38 mm`往复、球速峰值约`-53..+41 mm/s`、杆角约`-1.37..+0.79 deg`，未收敛，
+  用户随后按KEY停机。第二轮`Kd=3.0/30 ms/8 mm/s`可从约101 mm在2.3秒内回到零点并曾
+  在`0..2 mm`保持约8秒，但随后重新形成约`-18..+9 mm`低频往复，故再次停机并否决。
+  最终滞回实现的BallPositionControl、BallStateEstimator和全链路极性Host测试均PASS；
+  ARM Debug clean-first完整链接通过，FLASH/RAM为`49436/20672 B`。CMSIS-DAP `0416:5051`
+  完成编程与复位，OpenOCD报告`Programming Finished`；按用户要求未做verify/readback。
+  烧录后VST恢复为`fault=0x0002`，命令0、速度0、滚球杆角0和脉冲0。
+- 已知限制：位置滞回可防止速度噪声把保持状态反复踢出，但尚未证明真实钢珠逸出超过3 mm后
+  的重新介入不会形成较小极限环；该行为必须由下一轮动态采样确认。
+- 待确认事项：用户按KEY后先观察回零进入phase2，再验证是否能长时间保持在3 mm滞回带内；
+  若位置再次持续超过10 mm往复，立即再次按KEY停机。
+
+## 2026-07-31：持续极限环后的Kp单变量回退
+
+- 结论：位置驱动力`Kp=1.2`实测收敛更慢且振幅扩大，已被否决；当前恢复`Kp=2.0`，
+  同时大幅降低积分增益和积分限幅，最终固件已烧录并等待动态验证。
+- 修改原因：滞回版本连续采样约30秒后仍出现约`-14..+13 mm`往复、球速约
+  `-36..+32 mm/s`且杆角多次达到约`+/-0.8 deg`。钢珠高速穿过进入带时无法满足低速
+  锁定条件，说明应先降低进入目标区前的位置驱动力，而不是继续扩大保持区或提高阻尼。
+- 最终决策：`Kp=1.2`方案已否决；恢复`Kp=2.0`，将`Ki`由`0.30`降至`0.05`，积分
+  加速度限幅由`30`降至`10 mm/s^2`，减少远端回零时积分蓄积和后续反向推球。`Kd=2.5`、
+  球速低通`30 ms`、`2 mm/8 mm/s`进入与`3 mm`释放滞回、Kalman和保护保持不变。
+- 涉及文件：`config/core_config.h`及本记录。
+- 验证方式和结果：`Kp=1.2/Ki=0.30`动态采样10秒仍出现约`-37..+78 mm`振荡，最新位置
+  仍约`-32 mm`、球速约`-67..+38 mm/s`，用户确认收敛慢并按KEY停机。最终低积分版本的
+  BallPositionControl、BallStateEstimator和全链路极性Host测试均PASS；ARM Debug clean-first
+  完整链接通过，FLASH/RAM为`49436/20672 B`。CMSIS-DAP `0416:5051`完成编程与复位，
+  OpenOCD报告`Programming Finished`；未做verify/readback。烧录后VST恢复`fault=0x0002`，
+  命令0、速度0、滚球杆角0和脉冲0，视觉接收序号持续增长。
+- 已知限制：`Kp/Ki/Kd=2.0/0.05/2.5`及积分限幅10尚未做动态验证；降低积分可减少远端
+  windup，但可能增大克服静摩擦所需时间。
+- 待确认事项：按KEY后比较首次过零速度、峰值位置和衰减包络；若仍持续超过10 mm往复，
+  立即按KEY停机。
+
+## 2026-07-31：取消保持自动释放并统一全域球环参数
+
+- 结论：已取消`3 mm`位置滞回自动释放；进入`2 mm/8 mm/s`安静区后持续保持不动，只有
+  触屏/PeerLink毫米目标真正改变或测量状态复位才重新介入。固件已烧录，电机保持失能。
+- 修改原因：`Kp/Ki/Kd=2.0/0.05/2.5`曾连续约7秒保持在`0..2 mm`，但原保持状态在位置
+  漂出`3 mm`后自动释放，随后再次形成约`-14..+10 mm`慢摆。用户认为分段过多导致又慢又抖，
+  明确要求进入小死区后不要再动。
+- 最终决策：全域继续使用唯一一套`Kp/Ki/Kd=2.0/0.05/2.5`，近目标Kd调度保持禁用，
+  球速低通`30 ms`、积分加速度限幅`10 mm/s^2`不变；离散静摩擦脉冲继续禁用。保持一旦
+  进入便清零目标球速、积分、期望加速度和滚球杆角，不再检查自动释放位置阈值。重复发送
+  相同目标不会解锁，不同目标及停机/重启引起的测量复位会解锁。
+- 涉及文件：`APP/Algorithm/BallPositionControl/algorithm_ball_position_control.[ch]`、
+  `APP/Gateway/app_gateway.c`、`config/core_config.h`、根/算法README及滚球算法/极性链测试。
+- 验证方式和结果：BallPositionControl、BallStateEstimator、control polarity chain三组
+  MSYS2 GCC 16.1严格主机测试均PASS；ARM Debug clean-first完整链接通过，FLASH/RAM为
+  `49352/20672 B`。烧录前VST连续为命令0、速度0；CMSIS-DAP `0416:5051`完成写入和复位，
+  OpenOCD报告`Programming Finished`，按用户要求未做verify/readback。烧录后VST仍为命令0、
+  速度0、滚球杆角0，Maix视觉进程和状态接收序号持续增长。
+- 已知限制：该锁存以“进入时球速足够低”为依据，进入后不主动纠正外力推动、管道残余倾斜
+  或视觉零漂造成的位置逸出；这是用户为消除近目标反复动作明确选择的行为。
+- 待确认事项：用户按KEY后连续采样至少30秒，确认首次进入保持后滚球杆角持续为0，并记录
+  最终停车误差、首次过零速度和是否仍有机械抖动；异常时按KEY停机。
+
+## 2026-07-31：滚球速度估计视觉跳点硬门控与烧录
+
+- 结论：已确认速度环反复换向来自视觉位置跳点被Kalman接受；当前固件增加`12 mm`绝对
+  创新门，并收紧估计器噪声与球速低通，已完成烧录，电机保持失能。
+- 修改原因：实测约20至25 ms内视觉位置出现`-45 -> -26 -> -36 -> -63 mm`跳变，旧
+  `3.5 sigma`门在位置协方差约`100 mm^2`时可放行约`37.7 mm`创新，导致估计球速在
+  `-10 -> +27 -> -42 -> -28 mm/s`间翻向并直接扰动速度PI。
+- 最终决策：已有状态的视觉校正必须同时满足`|innovation|<=12 mm`和sigma门，首次有效测量
+  仍直接种状态。Kalman参数改为`R=36 mm^2`、模型加速度`Q=2000 mm^2/s^3`、偏置随机游走
+  `Q=100 mm^2/s^4/s`、`2.5 sigma`；控制器球速一阶低通由`30 ms`改为`100 ms`。
+- 涉及文件：`APP/Algorithm/BallStateEstimator/algorithm_ball_state_estimator.[ch]`及README、
+  `APP/Gateway/app_gateway.c`、`config/core_config.h`和BallStateEstimator主机测试。
+- 验证方式和结果：新增首次种状态绕过硬门、`13 mm`拒绝和`11 mm`接受断言；MSYS2
+  GCC 16.1严格主机测试PASS。ARM Debug clean-first完整链接通过，FLASH/RAM为
+  `49716/20688 B`。烧录前后VST均为命令`0 mA`、速度`0 rpm`、phase停止；CMSIS-DAP
+  `0416:5051`写入并复位，OpenOCD报告`Programming Finished`，按要求未做verify/readback。
+- 已知限制：硬门只抑制相对当前历史估计超过12 mm的单帧错误校正，不能修复连续、同方向且
+  每帧均小于12 mm的系统性视觉漂移；100 ms低通会增加少量真实刹车速度反馈延迟。
+- 待确认事项：用户按KEY后对`-40/0/+40/0 mm`做短采样，核对创新拒绝计数、估计速度方向、
+  杆角换向次数、首次过零速度与停车误差，再决定是否仅微调硬门或低通时间常数。
+
+## 2026-07-31：取消球状态Kalman融合并保留视觉速度环
+
+- 结论：用户否决Kalman/杆球模型融合球速；当前固件改为真实视觉多帧测速的串级速度环，
+  BMI088加速度仅独立补偿最终杆角，已完成烧录。
+- 修改原因：Kalman版本实测零目标仍持续约`-57..+34 mm`摆动，估计速度约
+  `-82..+87 mm/s`并多次令杆角换向，继续调Q/R不能形成可靠收敛。
+- 最终决策：`GATEWAY_BALL_KALMAN_ENABLE=0`；保留位置P生成目标球速、目标球速限加减速、
+  速度PI生成目标加速度和滚动逆模型。球速使用约`80 ms`真实视觉位置差分，再经`40 ms`
+  一阶低通；连续视觉帧间隔异常时清空测速历史。底盘加速度不参与球位置或球速估计。
+- 涉及文件：`APP/Algorithm/BallPositionControl/algorithm_ball_position_control.[ch]`及README、
+  `APP/Gateway/app_gateway.c`、`config/core_config.h`和滚球/极性链测试。
+- 验证方式和结果：新增80 ms多帧测速主机断言；BallPositionControl严格主机测试PASS。
+  ARM Debug clean-first完整链接通过，FLASH/RAM为`46632/20768 B`。用户确认停机后，
+  CMSIS-DAP `0416:5051`写入并复位，OpenOCD报告`Programming Finished`，未做verify/readback。
+- 已知限制：速度环只在新真实视觉帧到达时更新，视觉帧间保持最近杆角；多帧差分会引入约
+  80 ms测速窗口延迟，但不会再被杆角模型或底盘加速度预测拉动。
+- 待确认事项：按KEY后先在零目标短采样，确认视觉球速方向、振幅衰减和停车误差；稳定后再
+  测试`-40/0/+40/0 mm`，不稳定则立即停机。

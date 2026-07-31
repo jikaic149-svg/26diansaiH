@@ -40,6 +40,8 @@ static bool valid_config(const Algorithm_BallStateEstimator_Config *config)
         (config->initial_bias_variance_mm2_s4 > 0.0F) &&
         isfinite(config->innovation_gate_sigma) &&
         (config->innovation_gate_sigma >= 1.0F) &&
+        isfinite(config->maximum_position_innovation_mm) &&
+        (config->maximum_position_innovation_mm > 0.0F) &&
         isfinite(config->maximum_absolute_position_mm) &&
         (config->maximum_absolute_position_mm > 0.0F) &&
         isfinite(config->maximum_absolute_velocity_mm_s) &&
@@ -192,6 +194,9 @@ static enum CorrectionResult correct_snapshot(
     if (!isfinite(innovation) || !isfinite(innovation_variance) ||
         (innovation_variance <= 0.0F)) {
         return CORRECTION_RESULT_ERROR;
+    }
+    if (fabsf(innovation) > config->maximum_position_innovation_mm) {
+        return CORRECTION_RESULT_REJECTED;
     }
     gate = config->innovation_gate_sigma *
         config->innovation_gate_sigma * innovation_variance;

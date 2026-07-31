@@ -74,6 +74,10 @@ static float visual_rod_target(float camera_position_mm)
         .maximum_absolute_target_position_mm =
             GATEWAY_BALL_TARGET_LIMIT_MM,
         .target_slew_rate_mm_s = GATEWAY_BALL_TARGET_SLEW_MM_S,
+        .maximum_target_velocity_mm_s =
+            GATEWAY_BALL_MAX_TARGET_VELOCITY_MM_S,
+        .maximum_target_acceleration_mm_s2 =
+            GATEWAY_BALL_MAX_TARGET_ACCELERATION_MM_S2,
         .measurement_polarity = GATEWAY_BALL_MEASUREMENT_POLARITY,
         .position_gain_per_s2 = GATEWAY_BALL_POSITION_KP_PER_S2,
         .position_integral_gain_per_s3 =
@@ -82,6 +86,18 @@ static float visual_rod_target(float camera_position_mm)
         .maximum_integral_acceleration_mm_s2 =
             GATEWAY_BALL_INTEGRAL_ACCEL_LIMIT_MM_S2,
         .velocity_filter_tau_s = GATEWAY_BALL_VELOCITY_FILTER_TAU_S,
+        .velocity_estimation_window_ms =
+            GATEWAY_BALL_VELOCITY_ESTIMATION_WINDOW_MS,
+        .hold_position_error_mm =
+            GATEWAY_BALL_HOLD_POSITION_ERROR_MM,
+        .hold_maximum_velocity_mm_s =
+            GATEWAY_BALL_HOLD_MAX_VELOCITY_MM_S,
+        .hold_stable_duration_ms =
+            GATEWAY_BALL_HOLD_STABLE_DURATION_MS,
+        .near_target_error_mm =
+            GATEWAY_BALL_NEAR_TARGET_ERROR_MM,
+        .near_target_velocity_gain_multiplier =
+            GATEWAY_BALL_NEAR_TARGET_KD_MULTIPLIER,
         .gravity_mm_s2 = GATEWAY_BALL_GRAVITY_MM_S2,
         .inertia_ratio = GATEWAY_BALL_INERTIA_RATIO,
         .rod_angle_limit_deg = GATEWAY_BALL_ROD_ANGLE_LIMIT_DEG,
@@ -92,6 +108,8 @@ static float visual_rod_target(float camera_position_mm)
     assert(Algorithm_BallPositionControl_Init(&controller, &config));
     assert(Algorithm_BallPositionControl_UpdateMeasurement(
         &controller, 1U, camera_position_mm));
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 101U, camera_position_mm));
     assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
         &controller, &rod_target_deg));
     return rod_target_deg;

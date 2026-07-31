@@ -3,7 +3,7 @@
 #include <limits.h>
 #include <string.h>
 
-#define DEVICE_PEER_LINK_CAR_STATE_FIELD_COUNT 7U
+#define DEVICE_PEER_LINK_CAR_STATE_FIELD_COUNT 8U
 
 static void increment_saturating(uint32_t *value)
 {
@@ -176,7 +176,9 @@ static bool car_state_values_valid(const Device_PeerLink_CarState *state)
         !absolute_i32_within(state->acceleration_z_mm_per_second2,
             DEVICE_PEER_LINK_CAR_ACCEL_ABS_MAX_MM_PER_SECOND2) ||
         !absolute_i32_within(state->pitch_rate_centi_dps,
-            DEVICE_PEER_LINK_CAR_PITCH_RATE_ABS_MAX_CENTI_DPS)) {
+            DEVICE_PEER_LINK_CAR_PITCH_RATE_ABS_MAX_CENTI_DPS) ||
+        (state->competition_mode < DEVICE_PEER_LINK_COMPETITION_MODE_MIN) ||
+        (state->competition_mode > DEVICE_PEER_LINK_COMPETITION_MODE_MAX)) {
         return false;
     }
     return state->valid ||
@@ -292,6 +294,7 @@ static void consume_car_state(
     int32_t specific_force_z;
     int32_t pitch_rate;
     uint32_t valid;
+    uint32_t competition_mode;
 
     for (size_t index = 0U; index <= packet->payload_length; ++index) {
         if ((index == packet->payload_length) ||
@@ -330,7 +333,11 @@ static void consume_car_state(
             &packet->payload[start[5]], length[5], &pitch_rate) ||
         !parse_u32_canonical(
             &packet->payload[start[6]], length[6], &valid) ||
-        (valid > 1U)) {
+        !parse_u32_canonical(
+            &packet->payload[start[7]], length[7], &competition_mode) ||
+        (valid > 1U) ||
+        (competition_mode < DEVICE_PEER_LINK_COMPETITION_MODE_MIN) ||
+        (competition_mode > DEVICE_PEER_LINK_COMPETITION_MODE_MAX)) {
         increment_saturating(&link->status.car_state_payload_error_count);
         return;
     }
@@ -341,6 +348,7 @@ static void consume_car_state(
             .acceleration_x_mm_per_second2 = specific_force_x,
             .acceleration_z_mm_per_second2 = specific_force_z,
             .pitch_rate_centi_dps = pitch_rate,
+            .competition_mode = (uint8_t)competition_mode,
             .valid = valid != 0U,
             .received_at_ms = now_ms,
         };
@@ -642,6 +650,22 @@ bool Device_PeerLink_GetRemoteCarState(
         return false;
     }
     *state = link->remote_car_state;
+    return true;
+}
+
+bool Device_PeerLink_GetRemoteCompetitionMode(
+    const Device_PeerLink *link,
+    uint32_t now_ms,
+    uint32_t maximum_age_ms,
+    uint8_t *competition_mode)
+{
+    if ((link == NULL) || (competition_mode == NULL) || !link->initialized ||
+        !link->remote_car_state_seen ||
+        ((uint32_t)(now_ms - link->remote_car_state.received_at_ms) >
+         maximum_age_ms)) {
+        return false;
+    }
+    *competition_mode = link->remote_car_state.competition_mode;
     return true;
 }
 

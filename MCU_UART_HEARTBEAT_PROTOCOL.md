@@ -31,7 +31,7 @@ uptime 非回绕倒退表示对端重启，接收端清除旧 CAR 会话。
 
 ```text
 CAR=2,<sample_ms>,<speed_x_mm_s>,<specific_force_x_mm_s2>,
-      <specific_force_z_mm_s2>,<pitch_rate_centi_dps>,<valid>
+      <specific_force_z_mm_s2>,<pitch_rate_centi_dps>,<valid>,<competition_mode>
 ```
 
 - G3519以100 Hz发送；F407只接收节点2。
@@ -41,6 +41,8 @@ CAR=2,<sample_ms>,<speed_x_mm_s>,<specific_force_x_mm_s2>,
 - `pitch_rate_centi_dps`：零偏校正后的 Pitch/Y 角速度，单位 `0.01 deg/s`，范围
   `-100000..100000`。
 - `valid` 只能为0或1；为0时四个物理量必须全0。
+- `competition_mode`独立于valid，只接受G3519当前赛题号`2..6`。F407只保存并转发该
+  信息，不用它启动、停止或切换滚球控制。
 - CAR使用独立16位序号。重复/旧序号或非递增样本时间不覆盖Latest Value；序号和
   `sample_ms`均支持自然回绕。
 - F407以本地接收时间判新鲜度：年龄不超过50 ms有效，51 ms失效。

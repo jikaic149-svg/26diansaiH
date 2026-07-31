@@ -1,6 +1,6 @@
 # 车载平衡滚球系统：多 Agent 协作文档
 
-> 最后更新：2026-07-30（Agent B / BMI088极性与两级快速滤波）
+> 最后更新：2026-07-31（A/B/C / 赛题mode只读同步）
 > 维护方式：所有 Agent 开始工作前先读本文；结束工作前更新“当前状态”和“合作记录”。
 > 已有记录只追加或更正，不静默删除对方记录。
 > 角色说明：本文最初由小车 Agent 创建；原文中的“我”“本 Agent”或原作者身份均指
@@ -10,15 +10,17 @@
 ## 0. 当前冻结板间接口（2026-07-30）
 
 用户最终要求停止跨板发送 QD4310/CAN `TEL/ENC` 明细，并否决并行
-`ACC/ACC_MEAS`。板间只保留双向500 ms `HB`和G3519→F407的100 Hz七字段 `CAR`：
+`ACC/ACC_MEAS`。板间保留双向500 ms `HB`和G3519→F407的100 Hz八字段 `CAR`：
 
 ```text
 CAR=2,<sample_ms>,<speed_x_mm_s>,<specific_force_x_mm_s2>,
-      <specific_force_z_mm_s2>,<pitch_rate_centi_dps>,<valid>
+      <specific_force_z_mm_s2>,<pitch_rate_centi_dps>,<valid>,<competition_mode>
 ```
 
 CAR只传平均实测车速、ICM45686 X/Z加速度计比力和零偏校正后的Pitch/Y角速度；JY61P、
 灰度、里程、VOFA和F407 CAN状态都不跨板。CAR当前只保留通信兼容与诊断，不进入F407控制。
+`competition_mode`为G3519当前赛题号`2..6`，独立于物理量valid；F407只读保存并经VST
+转发给Maix，视觉侧只显示/记录，三端均不因该字段启动、停止或切换滚球控制。
 F407改用本地SPI BMI088，经Pitch互补、X轴重力投影扣除和两级2.25 ms精确EMA产生纵向
 加速度。KEY启动后先回机械零点并稳定300 ms，再以`GATEWAY_CHASSIS_FF_GAIN=0.50`进入
 BMI088补偿。水管几何中心是唯一球目标`x=0 mm`；视觉角与BMI088角共享相对水平trim的
@@ -973,10 +975,12 @@ G3519 车载UI/按键 ──(MODE/TARGET/RUN/START候选，当前双端均无)�
 - 当前 115200 8N1 估算容量足够，但必须以最坏 `ACC+HB` 流量、UART 环占用和真实丢帧
   验证；不能只用约5.6 kB/s静态估算宣称实时通过。
 
-#### 10.5.4 模式/目标/启动/状态（A/B与用户待决）
+#### 10.5.4 模式/目标/启动/状态
 
-- 当前双端源码均无比赛 `mode/target/run_id/START/READY` 字段或 API，以下均是候选；Agent C
-  只提供视觉测量，不拥有比赛模式、目标或官方启动时刻。
+- 当前已实现`competition_mode=2..6`只读链路和独立球目标BTG/VBT；mode由A侧Task拥有，
+  随CAR传给B，再随VST传给C。C只显示/记录，不拥有比赛模式或官方启动时刻。
+- `run_id/START/READY`仍无字段或API；以下一键同步内容仍是候选，不能因mode已可见而视为
+  已批准或已实现。
 - 若允许滚球在车载 KEY 前预先保持，可不设 `START`，但操作脚本必须写清预设目标、进入保持、
   官方按键 `t0` 和停车顺序。若要求一键同步，候选契约至少包含 `run_id + mode +
   target_0p1mm + A侧start_at_ms`，并定义重复抑制、同一 `run_id` 的 READY 匹配和可靠性。
@@ -1151,7 +1155,7 @@ VIS最坏约47 B，50 Hz约2.35 kB/s，小于Packet 128 B和115200 8N1单向容�
 线上帧必须是一条物理行；LF只在整帧末尾：
 
 ```text
-@1|VST|SEQ|LEN|last_rx_vis_seq,last_used_vis_seq,measurement_age_ms,estimate_mm,velocity_mm_s,target_mm,theta_cmd_mdeg,status_flags,fault_bits|CRC16\n
+@1|VST|SEQ|LEN|last_rx_vis_seq,last_used_vis_seq,measurement_age_ms,estimate_mm,velocity_mm_s,target_mm,theta_cmd_mdeg,motor_target_raw,motor_feedback_raw,motor_command_ma,motor_speed_centi_rpm,stiction_kick_mdeg,status_flags,fault_bits,competition_mode|CRC16\n
 ```
 
 | 字段 | 规范类型/范围 | 语义 |
@@ -1164,7 +1168,12 @@ VIS最坏约47 B，50 Hz约2.35 kB/s，小于Packet 128 B和115200 8N1单向容�
 | `velocity_mm_s` | `int16_t` | 规则坐标方向速度，四舍五入/饱和；无效时0 |
 | `target_mm` | `int16_t`，v1仅`-125..125` | 规则坐标显示目标；由`target_0p1mm`对称四舍五入，实际安全范围可更窄；无目标为0并清`TARGET_VALID` |
 | `theta_cmd_mdeg` | `int32_t -85000..85000` | 实物执行端升高为正的杆面角命令；无效时0，实际限幅由安全配置决定 |
+| `motor_target_raw/motor_feedback_raw` | `uint16_t` | QD4310单圈目标/反馈raw，只读诊断 |
+| `motor_command_ma` | `int16_t` | 当前命令电流，单位mA |
+| `motor_speed_centi_rpm` | `int16_t` | 当前编码器转速，单位0.01 rpm |
+| `stiction_kick_mdeg` | `int16_t` | 当前实际叠加的破静摩擦杆角脉冲，非活动时0 |
 | `status_flags/fault_bits` | `uint16_t 0..65535` | 保留位非0按Payload非法；位义如下 |
+| `competition_mode` | `uint8_t`，`0/2..6` | G3519赛题mode；0表示F407没有1500 ms内的新鲜mode，只读显示 |
 
 `status_flags`：b0 `VIS_RX_SEEN`；b1 `MEASUREMENT_USED_SEEN`；b2 `LAST_VIS_USABLE`；
 b3 `ESTIMATE_VALID`；b4 `ESTIMATE_FRESH(age<100ms)`；b5 `TARGET_VALID`；
@@ -1182,10 +1191,11 @@ b13 `CONTROL_DEADLINE_MISS`、b14 `CONFIG_INVALID`（均粘滞）；b15保留0�
 粘滞位只在本地初始化/明确调试复位时清除，v1不增加远程清故障命令。这些位只报告，不自行
 触发新的停机行为。
 
-VST初值：两个VIS序号字段为0但status b0/b1为0；年龄65535；估计/速度/角命令为0；其余
+VST初值：两个VIS序号字段为0但status b0/b1为0；年龄65535；估计/速度/角命令为0；mode
+为0；其余
 状态按真实目标与电机状态生成。100 ms启动宽限后仍无新VIS时置fault b0/b1。VST每20 ms
 最多一帧，是异步Latest Value而非逐帧ACK；实现后可据双序号区分“已解析”和“已使用”。
-最坏约77 B、50 Hz约3.85 kB/s，仍低于单向容量和Packet帧长上限。
+最坏整帧仍小于Packet 128 B，50 Hz低于115200 8N1单向容量；最终以双端计数和抓帧验收。
 
 ### 11.4 B3基线估计与B7可选Kalman
 
@@ -1215,10 +1225,11 @@ camera_pipeline_cal_ms + proc_age_ms + transport_bound_ms
 发送端排队/短写事务和UART串行化，47 B在115200 8N1仅线时长向上取5 ms，但最终值必须由
 实测上界冻结。相机固定延迟未测时可暂记0做功能调试，但不得声称端到端指标通过。
 
-- `[规划，双端未实现]` C→B：VIS真实物理测量、标定和采样年龄；B→C：VST状态回传。
-- `[现有，仅A发送端]` A→B：DIS；F407解析、消费和实际失能缺失。
+- `[已实现，待本轮实物验收]` C→B：VIS真实物理测量、标定和采样年龄；B→C：VST状态回传。
+- `[已删除]` A→B：旧DIS；滚球停止使用现有独立BST，底盘停车仍由A本地负责。
 - `[规划，双端缺失]` A→B：第14.6节六字段ACC；第4.6/12.6节只作历史追溯。
-- `[候选，未冻结/未实现]` A→B：mode、target、run_id、A侧`start_at_ms`。
+- `[已实现，待本轮实物验收]` A→B：CAR尾字段mode `2..6`和独立BTG目标；mode由B经VST
+  转发到C。`run_id/start_at_ms`仍未实现。
 - `[候选，未实现]` B→A：匹配run_id的ready/active/fault；是否占用PeerLink/TFT另立契约。
 - C不占用VOFA CH0～CH20；与场外电脑只做RTSP、录像、回放和调试遥测，不回送控制量。
 

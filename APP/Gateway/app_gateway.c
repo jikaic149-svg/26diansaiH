@@ -350,6 +350,7 @@ static bool update_kalman_ball_feedback(
     }
     if (!Algorithm_BallPositionControl_SetEstimatedState(
             &s_ball_controller,
+            now_ms,
             state.position_mm,
             state.velocity_mm_s)) {
         reset_estimated_ball_feedback(now_ms);
@@ -964,6 +965,8 @@ static void make_primary_telemetry(
         .ball_velocity_mm_s = s_ball_controller.velocity_mm_s,
         .ball_integral_acceleration_mm_s2 =
             s_ball_controller.integral_acceleration_mm_s2,
+        .ball_stiction_kick_deg =
+            s_ball_controller.stiction_kick_angle_deg,
         .ball_target_mm = s_ball_controller.target_command_mm,
         .ball_active_target_mm = s_ball_controller.target_position_mm,
         .ball_acceleration_bias_mm_s2 = estimator_state_valid ?
@@ -1126,6 +1129,10 @@ bool APP_Gateway_Init(uint32_t now_ms)
         .maximum_absolute_target_position_mm =
             GATEWAY_BALL_TARGET_LIMIT_MM,
         .target_slew_rate_mm_s = GATEWAY_BALL_TARGET_SLEW_MM_S,
+        .maximum_target_velocity_mm_s =
+            GATEWAY_BALL_MAX_TARGET_VELOCITY_MM_S,
+        .maximum_target_acceleration_mm_s2 =
+            GATEWAY_BALL_MAX_TARGET_ACCELERATION_MM_S2,
         .measurement_polarity = GATEWAY_BALL_MEASUREMENT_POLARITY,
         .position_gain_per_s2 = GATEWAY_BALL_POSITION_KP_PER_S2,
         .position_integral_gain_per_s3 =
@@ -1134,6 +1141,18 @@ bool APP_Gateway_Init(uint32_t now_ms)
         .maximum_integral_acceleration_mm_s2 =
             GATEWAY_BALL_INTEGRAL_ACCEL_LIMIT_MM_S2,
         .velocity_filter_tau_s = GATEWAY_BALL_VELOCITY_FILTER_TAU_S,
+        .velocity_estimation_window_ms =
+            GATEWAY_BALL_VELOCITY_ESTIMATION_WINDOW_MS,
+        .hold_position_error_mm =
+            GATEWAY_BALL_HOLD_POSITION_ERROR_MM,
+        .hold_maximum_velocity_mm_s =
+            GATEWAY_BALL_HOLD_MAX_VELOCITY_MM_S,
+        .hold_stable_duration_ms =
+            GATEWAY_BALL_HOLD_STABLE_DURATION_MS,
+        .near_target_error_mm =
+            GATEWAY_BALL_NEAR_TARGET_ERROR_MM,
+        .near_target_velocity_gain_multiplier =
+            GATEWAY_BALL_NEAR_TARGET_KD_MULTIPLIER,
         .gravity_mm_s2 = GATEWAY_BALL_GRAVITY_MM_S2,
         .inertia_ratio = GATEWAY_BALL_INERTIA_RATIO,
         .rod_angle_limit_deg = GATEWAY_BALL_ROD_ANGLE_LIMIT_DEG,
@@ -1144,6 +1163,10 @@ bool APP_Gateway_Init(uint32_t now_ms)
             GATEWAY_BALL_STICTION_KICK_STEP_ANGLE_DEG,
         .stiction_kick_maximum_angle_deg =
             GATEWAY_BALL_STICTION_KICK_MAX_ANGLE_DEG,
+        .stiction_assist_velocity_gain_per_s =
+            GATEWAY_BALL_STICTION_ASSIST_VELOCITY_KP_PER_S,
+        .stiction_assist_exit_distance_mm =
+            GATEWAY_BALL_STICTION_ASSIST_EXIT_DISTANCE_MM,
         .stiction_kick_minimum_error_mm =
             GATEWAY_BALL_STICTION_MIN_ERROR_MM,
         .stiction_kick_maximum_velocity_mm_s =
@@ -1173,6 +1196,8 @@ bool APP_Gateway_Init(uint32_t now_ms)
             GATEWAY_BALL_KALMAN_INITIAL_BIAS_P_MM2_S4,
         .innovation_gate_sigma =
             GATEWAY_BALL_KALMAN_INNOVATION_GATE_SIGMA,
+        .maximum_position_innovation_mm =
+            GATEWAY_BALL_KALMAN_MAX_INNOVATION_MM,
         .maximum_absolute_position_mm =
             GATEWAY_BALL_KALMAN_MAX_POSITION_MM,
         .maximum_absolute_velocity_mm_s =
@@ -1186,7 +1211,7 @@ bool APP_Gateway_Init(uint32_t now_ms)
         .maximum_prediction_step_ms =
             GATEWAY_BALL_KALMAN_MAX_PREDICT_STEP_MS,
         .maximum_measurement_age_ms =
-            VISION_LINK_MEASUREMENT_MAX_AGE_MS,
+            GATEWAY_BALL_KALMAN_MAX_COAST_MS,
         .minimum_accepted_measurements =
             GATEWAY_BALL_KALMAN_MIN_ACCEPTED_VIS,
     };

@@ -10,6 +10,9 @@
 
 #define DEVICE_VISION_LINK_BAUD_RATE UINT32_C(115200)
 #define DEVICE_VISION_LINK_RX_CHUNK_CAPACITY ALGORITHM_PACKET_MAX_FRAME_SIZE
+#define DEVICE_VISION_LINK_COMPETITION_MODE_UNKNOWN UINT8_C(0)
+#define DEVICE_VISION_LINK_COMPETITION_MODE_MIN UINT8_C(2)
+#define DEVICE_VISION_LINK_COMPETITION_MODE_MAX UINT8_C(6)
 
 #define DEVICE_VISION_LINK_STATUS_VIS_RX_SEEN          UINT16_C(0x0001)
 #define DEVICE_VISION_LINK_STATUS_MEASUREMENT_USED     UINT16_C(0x0002)
@@ -87,8 +90,14 @@ typedef struct {
     int16_t velocity_mm_s;
     int16_t target_mm;
     int32_t theta_command_mdeg;
+    uint16_t motor_target_raw;
+    uint16_t motor_feedback_raw;
+    int16_t motor_command_ma;
+    int16_t motor_speed_centi_rpm;
+    int16_t stiction_kick_mdeg;
     uint16_t status_flags;
     uint16_t fault_bits;
+    uint8_t competition_mode;
 } Device_VisionLink_ControlStatus;
 
 typedef struct {

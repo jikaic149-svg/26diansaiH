@@ -17,29 +17,100 @@ static float limit_symmetric(float value, float limit)
     return value;
 }
 
+static void reset_hold_candidate(
+    Algorithm_BallPositionControl *controller)
+{
+    controller->hold_candidate_started_ms = 0U;
+    controller->hold_candidate_active = false;
+}
+
+static void reset_speed_loop(
+    Algorithm_BallPositionControl *controller)
+{
+    controller->target_velocity_mm_s = 0.0F;
+    controller->integral_acceleration_mm_s2 = 0.0F;
+    controller->desired_acceleration_mm_s2 = 0.0F;
+    controller->stiction_assist_acceleration_mm_s2 = 0.0F;
+    controller->stiction_assist_start_position_mm = 0.0F;
+    controller->stiction_kick_angle_deg = 0.0F;
+    reset_hold_candidate(controller);
+}
+
+static void reset_velocity_history(
+    Algorithm_BallPositionControl *controller)
+{
+    controller->velocity_history_write_index = 0U;
+    controller->velocity_history_count = 0U;
+}
+
+static void push_velocity_sample(
+    Algorithm_BallPositionControl *controller,
+    uint32_t sample_ms,
+    float position_mm)
+{
+    const uint32_t index = controller->velocity_history_write_index;
+
+    controller->velocity_history_position_mm[index] = position_mm;
+    controller->velocity_history_sample_ms[index] = sample_ms;
+    controller->velocity_history_write_index = (index + 1U) %
+        ALGORITHM_BALL_POSITION_CONTROL_VELOCITY_HISTORY_CAPACITY;
+    if (controller->velocity_history_count <
+        ALGORITHM_BALL_POSITION_CONTROL_VELOCITY_HISTORY_CAPACITY) {
+        ++controller->velocity_history_count;
+    }
+}
+
+static bool calculate_window_velocity(
+    const Algorithm_BallPositionControl *controller,
+    uint32_t sample_ms,
+    float position_mm,
+    float *velocity_mm_s)
+{
+    uint32_t offset;
+
+    if ((velocity_mm_s == NULL) ||
+        (controller->velocity_history_count < 2U)) {
+        return false;
+    }
+    for (offset = 1U;
+         offset < controller->velocity_history_count;
+         ++offset) {
+        const uint32_t index =
+            (controller->velocity_history_write_index +
+             ALGORITHM_BALL_POSITION_CONTROL_VELOCITY_HISTORY_CAPACITY -
+             1U - offset) %
+            ALGORITHM_BALL_POSITION_CONTROL_VELOCITY_HISTORY_CAPACITY;
+        const uint32_t elapsed_ms = sample_ms -
+            controller->velocity_history_sample_ms[index];
+
+        if (elapsed_ms >=
+            controller->config.velocity_estimation_window_ms) {
+            const float elapsed_s = (float)elapsed_ms / 1000.0F;
+            const float velocity =
+                (position_mm -
+                 controller->velocity_history_position_mm[index]) /
+                elapsed_s;
+
+            if (!isfinite(velocity)) {
+                return false;
+            }
+            *velocity_mm_s = velocity;
+            return true;
+        }
+    }
+    return false;
+}
+
 static void reset_stiction_kick(
     Algorithm_BallPositionControl *controller)
 {
     controller->stiction_kick_angle_deg = 0.0F;
-    controller->stiction_next_kick_angle_deg =
-        controller->config.stiction_kick_angle_deg;
+    controller->stiction_assist_acceleration_mm_s2 = 0.0F;
+    controller->stiction_assist_start_position_mm = 0.0F;
+    controller->target_velocity_mm_s = 0.0F;
     controller->stiction_state_started_ms = 0U;
     controller->stiction_error_direction = 0;
     controller->stiction_state = ALGORITHM_BALL_STICTION_IDLE;
-}
-
-static void increase_next_stiction_kick(
-    Algorithm_BallPositionControl *controller)
-{
-    const float increased_angle_deg =
-        controller->stiction_next_kick_angle_deg +
-        controller->config.stiction_kick_step_angle_deg;
-
-    controller->stiction_next_kick_angle_deg =
-        (increased_angle_deg >
-            controller->config.stiction_kick_maximum_angle_deg) ?
-        controller->config.stiction_kick_maximum_angle_deg :
-        increased_angle_deg;
 }
 
 static int8_t error_direction(float error_mm)
@@ -62,6 +133,10 @@ static void begin_stiction_wait(
     controller->stiction_state_started_ms = sample_ms;
     controller->stiction_error_direction = direction;
     controller->stiction_kick_angle_deg = 0.0F;
+    controller->stiction_assist_acceleration_mm_s2 = 0.0F;
+    controller->stiction_assist_start_position_mm =
+        controller->position_mm;
+    controller->target_velocity_mm_s = 0.0F;
 }
 
 static void update_stiction_kick(
@@ -73,12 +148,20 @@ static void update_stiction_kick(
     const float absolute_error_mm = fabsf(error_mm);
     const float absolute_velocity_mm_s = fabsf(controller->velocity_mm_s);
     const int8_t direction = error_direction(error_mm);
-    const bool enabled = controller->config.stiction_kick_angle_deg > 0.0F;
+    const bool enabled =
+        controller->config.stiction_assist_velocity_gain_per_s > 0.0F;
     const bool position_qualifies = absolute_error_mm >
         controller->config.stiction_kick_minimum_error_mm;
     const bool stationary = controller->velocity_valid &&
         (absolute_velocity_mm_s <=
             controller->config.stiction_kick_maximum_velocity_mm_s);
+    const float waiting_displacement_limit_mm = fmaxf(
+        1.0F,
+        controller->config.stiction_kick_maximum_velocity_mm_s *
+        (float)controller->config.stiction_kick_stationary_ms / 1000.0F);
+    const bool waiting_position_moved = fabsf(controller->position_mm -
+        controller->stiction_assist_start_position_mm) >=
+        waiting_displacement_limit_mm;
     const uint32_t elapsed_ms =
         sample_ms - controller->stiction_state_started_ms;
 
@@ -96,7 +179,10 @@ static void update_stiction_kick(
         break;
 
     case ALGORITHM_BALL_STICTION_WAITING:
-        if (!stationary ||
+        /* Use displacement across the dwell interval as the primary
+         * stationary test.  A noisy visual derivative must not restart the
+         * timer every frame when the ball position has barely changed. */
+        if (waiting_position_moved ||
             (direction != controller->stiction_error_direction)) {
             reset_stiction_kick(controller);
             if (stationary) {
@@ -107,41 +193,24 @@ static void update_stiction_kick(
             controller->config.stiction_kick_stationary_ms) {
             controller->stiction_state = ALGORITHM_BALL_STICTION_ACTIVE;
             controller->stiction_state_started_ms = sample_ms;
-            /* The inverse model maps positive acceleration error to negative
-             * rod angle, so the kick uses the opposite error sign. */
-            controller->stiction_kick_angle_deg =
-                -(float)direction *
-                controller->stiction_next_kick_angle_deg;
+            controller->stiction_assist_start_position_mm =
+                controller->position_mm;
         }
         break;
 
     case ALGORITHM_BALL_STICTION_ACTIVE:
-        if (!stationary ||
-            (direction != controller->stiction_error_direction)) {
-            controller->stiction_state =
-                ALGORITHM_BALL_STICTION_COOLDOWN;
-            controller->stiction_state_started_ms = sample_ms;
-            controller->stiction_kick_angle_deg = 0.0F;
-            controller->stiction_next_kick_angle_deg =
-                controller->config.stiction_kick_angle_deg;
-        }
-        else if (elapsed_ms >=
-            controller->config.stiction_kick_duration_ms) {
-            increase_next_stiction_kick(controller);
-            controller->stiction_state =
-                ALGORITHM_BALL_STICTION_COOLDOWN;
-            controller->stiction_state_started_ms = sample_ms;
-            controller->stiction_kick_angle_deg = 0.0F;
+        /* Remain in the speed loop throughout the large-error travel.  The
+         * target speed below tapers continuously before the hand-off band;
+         * there is no timed or fixed-displacement pulse exit. */
+        if (direction != controller->stiction_error_direction) {
+            reset_stiction_kick(controller);
         }
         break;
 
     case ALGORITHM_BALL_STICTION_COOLDOWN:
+        controller->target_velocity_mm_s = 0.0F;
+        controller->stiction_assist_acceleration_mm_s2 = 0.0F;
         controller->stiction_kick_angle_deg = 0.0F;
-        if (!stationary ||
-            (direction != controller->stiction_error_direction)) {
-            controller->stiction_next_kick_angle_deg =
-                controller->config.stiction_kick_angle_deg;
-        }
         if (elapsed_ms >= controller->config.stiction_kick_cooldown_ms) {
             controller->stiction_state = ALGORITHM_BALL_STICTION_IDLE;
             controller->stiction_state_started_ms = 0U;
@@ -156,6 +225,20 @@ static void update_stiction_kick(
         reset_stiction_kick(controller);
         break;
     }
+
+    if (controller->stiction_state == ALGORITHM_BALL_STICTION_ACTIVE) {
+        float speed_fraction = (absolute_error_mm -
+            controller->config.stiction_kick_minimum_error_mm) /
+            controller->config.stiction_assist_exit_distance_mm;
+
+        speed_fraction = limit_symmetric(speed_fraction, 1.0F);
+        if (speed_fraction < 0.0F) {
+            speed_fraction = 0.0F;
+        }
+        controller->target_velocity_mm_s = (float)direction *
+            controller->config.maximum_target_velocity_mm_s *
+            speed_fraction;
+    }
 }
 
 static bool valid_config(
@@ -169,6 +252,10 @@ static bool valid_config(
             config->maximum_absolute_target_position_mm) &&
         isfinite(config->target_slew_rate_mm_s) &&
         (config->target_slew_rate_mm_s > 0.0F) &&
+        isfinite(config->maximum_target_velocity_mm_s) &&
+        (config->maximum_target_velocity_mm_s > 0.0F) &&
+        isfinite(config->maximum_target_acceleration_mm_s2) &&
+        (config->maximum_target_acceleration_mm_s2 > 0.0F) &&
         isfinite(config->measurement_polarity) &&
         ((config->measurement_polarity == 1.0F) ||
          (config->measurement_polarity == -1.0F)) &&
@@ -177,13 +264,31 @@ static bool valid_config(
         isfinite(config->position_integral_gain_per_s3) &&
         (config->position_integral_gain_per_s3 >= 0.0F) &&
         isfinite(config->velocity_gain_per_s) &&
-        (config->velocity_gain_per_s >= 0.0F) &&
+        (config->velocity_gain_per_s > 0.0F) &&
         isfinite(config->maximum_integral_acceleration_mm_s2) &&
         (config->maximum_integral_acceleration_mm_s2 >= 0.0F) &&
         ((config->position_integral_gain_per_s3 == 0.0F) ||
          (config->maximum_integral_acceleration_mm_s2 > 0.0F)) &&
         isfinite(config->velocity_filter_tau_s) &&
         (config->velocity_filter_tau_s >= 0.0F) &&
+        (config->velocity_estimation_window_ms > 0U) &&
+        (config->velocity_estimation_window_ms <= UINT32_C(1000)) &&
+        isfinite(config->hold_position_error_mm) &&
+        (config->hold_position_error_mm >= 0.0F) &&
+        isfinite(config->hold_maximum_velocity_mm_s) &&
+        (config->hold_maximum_velocity_mm_s >= 0.0F) &&
+        (((config->hold_position_error_mm == 0.0F) &&
+          (config->hold_maximum_velocity_mm_s == 0.0F)) ||
+         ((config->hold_position_error_mm > 0.0F) &&
+          (config->hold_maximum_velocity_mm_s > 0.0F) &&
+          (config->hold_stable_duration_ms > 0U))) &&
+        isfinite(config->near_target_error_mm) &&
+        (config->near_target_error_mm >= 0.0F) &&
+        isfinite(config->near_target_velocity_gain_multiplier) &&
+        (((config->near_target_error_mm == 0.0F) &&
+          (config->near_target_velocity_gain_multiplier == 0.0F)) ||
+         ((config->near_target_error_mm > 0.0F) &&
+          (config->near_target_velocity_gain_multiplier >= 1.0F))) &&
         isfinite(config->gravity_mm_s2) &&
         (config->gravity_mm_s2 > 0.0F) &&
         isfinite(config->inertia_ratio) &&
@@ -194,24 +299,30 @@ static bool valid_config(
         (config->maximum_velocity_dt_ms > 0U) &&
         (config->maximum_velocity_dt_ms <= UINT32_C(1000)) &&
         isfinite(config->stiction_kick_angle_deg) &&
-        (config->stiction_kick_angle_deg >= 0.0F) &&
-        (config->stiction_kick_angle_deg <= config->rod_angle_limit_deg) &&
+        (config->stiction_kick_angle_deg == 0.0F) &&
         isfinite(config->stiction_kick_step_angle_deg) &&
-        (config->stiction_kick_step_angle_deg >= 0.0F) &&
+        (config->stiction_kick_step_angle_deg == 0.0F) &&
         isfinite(config->stiction_kick_maximum_angle_deg) &&
-        (config->stiction_kick_maximum_angle_deg >=
-            config->stiction_kick_angle_deg) &&
-        (config->stiction_kick_maximum_angle_deg <=
-            config->rod_angle_limit_deg) &&
+        (config->stiction_kick_maximum_angle_deg == 0.0F) &&
+        isfinite(config->stiction_assist_velocity_gain_per_s) &&
+        (config->stiction_assist_velocity_gain_per_s >= 0.0F) &&
+        isfinite(config->stiction_assist_exit_distance_mm) &&
+        (config->stiction_assist_exit_distance_mm >= 0.0F) &&
         isfinite(config->stiction_kick_minimum_error_mm) &&
         (config->stiction_kick_minimum_error_mm >= 0.0F) &&
         isfinite(config->stiction_kick_maximum_velocity_mm_s) &&
         (config->stiction_kick_maximum_velocity_mm_s >= 0.0F) &&
-        (((config->stiction_kick_angle_deg == 0.0F) &&
-          (config->stiction_kick_step_angle_deg == 0.0F) &&
-          (config->stiction_kick_maximum_angle_deg == 0.0F)) ||
+        (((config->stiction_assist_velocity_gain_per_s == 0.0F) &&
+          (config->stiction_kick_minimum_error_mm == 0.0F) &&
+          (config->stiction_kick_maximum_velocity_mm_s == 0.0F) &&
+          (config->stiction_assist_exit_distance_mm == 0.0F) &&
+          (config->stiction_kick_stationary_ms == 0U) &&
+          (config->stiction_kick_duration_ms == 0U) &&
+          (config->stiction_kick_cooldown_ms == 0U)) ||
          ((config->stiction_kick_minimum_error_mm > 0.0F) &&
           (config->stiction_kick_maximum_velocity_mm_s > 0.0F) &&
+          (config->stiction_assist_velocity_gain_per_s > 0.0F) &&
+          (config->stiction_assist_exit_distance_mm > 0.0F) &&
           (config->stiction_kick_stationary_ms > 0U) &&
           (config->stiction_kick_duration_ms > 0U) &&
           (config->stiction_kick_cooldown_ms > 0U)));
@@ -245,8 +356,68 @@ bool Algorithm_BallPositionControl_SetTargetPositionMm(
             controller->config.maximum_absolute_target_position_mm)) {
         return false;
     }
+    if (target_position_mm != controller->target_command_mm) {
+        controller->hold_active = false;
+        controller->integral_acceleration_mm_s2 = 0.0F;
+        reset_hold_candidate(controller);
+    }
     controller->target_command_mm = target_position_mm;
     return true;
+}
+
+static void update_position_loop_state(
+    Algorithm_BallPositionControl *controller,
+    uint32_t sample_ms,
+    uint32_t delta_ms)
+{
+    const float position_error_mm = controller->target_position_mm -
+        controller->position_mm;
+    float dt_s;
+    bool hold_qualifies;
+
+    if (!controller->velocity_valid || (delta_ms == 0U) ||
+        (delta_ms > controller->config.maximum_velocity_dt_ms)) {
+        reset_speed_loop(controller);
+        return;
+    }
+    if (controller->hold_active) {
+        reset_speed_loop(controller);
+        return;
+    }
+
+    if (controller->target_position_mm != controller->target_command_mm) {
+        controller->integral_acceleration_mm_s2 = 0.0F;
+    }
+    else {
+        dt_s = (float)delta_ms / 1000.0F;
+        controller->integral_acceleration_mm_s2 +=
+            controller->config.position_integral_gain_per_s3 *
+            position_error_mm * dt_s;
+        controller->integral_acceleration_mm_s2 = limit_symmetric(
+            controller->integral_acceleration_mm_s2,
+            controller->config.maximum_integral_acceleration_mm_s2);
+    }
+
+    hold_qualifies =
+        (controller->config.hold_position_error_mm > 0.0F) &&
+        (controller->target_position_mm == controller->target_command_mm) &&
+        (fabsf(controller->target_command_mm - controller->position_mm) <=
+            controller->config.hold_position_error_mm) &&
+        (fabsf(controller->velocity_mm_s) <=
+            controller->config.hold_maximum_velocity_mm_s);
+    if (!hold_qualifies) {
+        reset_hold_candidate(controller);
+    }
+    else if (!controller->hold_candidate_active) {
+        controller->hold_candidate_active = true;
+        controller->hold_candidate_started_ms = sample_ms;
+    }
+    else if ((uint32_t)(sample_ms -
+            controller->hold_candidate_started_ms) >=
+            controller->config.hold_stable_duration_ms) {
+        controller->hold_active = true;
+        reset_speed_loop(controller);
+    }
 }
 
 bool Algorithm_BallPositionControl_AdvanceTarget(
@@ -303,7 +474,7 @@ bool Algorithm_BallPositionControl_SetGains(
         !isfinite(velocity_gain_per_s) ||
         (position_gain_per_s2 < 0.0F) ||
         (position_integral_gain_per_s3 < 0.0F) ||
-        (velocity_gain_per_s < 0.0F) ||
+        (velocity_gain_per_s <= 0.0F) ||
         ((position_integral_gain_per_s3 > 0.0F) &&
          (controller->config.maximum_integral_acceleration_mm_s2 <= 0.0F))) {
         return false;
@@ -324,6 +495,9 @@ bool Algorithm_BallPositionControl_UpdateMeasurement(
     float camera_position_mm)
 {
     float position_mm;
+    uint32_t delta_ms = 0U;
+    float raw_velocity_mm_s = 0.0F;
+    bool velocity_available;
 
     if ((controller == NULL) || !controller->initialized ||
         !isfinite(camera_position_mm)) {
@@ -336,42 +510,47 @@ bool Algorithm_BallPositionControl_UpdateMeasurement(
     }
 
     if (controller->measurement_seen) {
-        const uint32_t delta_ms = sample_ms - controller->last_sample_ms;
+        delta_ms = sample_ms - controller->last_sample_ms;
 
-        if ((delta_ms > 0U) &&
-            (delta_ms <= controller->config.maximum_velocity_dt_ms)) {
-            const float dt_s = (float)delta_ms / 1000.0F;
-            const float raw_velocity =
-                (position_mm - controller->position_mm) / dt_s;
-            const float alpha = (controller->config.velocity_filter_tau_s <=
-                    0.0F) ? 1.0F :
-                dt_s / (controller->config.velocity_filter_tau_s + dt_s);
-
-            if (!isfinite(raw_velocity) || !isfinite(alpha)) {
-                return false;
-            }
-            controller->velocity_mm_s +=
-                alpha * (raw_velocity - controller->velocity_mm_s);
-            controller->velocity_valid = true;
-            controller->integral_acceleration_mm_s2 +=
-                controller->config.position_integral_gain_per_s3 *
-                (controller->target_position_mm - position_mm) * dt_s;
-            controller->integral_acceleration_mm_s2 = limit_symmetric(
-                controller->integral_acceleration_mm_s2,
-                controller->config.maximum_integral_acceleration_mm_s2);
-        }
-        else {
+        if ((delta_ms == 0U) ||
+            (delta_ms > controller->config.maximum_velocity_dt_ms)) {
+            reset_velocity_history(controller);
             controller->velocity_mm_s = 0.0F;
             controller->velocity_valid = false;
+            reset_speed_loop(controller);
         }
     }
     else {
+        reset_velocity_history(controller);
         controller->velocity_mm_s = 0.0F;
-        controller->integral_acceleration_mm_s2 = 0.0F;
+        reset_speed_loop(controller);
         controller->velocity_valid = false;
     }
 
+    push_velocity_sample(controller, sample_ms, position_mm);
+    velocity_available = calculate_window_velocity(
+        controller, sample_ms, position_mm, &raw_velocity_mm_s);
+    if (velocity_available) {
+        const float dt_s = (float)delta_ms / 1000.0F;
+        const float alpha =
+            (controller->config.velocity_filter_tau_s <= 0.0F) ?
+            1.0F : dt_s /
+            (controller->config.velocity_filter_tau_s + dt_s);
+
+        if (!isfinite(alpha)) {
+            return false;
+        }
+        controller->velocity_mm_s +=
+            alpha * (raw_velocity_mm_s - controller->velocity_mm_s);
+        controller->velocity_valid = true;
+    }
+    else {
+        controller->velocity_mm_s = 0.0F;
+        controller->velocity_valid = false;
+        reset_speed_loop(controller);
+    }
     controller->position_mm = position_mm;
+    update_position_loop_state(controller, sample_ms, delta_ms);
     update_stiction_kick(controller, sample_ms);
     controller->last_sample_ms = sample_ms;
     controller->measurement_seen = true;
@@ -380,17 +559,45 @@ bool Algorithm_BallPositionControl_UpdateMeasurement(
 
 bool Algorithm_BallPositionControl_SetEstimatedState(
     Algorithm_BallPositionControl *controller,
+    uint32_t sample_ms,
     float position_mm,
     float velocity_mm_s)
 {
+    uint32_t delta_ms = 0U;
+    float filtered_velocity_mm_s;
+
     if ((controller == NULL) || !controller->initialized ||
         !isfinite(position_mm) || !isfinite(velocity_mm_s)) {
         return false;
     }
+    filtered_velocity_mm_s = velocity_mm_s;
+    if (controller->measurement_seen) {
+        delta_ms = sample_ms - controller->last_sample_ms;
+        if ((delta_ms > 0U) &&
+            (delta_ms <= controller->config.maximum_velocity_dt_ms)) {
+            const float dt_s = (float)delta_ms / 1000.0F;
+            const float alpha =
+                (controller->config.velocity_filter_tau_s <= 0.0F) ?
+                1.0F : dt_s /
+                (controller->config.velocity_filter_tau_s + dt_s);
+
+            filtered_velocity_mm_s = controller->velocity_mm_s +
+                alpha * (velocity_mm_s - controller->velocity_mm_s);
+        }
+        else if (delta_ms == 0U) {
+            filtered_velocity_mm_s = controller->velocity_mm_s;
+        }
+    }
+    else {
+        reset_speed_loop(controller);
+    }
     controller->position_mm = position_mm;
-    controller->velocity_mm_s = velocity_mm_s;
+    controller->velocity_mm_s = filtered_velocity_mm_s;
     controller->measurement_seen = true;
     controller->velocity_valid = true;
+    update_position_loop_state(controller, sample_ms, delta_ms);
+    update_stiction_kick(controller, sample_ms);
+    controller->last_sample_ms = sample_ms;
     return true;
 }
 
@@ -402,19 +609,25 @@ void Algorithm_BallPositionControl_ResetMeasurement(
     }
     controller->position_mm = 0.0F;
     controller->velocity_mm_s = 0.0F;
-    controller->integral_acceleration_mm_s2 = 0.0F;
-    controller->desired_acceleration_mm_s2 = 0.0F;
+    reset_speed_loop(controller);
     controller->last_sample_ms = 0U;
+    reset_velocity_history(controller);
     reset_stiction_kick(controller);
     controller->measurement_seen = false;
     controller->velocity_valid = false;
+    controller->hold_active = false;
 }
 
 bool Algorithm_BallPositionControl_ComputeRodAngleDeg(
     Algorithm_BallPositionControl *controller,
     float *rod_angle_deg)
 {
+    float measured_velocity;
+    float velocity_gain;
     float desired_acceleration;
+    float assist_acceleration_limit;
+    float assist_ramp_fraction;
+    float assist_normalized;
     float normalized;
     float angle;
 
@@ -426,12 +639,52 @@ bool Algorithm_BallPositionControl_ComputeRodAngleDeg(
         return false;
     }
 
+    if (controller->hold_active) {
+        controller->target_velocity_mm_s = 0.0F;
+        controller->integral_acceleration_mm_s2 = 0.0F;
+        controller->desired_acceleration_mm_s2 = 0.0F;
+        *rod_angle_deg = 0.0F;
+        return true;
+    }
+    measured_velocity = controller->velocity_valid ?
+        controller->velocity_mm_s : 0.0F;
+    velocity_gain = controller->config.velocity_gain_per_s;
+    if ((controller->config.near_target_error_mm > 0.0F) &&
+        (fabsf(controller->target_position_mm - controller->position_mm) <=
+            controller->config.near_target_error_mm)) {
+        velocity_gain *=
+            controller->config.near_target_velocity_gain_multiplier;
+    }
     desired_acceleration = controller->config.position_gain_per_s2 *
         (controller->target_position_mm - controller->position_mm) +
-        controller->integral_acceleration_mm_s2;
-    if (controller->velocity_valid) {
-        desired_acceleration -= controller->config.velocity_gain_per_s *
-            controller->velocity_mm_s;
+        controller->integral_acceleration_mm_s2 -
+        velocity_gain * measured_velocity;
+    controller->stiction_assist_acceleration_mm_s2 = 0.0F;
+    controller->stiction_kick_angle_deg = 0.0F;
+    if (controller->stiction_state == ALGORITHM_BALL_STICTION_ACTIVE) {
+        assist_ramp_fraction = (float)(controller->last_sample_ms -
+            controller->stiction_state_started_ms) /
+            (float)controller->config.stiction_kick_duration_ms;
+        assist_ramp_fraction = limit_symmetric(
+            assist_ramp_fraction, 1.0F);
+        if (assist_ramp_fraction < 0.0F) {
+            assist_ramp_fraction = 0.0F;
+        }
+        assist_acceleration_limit =
+            controller->config.maximum_target_acceleration_mm_s2 *
+            (0.5F + 0.5F * assist_ramp_fraction);
+        controller->stiction_assist_acceleration_mm_s2 = limit_symmetric(
+            controller->config.stiction_assist_velocity_gain_per_s *
+                (controller->target_velocity_mm_s - measured_velocity),
+            assist_acceleration_limit);
+        desired_acceleration +=
+            controller->stiction_assist_acceleration_mm_s2;
+        assist_normalized = (1.0F + controller->config.inertia_ratio) *
+            controller->stiction_assist_acceleration_mm_s2 /
+            controller->config.gravity_mm_s2;
+        assist_normalized = limit_symmetric(assist_normalized, 1.0F);
+        controller->stiction_kick_angle_deg =
+            -asinf(assist_normalized) * BALL_POSITION_CONTROL_RAD_TO_DEG;
     }
     if (!isfinite(desired_acceleration)) {
         return false;
@@ -447,7 +700,6 @@ bool Algorithm_BallPositionControl_ComputeRodAngleDeg(
     if (!isfinite(angle)) {
         return false;
     }
-    angle += controller->stiction_kick_angle_deg;
     *rod_angle_deg = limit_symmetric(
         angle, controller->config.rod_angle_limit_deg);
     return true;

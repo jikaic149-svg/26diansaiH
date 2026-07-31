@@ -15,6 +15,8 @@
 #define DEVICE_PEER_LINK_CAR_SPEED_ABS_MAX_MM_PER_SECOND INT32_C(5000)
 #define DEVICE_PEER_LINK_CAR_ACCEL_ABS_MAX_MM_PER_SECOND2 INT32_C(50000)
 #define DEVICE_PEER_LINK_CAR_PITCH_RATE_ABS_MAX_CENTI_DPS INT32_C(100000)
+#define DEVICE_PEER_LINK_COMPETITION_MODE_MIN UINT8_C(2)
+#define DEVICE_PEER_LINK_COMPETITION_MODE_MAX UINT8_C(6)
 #define DEVICE_PEER_LINK_BALL_TARGET_ABS_MAX_0P1MM INT32_C(1250)
 
 typedef struct {
@@ -23,6 +25,7 @@ typedef struct {
     int32_t acceleration_x_mm_per_second2;
     int32_t acceleration_z_mm_per_second2;
     int32_t pitch_rate_centi_dps;
+    uint8_t competition_mode;
     bool valid;
     uint32_t received_at_ms;
 } Device_PeerLink_CarState;
@@ -158,6 +161,14 @@ bool Device_PeerLink_GetRemoteCarState(
     uint32_t now_ms,
     uint32_t maximum_age_ms,
     Device_PeerLink_CarState *state);
+
+/* Copy the latest competition mode even when the physical CAR sample is
+ * invalid. Mode 2..6 is informational only and expires on local receive age. */
+bool Device_PeerLink_GetRemoteCompetitionMode(
+    const Device_PeerLink *link,
+    uint32_t now_ms,
+    uint32_t maximum_age_ms,
+    uint8_t *competition_mode);
 
 /* BTG is a one-slot Latest Value. A newer accepted BTG replaces an untaken
  * value; Take copies the latest value once and clears the slot. */

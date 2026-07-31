@@ -38,6 +38,10 @@ typedef struct {
     float initial_velocity_variance_mm2_s2;
     float initial_bias_variance_mm2_s4;
     float innovation_gate_sigma;
+    /* Reject an established-state correction when |position innovation|
+     * exceeds this absolute bound, even if covariance makes the sigma gate
+     * wider. The first measurement used to seed the state bypasses it. */
+    float maximum_position_innovation_mm;
 
     float maximum_absolute_position_mm;
     float maximum_absolute_velocity_mm_s;
@@ -115,8 +119,9 @@ bool Algorithm_BallStateEstimator_Predict(
     float chassis_acceleration_mm_s2);
 
 /* Correct with one new real camera sample exactly once. measurement_age_ms
- * locates it in the fixed-lag history; an innovation outside the configured
- * sigma gate is counted and ignored without corrupting the current state. */
+ * locates it in the fixed-lag history; an innovation outside either the
+ * configured absolute gate or sigma gate is counted and ignored without
+ * corrupting the current state. */
 bool Algorithm_BallStateEstimator_CorrectPosition(
     Algorithm_BallStateEstimator *estimator,
     uint32_t now_ms,

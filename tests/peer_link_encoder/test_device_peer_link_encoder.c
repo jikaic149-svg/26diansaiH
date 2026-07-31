@@ -176,11 +176,12 @@ static void test_car_boundaries_validity_and_freshness(void)
     Device_PeerLink link;
     const Device_PeerLink_Config config = make_config();
     Device_PeerLink_CarState state;
+    uint8_t competition_mode = 0U;
 
     fake_reset();
     assert(Device_PeerLink_Init(&link, &config, 100U));
     queue_packet(
-        "CAR", 10U, "2,1000,-5000,-50000,50000,100000,1");
+        "CAR", 10U, "2,1000,-5000,-50000,50000,100000,1,6");
     assert(Device_PeerLink_Step(&link, 100U));
     assert(Device_PeerLink_GetRemoteCarState(
         &link, 150U, 50U, &state));
@@ -189,14 +190,21 @@ static void test_car_boundaries_validity_and_freshness(void)
     assert(state.acceleration_x_mm_per_second2 == -50000);
     assert(state.acceleration_z_mm_per_second2 == 50000);
     assert(state.pitch_rate_centi_dps == 100000);
+    assert(state.competition_mode == 6U);
+    assert(Device_PeerLink_GetRemoteCompetitionMode(
+        &link, 150U, 50U, &competition_mode));
+    assert(competition_mode == 6U);
     assert(!Device_PeerLink_GetRemoteCarState(
         &link, 151U, 50U, &state));
 
-    queue_packet("CAR", 11U, "2,1010,0,0,0,0,0");
+    queue_packet("CAR", 11U, "2,1010,0,0,0,0,0,5");
     assert(Device_PeerLink_Step(&link, 110U));
     assert(link.status.car_state_rx_count == 2U);
     assert(!Device_PeerLink_GetRemoteCarState(
         &link, 110U, 50U, &state));
+    assert(Device_PeerLink_GetRemoteCompetitionMode(
+        &link, 110U, 50U, &competition_mode));
+    assert(competition_mode == 5U);
 }
 
 static void test_car_rejects_malformed_and_unknown_types(void)
@@ -210,20 +218,24 @@ static void test_car_rejects_malformed_and_unknown_types(void)
     assert(Device_PeerLink_Step(&link, 1U));
     assert(link.status.car_state_rx_count == 0U);
 
-    queue_packet("CAR", 0U, "1,1,0,0,0,0,1");
+    queue_packet("CAR", 0U, "1,1,0,0,0,0,1,2");
     assert(Device_PeerLink_Step(&link, 2U));
     assert(link.status.car_state_source_error_count == 1U);
-    queue_packet("CAR", 0U, "2,01,0,0,0,0,1");
+    queue_packet("CAR", 0U, "2,01,0,0,0,0,1,2");
     assert(Device_PeerLink_Step(&link, 3U));
-    queue_packet("CAR", 0U, "2,1,+1,0,0,0,1");
+    queue_packet("CAR", 0U, "2,1,+1,0,0,0,1,2");
     assert(Device_PeerLink_Step(&link, 4U));
-    queue_packet("CAR", 0U, "2,1,0,0,0,0,2");
+    queue_packet("CAR", 0U, "2,1,0,0,0,0,2,2");
     assert(Device_PeerLink_Step(&link, 5U));
-    queue_packet("CAR", 0U, "2,1,1,0,0,0,0");
+    queue_packet("CAR", 0U, "2,1,1,0,0,0,0,2");
     assert(Device_PeerLink_Step(&link, 6U));
-    queue_packet("CAR", 0U, "2,1,5001,0,0,0,1");
+    queue_packet("CAR", 0U, "2,1,5001,0,0,0,1,2");
     assert(Device_PeerLink_Step(&link, 7U));
-    assert(link.status.car_state_payload_error_count == 5U);
+    queue_packet("CAR", 0U, "2,1,0,0,0,0,0,1");
+    assert(Device_PeerLink_Step(&link, 8U));
+    queue_packet("CAR", 0U, "2,1,0,0,0,0,0,7");
+    assert(Device_PeerLink_Step(&link, 9U));
+    assert(link.status.car_state_payload_error_count == 7U);
     assert(link.status.car_state_rx_count == 0U);
 }
 
@@ -237,19 +249,20 @@ static void test_car_order_wrap_and_restart(void)
     assert(Device_PeerLink_Init(&link, &config, 0U));
     queue_packet("HB", 0U, "2,5000");
     assert(Device_PeerLink_Step(&link, 1U));
-    queue_packet("CAR", UINT16_MAX, "2,4294967295,1,2,3,4,1");
+    queue_packet("CAR", UINT16_MAX, "2,4294967295,1,2,3,4,1,2");
     assert(Device_PeerLink_Step(&link, 2U));
-    queue_packet("CAR", 0U, "2,0,5,6,7,8,1");
+    queue_packet("CAR", 0U, "2,0,5,6,7,8,1,3");
     assert(Device_PeerLink_Step(&link, 3U));
     assert(Device_PeerLink_GetRemoteCarState(
         &link, 3U, 50U, &state));
     assert(state.speed_x_mm_per_second == 5);
+    assert(state.competition_mode == 3U);
 
-    queue_packet("CAR", 0U, "2,1,9,9,9,9,1");
+    queue_packet("CAR", 0U, "2,1,9,9,9,9,1,4");
     assert(Device_PeerLink_Step(&link, 4U));
-    queue_packet("CAR", UINT16_MAX, "2,1,9,9,9,9,1");
+    queue_packet("CAR", UINT16_MAX, "2,1,9,9,9,9,1,4");
     assert(Device_PeerLink_Step(&link, 5U));
-    queue_packet("CAR", 1U, "2,4294967295,9,9,9,9,1");
+    queue_packet("CAR", 1U, "2,4294967295,9,9,9,9,1,4");
     assert(Device_PeerLink_Step(&link, 6U));
     assert(link.status.car_state_duplicate_sequence_count == 1U);
     assert(link.status.car_state_old_sequence_count == 1U);
@@ -260,7 +273,7 @@ static void test_car_order_wrap_and_restart(void)
     assert(link.status.remote_session_reset_count == 1U);
     assert(!Device_PeerLink_GetRemoteCarState(
         &link, 7U, 50U, &state));
-    queue_packet("CAR", 0U, "2,5,-1,-2,-3,-4,1");
+    queue_packet("CAR", 0U, "2,5,-1,-2,-3,-4,1,6");
     assert(Device_PeerLink_Step(&link, 8U));
     assert(Device_PeerLink_GetRemoteCarState(
         &link, 8U, 50U, &state));
@@ -276,7 +289,7 @@ static void test_local_freshness_wrap(void)
 
     fake_reset();
     assert(Device_PeerLink_Init(&link, &config, received_at));
-    queue_packet("CAR", 0U, "2,1,1,2,3,4,1");
+    queue_packet("CAR", 0U, "2,1,1,2,3,4,1,2");
     assert(Device_PeerLink_Step(&link, received_at));
     assert(Device_PeerLink_GetRemoteCarState(
         &link, received_at + 50U, 50U, &state));
