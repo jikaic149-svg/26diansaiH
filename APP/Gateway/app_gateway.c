@@ -68,9 +68,12 @@ static uint16_t s_motor_target_raw;
 static float s_motor_command_current_a;
 static int32_t s_selected_chassis_acceleration_mm_s2;
 static int32_t s_planned_chassis_acceleration_mm_s2;
-static bool s_last_chassis_motion_sequence_seen;
-static uint16_t s_last_chassis_motion_sequence;
-static uint32_t s_last_chassis_motion_sample_ms;
+static bool s_last_chassis_imu_sequence_seen;
+static uint16_t s_last_chassis_imu_sequence;
+static uint32_t s_last_chassis_imu_sample_ms;
+static bool s_last_chassis_wheel_sequence_seen;
+static uint16_t s_last_chassis_wheel_sequence;
+static uint32_t s_last_chassis_wheel_sample_ms;
 static bool s_chassis_fusion_trusted;
 static bool s_last_ball_sequence_seen;
 static uint16_t s_last_ball_sequence;
@@ -221,6 +224,28 @@ static int32_t round_float_to_i32(float value)
     return (int32_t)(value + ((value >= 0.0F) ? 0.5F : -0.5F));
 }
 
+static bool select_level_tuning(
+    const APP_Gateway_ControlInput *input)
+{
+    const bool task3 = (input != NULL) &&
+        (input->competition_mode == GATEWAY_TASK3_COMPETITION_MODE);
+
+    return Algorithm_LevelCurrentControl_SetTuning(
+        &s_level_controller,
+        task3 ? GATEWAY_TASK3_LEVEL_KP_A_PER_DEG :
+            GATEWAY_LEVEL_KP_A_PER_DEG,
+        task3 ? GATEWAY_TASK3_LEVEL_KI_A_PER_DEG_S :
+            GATEWAY_LEVEL_KI_A_PER_DEG_S,
+        task3 ? GATEWAY_TASK3_LEVEL_KD_A_PER_RPM :
+            GATEWAY_LEVEL_KD_A_PER_RPM,
+        task3 ? GATEWAY_TASK3_LEVEL_FEEDFORWARD_CURRENT_A :
+            GATEWAY_LEVEL_FEEDFORWARD_CURRENT_A,
+        task3 ? GATEWAY_TASK3_LEVEL_DEADBAND_DEG :
+            GATEWAY_LEVEL_DEADBAND_DEG,
+        task3 ? GATEWAY_TASK3_LEVEL_INTEGRAL_LIMIT_A :
+            GATEWAY_LEVEL_INTEGRAL_LIMIT_A);
+}
+
 static void update_chassis_acceleration(
     uint32_t now_ms,
     const APP_Gateway_ControlInput *input)
@@ -238,37 +263,55 @@ static void update_chassis_acceleration(
     if (GATEWAY_CHASSIS_ACCEL_FUSION_ENABLE == 0U) {
         return;
     }
-    if (!s_chassis_acceleration_valid) {
+    if (!s_chassis_acceleration_valid || (input == NULL) ||
+        !input->chassis_acceleration_plan_valid) {
         Algorithm_ChassisAccelerationFusion_Reset(&s_chassis_fusion, now_ms);
-        s_last_chassis_motion_sequence_seen = false;
+        s_last_chassis_imu_sequence_seen = false;
+        s_last_chassis_wheel_sequence_seen = false;
         return;
     }
     if (!Algorithm_ChassisAccelerationFusion_Predict(
             &s_chassis_fusion,
             now_ms,
             (float)s_planned_chassis_acceleration_mm_s2)) {
-        s_last_chassis_motion_sequence_seen = false;
+        s_last_chassis_imu_sequence_seen = false;
+        s_last_chassis_wheel_sequence_seen = false;
         return;
     }
     if ((input != NULL) && input->chassis_motion_measurement_valid &&
-        (!s_last_chassis_motion_sequence_seen ||
+        input->measured_chassis_acceleration_valid &&
+        (!s_last_chassis_imu_sequence_seen ||
          (input->chassis_motion_sequence !=
-            s_last_chassis_motion_sequence) ||
+            s_last_chassis_imu_sequence) ||
          (input->chassis_motion_sample_ms !=
-            s_last_chassis_motion_sample_ms))) {
-        if (input->measured_chassis_acceleration_valid ||
-            input->measured_chassis_wheel_speed_valid) {
-            (void)Algorithm_ChassisAccelerationFusion_Correct(
-                &s_chassis_fusion,
-                now_ms,
-                input->measured_chassis_wheel_speed_valid,
-                (float)input->measured_chassis_wheel_speed_mm_s,
-                input->measured_chassis_acceleration_valid,
-                (float)input->measured_chassis_acceleration_mm_s2);
-        }
-        s_last_chassis_motion_sequence = input->chassis_motion_sequence;
-        s_last_chassis_motion_sample_ms = input->chassis_motion_sample_ms;
-        s_last_chassis_motion_sequence_seen = true;
+            s_last_chassis_imu_sample_ms))) {
+        (void)Algorithm_ChassisAccelerationFusion_Correct(
+            &s_chassis_fusion,
+            now_ms,
+            false,
+            0.0F,
+            true,
+            (float)input->measured_chassis_acceleration_mm_s2);
+        s_last_chassis_imu_sequence = input->chassis_motion_sequence;
+        s_last_chassis_imu_sample_ms = input->chassis_motion_sample_ms;
+        s_last_chassis_imu_sequence_seen = true;
+    }
+    if ((input != NULL) && input->chassis_wheel_measurement_valid &&
+        (!s_last_chassis_wheel_sequence_seen ||
+         (input->chassis_wheel_sequence !=
+            s_last_chassis_wheel_sequence) ||
+         (input->chassis_wheel_sample_ms !=
+            s_last_chassis_wheel_sample_ms))) {
+        (void)Algorithm_ChassisAccelerationFusion_Correct(
+            &s_chassis_fusion,
+            now_ms,
+            true,
+            (float)input->measured_chassis_wheel_speed_mm_s,
+            false,
+            0.0F);
+        s_last_chassis_wheel_sequence = input->chassis_wheel_sequence;
+        s_last_chassis_wheel_sample_ms = input->chassis_wheel_sample_ms;
+        s_last_chassis_wheel_sequence_seen = true;
     }
     if (Algorithm_ChassisAccelerationFusion_IsTrusted(
             &s_chassis_fusion, now_ms) &&
@@ -384,16 +427,8 @@ static bool update_primary_tracking_target(
         return apply_rod_target_deg(0.0F);
     }
     update_chassis_acceleration(now_ms, input);
-    if (s_level_phase ==
+    if (s_level_phase !=
             GATEWAY_LEVEL_PHASE_ACCELERATION_COMPENSATION) {
-        if ((input != NULL) && input->chassis_motion_measurement_valid &&
-            input->measured_chassis_acceleration_valid) {
-            s_selected_chassis_acceleration_mm_s2 =
-                input->measured_chassis_acceleration_mm_s2;
-            s_chassis_acceleration_valid = true;
-        }
-    }
-    else {
         s_chassis_acceleration_valid = false;
         s_selected_chassis_acceleration_mm_s2 = 0;
     }
@@ -440,6 +475,22 @@ static bool update_primary_tracking_target(
             atan2f(
                 (float)s_selected_chassis_acceleration_mm_s2,
             GATEWAY_BALL_GRAVITY_MM_S2) *
+            (180.0F / 3.14159265358979323846F);
+        chassis_angle_deg = clamp_float(
+            chassis_angle_deg,
+            -GATEWAY_CHASSIS_FF_ANGLE_LIMIT_DEG,
+            GATEWAY_CHASSIS_FF_ANGLE_LIMIT_DEG);
+    }
+    if ((input != NULL) && input->chassis_acceleration_plan_valid &&
+        (s_planned_chassis_acceleration_mm_s2 < 0)) {
+        /* The heartbeat-confirmed M4 deceleration plan supplies a small,
+         * deterministic stopping baseline. Fusion and vision retain the
+         * remaining correction authority; positive acceleration is unchanged. */
+        chassis_angle_deg += GATEWAY_CHASSIS_STOP_PLAN_FF_GAIN *
+            GATEWAY_CHASSIS_FF_POLARITY *
+            atan2f(
+                (float)s_planned_chassis_acceleration_mm_s2,
+                GATEWAY_BALL_GRAVITY_MM_S2) *
             (180.0F / 3.14159265358979323846F);
         chassis_angle_deg = clamp_float(
             chassis_angle_deg,
@@ -1165,6 +1216,8 @@ bool APP_Gateway_Init(uint32_t now_ms)
             GATEWAY_BALL_STICTION_KICK_MAX_ANGLE_DEG,
         .stiction_assist_velocity_gain_per_s =
             GATEWAY_BALL_STICTION_ASSIST_VELOCITY_KP_PER_S,
+        .stiction_assist_velocity_integral_gain_per_s2 =
+            GATEWAY_BALL_STICTION_ASSIST_VELOCITY_KI_PER_S2,
         .stiction_assist_exit_distance_mm =
             GATEWAY_BALL_STICTION_ASSIST_EXIT_DISTANCE_MM,
         .stiction_kick_minimum_error_mm =
@@ -1290,6 +1343,8 @@ bool APP_Gateway_Init(uint32_t now_ms)
         (GATEWAY_LEVEL_ZERO_ENTRY_SETTLE_MS == 0U) ||
         !isfinite(GATEWAY_CHASSIS_FF_GAIN) ||
         (GATEWAY_CHASSIS_FF_GAIN < 0.0F) ||
+        !isfinite(GATEWAY_CHASSIS_STOP_PLAN_FF_GAIN) ||
+        (GATEWAY_CHASSIS_STOP_PLAN_FF_GAIN < 0.0F) ||
         !isfinite(GATEWAY_CHASSIS_FF_POLARITY) ||
         ((GATEWAY_CHASSIS_FF_POLARITY != 1.0F) &&
          (GATEWAY_CHASSIS_FF_POLARITY != -1.0F)) ||
@@ -1375,9 +1430,12 @@ bool APP_Gateway_Init(uint32_t now_ms)
     s_motor_command_current_a = 0.0F;
     s_selected_chassis_acceleration_mm_s2 = 0;
     s_planned_chassis_acceleration_mm_s2 = 0;
-    s_last_chassis_motion_sequence_seen = false;
-    s_last_chassis_motion_sequence = 0U;
-    s_last_chassis_motion_sample_ms = 0U;
+    s_last_chassis_imu_sequence_seen = false;
+    s_last_chassis_imu_sequence = 0U;
+    s_last_chassis_imu_sample_ms = 0U;
+    s_last_chassis_wheel_sequence_seen = false;
+    s_last_chassis_wheel_sequence = 0U;
+    s_last_chassis_wheel_sample_ms = 0U;
     s_chassis_fusion_trusted = false;
     s_last_ball_sequence_seen = false;
     s_ball_measurement_valid = false;
@@ -1406,6 +1464,9 @@ void APP_Gateway_Step(
      * old recovery or rejected target forever. */
     s_motor_raw_limit_blocked = false;
     s_last_ball_target_update_ms = now_ms;
+    if (!select_level_tuning(control_input)) {
+        ++s_level_control_fault_count;
+    }
     if (!Algorithm_BallPositionControl_AdvanceTarget(
             &s_ball_controller, target_elapsed_ms)) {
         ++s_level_control_fault_count;
@@ -1467,7 +1528,7 @@ void APP_Gateway_Step(
     make_primary_telemetry(now_ms, primary_telemetry);
 }
 
-bool APP_Gateway_TogglePrimaryMotor(uint32_t now_ms)
+bool APP_Gateway_StartPrimaryMotor(uint32_t now_ms)
 {
     Device_QD4310 *motor = &s_motors[0];
     Device_QD4310_Feedback feedback;
@@ -1475,9 +1536,11 @@ bool APP_Gateway_TogglePrimaryMotor(uint32_t now_ms)
     if (!motor->initialized) {
         return false;
     }
-    if (Algorithm_LevelCurrentControl_IsActive(&s_level_controller) ||
-        motor->command_enabled) {
-        return stop_primary_level_control();
+    if (Algorithm_LevelCurrentControl_IsActive(&s_level_controller)) {
+        return true;
+    }
+    if (motor->command_enabled) {
+        return false;
     }
     if (!Device_QD4310_GetFeedback(
             motor, now_ms, &feedback) ||
@@ -1503,6 +1566,20 @@ bool APP_Gateway_TogglePrimaryMotor(uint32_t now_ms)
     }
     (void)stop_primary_level_control();
     return false;
+}
+
+bool APP_Gateway_TogglePrimaryMotor(uint32_t now_ms)
+{
+    Device_QD4310 *motor = &s_motors[0];
+
+    if (!motor->initialized) {
+        return false;
+    }
+    if (Algorithm_LevelCurrentControl_IsActive(&s_level_controller) ||
+        motor->command_enabled) {
+        return stop_primary_level_control();
+    }
+    return APP_Gateway_StartPrimaryMotor(now_ms);
 }
 
 bool APP_Gateway_StopPrimaryMotor(void)

@@ -372,6 +372,45 @@ static void test_minimum_current_preserves_direction(void)
     assert(close_enough(current_a, -0.12F));
 }
 
+static void test_runtime_tuning_isolates_mode_parameters(void)
+{
+    Algorithm_LevelCurrentControl controller;
+    Algorithm_LevelCurrentControl_Config config = default_config();
+
+    start_at(&controller, &config, 0.0F);
+    controller.integral_current_a = 0.005F;
+    assert(Algorithm_LevelCurrentControl_SetTuning(
+        &controller, 0.014F, 0.0010F, 0.0010F, -0.072F, 0.20F, 0.010F));
+    assert(close_enough(controller.config.kp_a_per_deg, 0.014F));
+    assert(close_enough(controller.config.ki_a_per_deg_s, 0.0010F));
+    assert(close_enough(controller.config.kd_a_per_rpm, 0.0010F));
+    assert(close_enough(controller.config.feedforward_current_a, -0.072F));
+    assert(close_enough(controller.config.deadband_deg, 0.20F));
+    assert(close_enough(controller.config.integral_limit_a, 0.010F));
+    assert(close_enough(controller.integral_current_a, 0.0F));
+    assert(Algorithm_LevelCurrentControl_IsActive(&controller));
+
+    controller.integral_current_a = 0.004F;
+    assert(Algorithm_LevelCurrentControl_SetTuning(
+        &controller, 0.014F, 0.0010F, 0.0010F, -0.072F, 0.20F, 0.010F));
+    assert(close_enough(controller.integral_current_a, 0.004F));
+
+    assert(Algorithm_LevelCurrentControl_SetTuning(
+        &controller, 0.014F, 0.0020F, 0.0010F, -0.090F, 0.05F, 0.020F));
+    assert(close_enough(controller.config.kp_a_per_deg, 0.014F));
+    assert(close_enough(controller.config.ki_a_per_deg_s, 0.0020F));
+    assert(close_enough(controller.config.kd_a_per_rpm, 0.0010F));
+    assert(close_enough(controller.config.feedforward_current_a, -0.090F));
+    assert(close_enough(controller.config.deadband_deg, 0.05F));
+    assert(close_enough(controller.config.integral_limit_a, 0.020F));
+    assert(close_enough(controller.integral_current_a, 0.0F));
+    assert(Algorithm_LevelCurrentControl_IsActive(&controller));
+
+    assert(!Algorithm_LevelCurrentControl_SetTuning(
+        &controller, 0.014F, 0.0010F, 0.0010F, -0.31F, 0.20F, 0.010F));
+    assert(close_enough(controller.config.feedforward_current_a, -0.090F));
+}
+
 int main(void)
 {
     test_boot_zero_is_captured_once();
@@ -386,6 +425,7 @@ int main(void)
     test_raw_recovery_is_inward_only();
     test_invalid_config_and_polarity();
     test_minimum_current_preserves_direction();
+    test_runtime_tuning_isolates_mode_parameters();
     puts("level current control tests: PASS");
     return 0;
 }

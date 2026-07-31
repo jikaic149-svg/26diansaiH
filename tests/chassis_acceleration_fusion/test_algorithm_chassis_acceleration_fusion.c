@@ -80,6 +80,13 @@ static void test_sensor_fusion_and_trust_gate(void)
                 now_ms,
                 true,
                 actual_velocity,
+                false,
+                0.0F));
+            assert(Algorithm_ChassisAccelerationFusion_Correct(
+                &fusion,
+                now_ms,
+                false,
+                0.0F,
                 true,
                 200.0F));
         }

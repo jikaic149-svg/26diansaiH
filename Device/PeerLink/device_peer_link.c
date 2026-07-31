@@ -3,7 +3,12 @@
 #include <limits.h>
 #include <string.h>
 
-#define DEVICE_PEER_LINK_CAR_STATE_FIELD_COUNT 8U
+#define DEVICE_PEER_LINK_CAR_STATE_LEGACY_FIELD_COUNT 8U
+#define DEVICE_PEER_LINK_CAR_STATE_PLANNED_FIELD_COUNT 10U
+#define DEVICE_PEER_LINK_CAR_STATE_TASK_FIELD_COUNT 9U
+#define DEVICE_PEER_LINK_CAR_STATE_TASK_PLANNED_FIELD_COUNT 11U
+#define DEVICE_PEER_LINK_CAR_STATE_FIELD_CAPACITY \
+    DEVICE_PEER_LINK_CAR_STATE_TASK_PLANNED_FIELD_COUNT
 
 static void increment_saturating(uint32_t *value)
 {
@@ -177,8 +182,14 @@ static bool car_state_values_valid(const Device_PeerLink_CarState *state)
             DEVICE_PEER_LINK_CAR_ACCEL_ABS_MAX_MM_PER_SECOND2) ||
         !absolute_i32_within(state->pitch_rate_centi_dps,
             DEVICE_PEER_LINK_CAR_PITCH_RATE_ABS_MAX_CENTI_DPS) ||
+        !absolute_i32_within(state->planned_acceleration_x_mm_per_second2,
+            DEVICE_PEER_LINK_CAR_PLAN_ACCEL_ABS_MAX_MM_PER_SECOND2) ||
         (state->competition_mode < DEVICE_PEER_LINK_COMPETITION_MODE_MIN) ||
         (state->competition_mode > DEVICE_PEER_LINK_COMPETITION_MODE_MAX)) {
+        return false;
+    }
+    if (!state->planned_acceleration_valid &&
+        (state->planned_acceleration_x_mm_per_second2 != 0)) {
         return false;
     }
     return state->valid ||
@@ -283,8 +294,8 @@ static void consume_car_state(
     const Algorithm_Packet_View *packet,
     uint32_t now_ms)
 {
-    size_t start[DEVICE_PEER_LINK_CAR_STATE_FIELD_COUNT];
-    size_t length[DEVICE_PEER_LINK_CAR_STATE_FIELD_COUNT];
+    size_t start[DEVICE_PEER_LINK_CAR_STATE_FIELD_CAPACITY];
+    size_t length[DEVICE_PEER_LINK_CAR_STATE_FIELD_CAPACITY];
     size_t field_count = 0U;
     size_t field_start = 0U;
     uint32_t node_id;
@@ -295,11 +306,15 @@ static void consume_car_state(
     int32_t pitch_rate;
     uint32_t valid;
     uint32_t competition_mode;
+    uint32_t competition_task_active = 0U;
+    int32_t planned_acceleration = 0;
+    uint32_t planned_acceleration_valid = 0U;
+    size_t planned_field_start = DEVICE_PEER_LINK_CAR_STATE_LEGACY_FIELD_COUNT;
 
     for (size_t index = 0U; index <= packet->payload_length; ++index) {
         if ((index == packet->payload_length) ||
             (packet->payload[index] == ',')) {
-            if ((field_count >= DEVICE_PEER_LINK_CAR_STATE_FIELD_COUNT) ||
+            if ((field_count >= DEVICE_PEER_LINK_CAR_STATE_FIELD_CAPACITY) ||
                 (index == field_start)) {
                 increment_saturating(
                     &link->status.car_state_payload_error_count);
@@ -311,7 +326,11 @@ static void consume_car_state(
             field_start = index + 1U;
         }
     }
-    if ((field_count != DEVICE_PEER_LINK_CAR_STATE_FIELD_COUNT) ||
+    if (((field_count != DEVICE_PEER_LINK_CAR_STATE_LEGACY_FIELD_COUNT) &&
+         (field_count != DEVICE_PEER_LINK_CAR_STATE_PLANNED_FIELD_COUNT) &&
+         (field_count != DEVICE_PEER_LINK_CAR_STATE_TASK_FIELD_COUNT) &&
+         (field_count !=
+            DEVICE_PEER_LINK_CAR_STATE_TASK_PLANNED_FIELD_COUNT)) ||
         !parse_u32_canonical(
             &packet->payload[start[0]], length[0], &node_id)) {
         increment_saturating(&link->status.car_state_payload_error_count);
@@ -341,15 +360,47 @@ static void consume_car_state(
         increment_saturating(&link->status.car_state_payload_error_count);
         return;
     }
+    if ((field_count == DEVICE_PEER_LINK_CAR_STATE_TASK_FIELD_COUNT) ||
+        (field_count == DEVICE_PEER_LINK_CAR_STATE_TASK_PLANNED_FIELD_COUNT)) {
+        if (!parse_u32_canonical(
+                &packet->payload[start[8]], length[8],
+                &competition_task_active) ||
+            (competition_task_active > 1U)) {
+            increment_saturating(&link->status.car_state_payload_error_count);
+            return;
+        }
+        planned_field_start = DEVICE_PEER_LINK_CAR_STATE_TASK_FIELD_COUNT;
+    }
+    if (((field_count == DEVICE_PEER_LINK_CAR_STATE_PLANNED_FIELD_COUNT) ||
+         (field_count ==
+            DEVICE_PEER_LINK_CAR_STATE_TASK_PLANNED_FIELD_COUNT)) &&
+        (!parse_i32_canonical(
+            &packet->payload[start[planned_field_start]],
+            length[planned_field_start],
+            &planned_acceleration) ||
+         !parse_u32_canonical(
+            &packet->payload[start[planned_field_start + 1U]],
+            length[planned_field_start + 1U],
+            &planned_acceleration_valid) ||
+         (planned_acceleration_valid > 1U))) {
+        increment_saturating(&link->status.car_state_payload_error_count);
+        return;
+    }
     {
         const Device_PeerLink_CarState state = {
+            .sequence = packet->sequence,
             .sample_ms = sample_ms,
             .speed_x_mm_per_second = speed_x,
             .acceleration_x_mm_per_second2 = specific_force_x,
             .acceleration_z_mm_per_second2 = specific_force_z,
             .pitch_rate_centi_dps = pitch_rate,
+            .planned_acceleration_x_mm_per_second2 =
+                planned_acceleration,
             .competition_mode = (uint8_t)competition_mode,
+            .competition_task_active = competition_task_active != 0U,
             .valid = valid != 0U,
+            .planned_acceleration_valid =
+                planned_acceleration_valid != 0U,
             .received_at_ms = now_ms,
         };
 
@@ -644,7 +695,9 @@ bool Device_PeerLink_GetRemoteCarState(
     Device_PeerLink_CarState *state)
 {
     if ((link == NULL) || (state == NULL) || !link->initialized ||
-        !link->remote_car_state_seen || !link->remote_car_state.valid ||
+        !link->remote_car_state_seen ||
+        (!link->remote_car_state.valid &&
+         !link->remote_car_state.planned_acceleration_valid) ||
         ((uint32_t)(now_ms - link->remote_car_state.received_at_ms) >
          maximum_age_ms)) {
         return false;
@@ -666,6 +719,22 @@ bool Device_PeerLink_GetRemoteCompetitionMode(
         return false;
     }
     *competition_mode = link->remote_car_state.competition_mode;
+    return true;
+}
+
+bool Device_PeerLink_GetRemoteCompetitionTaskActive(
+    const Device_PeerLink *link,
+    uint32_t now_ms,
+    uint32_t maximum_age_ms,
+    bool *task_active)
+{
+    if ((link == NULL) || (task_active == NULL) || !link->initialized ||
+        !link->remote_car_state_seen ||
+        ((uint32_t)(now_ms - link->remote_car_state.received_at_ms) >
+         maximum_age_ms)) {
+        return false;
+    }
+    *task_active = link->remote_car_state.competition_task_active;
     return true;
 }
 

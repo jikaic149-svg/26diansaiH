@@ -185,6 +185,45 @@ bool Algorithm_LevelCurrentControl_SetTrackingTargetDeg(
     return true;
 }
 
+bool Algorithm_LevelCurrentControl_SetTuning(
+    Algorithm_LevelCurrentControl *controller,
+    float kp_a_per_deg,
+    float ki_a_per_deg_s,
+    float kd_a_per_rpm,
+    float feedforward_current_a,
+    float deadband_deg,
+    float integral_limit_a)
+{
+    if ((controller == NULL) || !controller->initialized ||
+        !isfinite(kp_a_per_deg) || (kp_a_per_deg < 0.0F) ||
+        !isfinite(ki_a_per_deg_s) || (ki_a_per_deg_s < 0.0F) ||
+        !isfinite(kd_a_per_rpm) || (kd_a_per_rpm < 0.0F) ||
+        !isfinite(feedforward_current_a) ||
+        (absolute_value(feedforward_current_a) >
+            controller->config.current_limit_a) ||
+        !isfinite(deadband_deg) || (deadband_deg < 0.0F) ||
+        (deadband_deg > controller->config.error_limit_deg) ||
+        !isfinite(integral_limit_a) || (integral_limit_a < 0.0F) ||
+        (integral_limit_a > controller->config.current_limit_a)) {
+        return false;
+    }
+    if ((controller->config.kp_a_per_deg != kp_a_per_deg) ||
+        (controller->config.ki_a_per_deg_s != ki_a_per_deg_s) ||
+        (controller->config.kd_a_per_rpm != kd_a_per_rpm) ||
+        (controller->config.feedforward_current_a != feedforward_current_a) ||
+        (controller->config.deadband_deg != deadband_deg) ||
+        (controller->config.integral_limit_a != integral_limit_a)) {
+        controller->config.kp_a_per_deg = kp_a_per_deg;
+        controller->config.ki_a_per_deg_s = ki_a_per_deg_s;
+        controller->config.kd_a_per_rpm = kd_a_per_rpm;
+        controller->config.feedforward_current_a = feedforward_current_a;
+        controller->config.deadband_deg = deadband_deg;
+        controller->config.integral_limit_a = integral_limit_a;
+        reset_runtime_state(controller);
+    }
+    return true;
+}
+
 void Algorithm_LevelCurrentControl_Stop(
     Algorithm_LevelCurrentControl *controller)
 {

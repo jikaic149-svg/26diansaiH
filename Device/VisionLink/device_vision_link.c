@@ -521,7 +521,6 @@ bool Device_VisionLink_SendControlStatus(
            DEVICE_VISION_LINK_COMPETITION_MODE_MIN) ||
           (status->competition_mode >
            DEVICE_VISION_LINK_COMPETITION_MODE_MAX))) ||
-        ((status->status_flags & UINT16_C(0x4000)) != 0U) ||
         ((status->fault_bits & UINT16_C(0x8000)) != 0U)) {
         return false;
     }

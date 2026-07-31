@@ -184,15 +184,15 @@
 #define GATEWAY_BALL_TARGET_MM               0.0F
 
 /* 25 cm水管和直径1 cm球对应球心几何域[-120,+120] mm。该值仅是软件
- * 安全边界，扩大实机目标仍须从小范围逐级验证。目标参考按80 mm/s线性
- * 推进，避免阶跃换向冲击。 */
+ * 安全边界，扩大实机目标仍须从小范围逐级验证。目标参考按120 mm/s线性推进。
+ * 静摩擦速度环目标限30 mm/s，PI加速度最高180 mm/s2。 */
 #define GATEWAY_BALL_TARGET_LIMIT_MM        120.0F
 #define GATEWAY_BALL_TARGET_SLEW_MM_S       120.0F
-#define GATEWAY_BALL_MAX_TARGET_VELOCITY_MM_S 50.0F
-#define GATEWAY_BALL_MAX_TARGET_ACCELERATION_MM_S2 200.0F
+#define GATEWAY_BALL_MAX_TARGET_VELOCITY_MM_S 30.0F
+#define GATEWAY_BALL_MAX_TARGET_ACCELERATION_MM_S2 180.0F
 
-/* 位置PID直接生成目标球加速度：Kp*位置误差+Ki积分-Kd*视觉球速。
- * VTP字段名保持兼容；速度环不再参与正常运动和停车。 */
+/* 正常位置环生成目标球加速度：Kp*位置误差+Ki积分-Kd*视觉球速。
+ * 位置参数恢复Git基线；速度环只在静止门控后负责起滚，并在靠近目标时平滑交接。 */
 #define GATEWAY_BALL_POSITION_KP_PER_S2      0.60F
 #define GATEWAY_BALL_POSITION_KI_PER_S3      0.000F
 #define GATEWAY_BALL_VELOCITY_KD_PER_S       0.55F
@@ -208,19 +208,22 @@
 #define GATEWAY_BALL_HOLD_POSITION_ERROR_MM     3.0F
 #define GATEWAY_BALL_HOLD_MAX_VELOCITY_MM_S     8.0F
 #define GATEWAY_BALL_HOLD_STABLE_DURATION_MS UINT32_C(60)
-/* 实测近目标Kd跳变形成低频极限环，当前禁用该调度并统一使用基础Kd=2.5。 */
+/* 实测近目标Kd跳变形成低频极限环，当前禁用该调度并统一使用基础Kd=0.55。 */
 #define GATEWAY_BALL_NEAR_TARGET_ERROR_MM        0.0F
 #define GATEWAY_BALL_NEAR_TARGET_KD_MULTIPLIER   0.0F
 
-/* 离散角度脉冲保持禁用。大误差且低速持续120 ms后，短暂启用限幅速度辅助；
- * 一旦视觉检测到球移动立即撤销，正常运动和停车仍完全由位置PID负责。 */
+/* 离散角度脉冲保持禁用。误差超过3 mm且球速不超过8 mm/s持续100 ms后启用
+ * 破静摩擦速度环；远端由速度环独占，进入3..11 mm交接带后连续淡出并切回位置环。
+ * 速度PI初始约0.245 deg，静止时积分增大，最高约1.47 deg；检测到起滚立即清积分，
+ * 且速度环不与位置环直接叠加。 */
 #define GATEWAY_BALL_STICTION_KICK_ANGLE_DEG          0.00F
 #define GATEWAY_BALL_STICTION_KICK_STEP_ANGLE_DEG     0.00F
 #define GATEWAY_BALL_STICTION_KICK_MAX_ANGLE_DEG      0.00F
-#define GATEWAY_BALL_STICTION_ASSIST_VELOCITY_KP_PER_S 3.50F
-#define GATEWAY_BALL_STICTION_ASSIST_EXIT_DISTANCE_MM  18.0F
-#define GATEWAY_BALL_STICTION_MIN_ERROR_MM            12.0F
-#define GATEWAY_BALL_STICTION_MAX_VELOCITY_MM_S       20.0F
+#define GATEWAY_BALL_STICTION_ASSIST_VELOCITY_KP_PER_S 1.00F
+#define GATEWAY_BALL_STICTION_ASSIST_VELOCITY_KI_PER_S2 10.0F
+#define GATEWAY_BALL_STICTION_ASSIST_EXIT_DISTANCE_MM   8.0F
+#define GATEWAY_BALL_STICTION_MIN_ERROR_MM              3.0F
+#define GATEWAY_BALL_STICTION_MAX_VELOCITY_MM_S         8.0F
 #define GATEWAY_BALL_STICTION_STATIONARY_MS        UINT32_C(100)
 #define GATEWAY_BALL_STICTION_DURATION_MS          UINT32_C(250)
 #define GATEWAY_BALL_STICTION_COOLDOWN_MS          UINT32_C(100)
@@ -266,11 +269,12 @@
 #define GATEWAY_BALL_KALMAN_MAX_COAST_MS        UINT32_C(300)
 #define GATEWAY_BALL_KALMAN_MIN_ACCEPTED_VIS          UINT32_C(3)
 
-/* 底盘三状态[v,a,IMU零偏]融合器。首轮参数仅依据100 Hz轮速/IMU数据源和旧电机响应
- * 预测：规划输入纯延迟30 ms、一阶时间常数0.12 s。代码接入但必须保持0，直到ACC_MEAS
- * 的轴向、重力补偿、轮速尺度、延迟和Q/R由实车日志确认。 */
+/* 底盘三状态[v,a,IMU零偏]融合器。规划输入来自新版十字段CAR，速度观测来自CAR平均
+ * 轮速，加速度观测来自F407本地BMI088；异步观测按各自序号只校正一次。首轮参数仅依据
+ * 100 Hz轮速/1 kHz IMU数据源和旧电机响应预测：规划输入纯延迟30 ms、一阶时间常数
+ * 0.12 s。最新实车日志已确认轴向和轮速尺度，本轮启用并保留BMI088瞬态校正。 */
 #ifndef GATEWAY_CHASSIS_ACCEL_FUSION_ENABLE
-#define GATEWAY_CHASSIS_ACCEL_FUSION_ENABLE                 0U
+#define GATEWAY_CHASSIS_ACCEL_FUSION_ENABLE                 1U
 #endif
 #define GATEWAY_CHASSIS_FUSION_PLAN_GAIN                  1.0F
 #define GATEWAY_CHASSIS_FUSION_RESPONSE_TAU_S            0.12F
@@ -313,13 +317,15 @@
 #define GATEWAY_BMI088_ACCEL_Y_SIGN                    1.0F
 
 /* 底盘加速度补偿：theta=b*polarity*atan2(a_forward,g)。KEY启动并完成零点稳定后，
- * 当前版本只使用F407本地BMI088经启动零偏和两级2.25ms低通处理的+Y测量，完全剔除
- * G3519/ICM45686的CAR加速度。+Y朝车头时向前加速度a_forward>0，极性-1将其映射为
- * theta<0、raw增大并降低车头执行端。
- * 新VOFA中0.50增益仍有70.57%时间撞限幅，因此首轮降至0.20；离线回放预计
- * 静车饱和率约1.6%。补偿与视觉+BMI088动态和均限0.60deg，加上水平trim后的
- * 最终命令仍受杆角表和绝对raw边界约束。 */
+ * 默认使用F407本地BMI088；M3明确禁止全部底盘加速度前馈。心跳在线且50 ms内收到
+ * M4/M5/M6有效规划量时，使用G3519统一规划作为模型输入并融合BMI088与轮速。G3519
+ * 实测加速度始终不参与控制，M2不采用规划。正值经极性-1映射为theta<0、raw增大并降低
+ * 车头执行端。新VOFA中0.50增益仍有70.57%时间撞限幅，因此BMI/融合主增益保持0.20。
+ * M4/M5/M6新鲜负规划另以0.25固定系数提供平滑停车基准；正加速和规划失鲜不叠加该项，剩余误差
+ * 继续由BMI088/轮速融合与视觉闭环修正。两项相加后仍统一限于0.60deg，加上水平trim后的
+ * 最终命令继续受杆角表和绝对raw边界约束。 */
 #define GATEWAY_CHASSIS_FF_GAIN                0.20F
+#define GATEWAY_CHASSIS_STOP_PLAN_FF_GAIN      0.25F
 #define GATEWAY_CHASSIS_FF_POLARITY           (-1.0F)
 #define GATEWAY_CHASSIS_FF_ANGLE_LIMIT_DEG      0.60F
 #define GATEWAY_ACC_PREVIEW_LEAD_MS            UINT32_C(0)
@@ -345,6 +351,16 @@
 #define GATEWAY_LEVEL_INTEGRAL_LIMIT_A       0.020F
 #define GATEWAY_LEVEL_CURRENT_LIMIT_A        0.30F
 #define GATEWAY_LEVEL_CURRENT_POLARITY       1.0F
+
+/* Only a fresh competition_mode=3 selects the quiet 2026-07-31 08:51 PID
+ * tuning. The PID formula, feedback, limits and all other competition modes
+ * remain unchanged. */
+#define GATEWAY_TASK3_LEVEL_KP_A_PER_DEG          0.014F
+#define GATEWAY_TASK3_LEVEL_KI_A_PER_DEG_S        0.0010F
+#define GATEWAY_TASK3_LEVEL_KD_A_PER_RPM          0.0010F
+#define GATEWAY_TASK3_LEVEL_FEEDFORWARD_CURRENT_A (-0.072F)
+#define GATEWAY_TASK3_LEVEL_DEADBAND_DEG           0.20F
+#define GATEWAY_TASK3_LEVEL_INTEGRAL_LIMIT_A       0.010F
 
 #if GATEWAY_LEVEL_ZERO_RAW > UINT16_MAX
 #error "Level zero raw value must fit uint16_t"
@@ -437,6 +453,15 @@
 #define PEER_LINK_HEARTBEAT_PERIOD_MS     UINT32_C(500)
 #define PEER_LINK_DEBUG_PERIOD_MS         UINT32_C(20)
 #define PEER_LINK_OFFLINE_TIMEOUT_MS      UINT32_C(1500)
+#define PEER_LINK_CAR_MAX_AGE_MS          UINT32_C(50)
+/* M3 explicitly disables all chassis-acceleration feedforward. M4/M5/M6 may
+ * anchor fusion with a fresh, explicitly valid G3519 plan. Measured G3519
+ * acceleration remains excluded; M2 keeps the local BMI088 path. */
+#define GATEWAY_TASK3_COMPETITION_MODE UINT8_C(3)
+#define GATEWAY_ACCELERATION_FF_DISABLED_COMPETITION_MODE \
+    GATEWAY_TASK3_COMPETITION_MODE
+#define GATEWAY_PLANNED_ACCELERATION_COMPETITION_MODE_MIN UINT8_C(4)
+#define GATEWAY_PLANNED_ACCELERATION_COMPETITION_MODE_MAX UINT8_C(6)
 
 /* 现有1 ms Task每周期最多解析的USART1字节数，范围1..128。 */
 #define PEER_LINK_RX_BYTES_PER_STEP       128U

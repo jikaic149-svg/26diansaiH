@@ -177,23 +177,30 @@ static void test_car_boundaries_validity_and_freshness(void)
     const Device_PeerLink_Config config = make_config();
     Device_PeerLink_CarState state;
     uint8_t competition_mode = 0U;
+    bool task_active = false;
 
     fake_reset();
     assert(Device_PeerLink_Init(&link, &config, 100U));
     queue_packet(
-        "CAR", 10U, "2,1000,-5000,-50000,50000,100000,1,6");
+        "CAR", 10U, "2,1000,-5000,-50000,50000,100000,1,6,1");
     assert(Device_PeerLink_Step(&link, 100U));
     assert(Device_PeerLink_GetRemoteCarState(
         &link, 150U, 50U, &state));
+    assert(state.sequence == 10U);
     assert(state.sample_ms == 1000U);
     assert(state.speed_x_mm_per_second == -5000);
     assert(state.acceleration_x_mm_per_second2 == -50000);
     assert(state.acceleration_z_mm_per_second2 == 50000);
     assert(state.pitch_rate_centi_dps == 100000);
     assert(state.competition_mode == 6U);
+    assert(!state.planned_acceleration_valid);
+    assert(state.planned_acceleration_x_mm_per_second2 == 0);
     assert(Device_PeerLink_GetRemoteCompetitionMode(
         &link, 150U, 50U, &competition_mode));
     assert(competition_mode == 6U);
+    assert(Device_PeerLink_GetRemoteCompetitionTaskActive(
+        &link, 150U, 50U, &task_active));
+    assert(task_active);
     assert(!Device_PeerLink_GetRemoteCarState(
         &link, 151U, 50U, &state));
 
@@ -205,6 +212,43 @@ static void test_car_boundaries_validity_and_freshness(void)
     assert(Device_PeerLink_GetRemoteCompetitionMode(
         &link, 110U, 50U, &competition_mode));
     assert(competition_mode == 5U);
+}
+
+static void test_car_planned_acceleration_extension(void)
+{
+    Device_PeerLink link;
+    const Device_PeerLink_Config config = make_config();
+    Device_PeerLink_CarState state;
+
+    fake_reset();
+    assert(Device_PeerLink_Init(&link, &config, 100U));
+    queue_packet(
+        "CAR", 10U, "2,1000,234,100,9807,0,1,4,0,100,1");
+    assert(Device_PeerLink_Step(&link, 100U));
+    assert(Device_PeerLink_GetRemoteCarState(
+        &link, 100U, 50U, &state));
+    assert(state.sequence == 10U);
+    assert(state.valid);
+    assert(state.planned_acceleration_valid);
+    assert(state.planned_acceleration_x_mm_per_second2 == 100);
+
+    /* Planning remains usable during a temporary sensor-invalid sample. */
+    queue_packet(
+        "CAR", 11U, "2,1010,0,0,0,0,0,5,0,-80,1");
+    assert(Device_PeerLink_Step(&link, 110U));
+    assert(Device_PeerLink_GetRemoteCarState(
+        &link, 110U, 50U, &state));
+    assert(!state.valid);
+    assert(state.planned_acceleration_valid);
+    assert(state.planned_acceleration_x_mm_per_second2 == -80);
+
+    /* Both validity branches false stores mode but exposes no control data. */
+    queue_packet(
+        "CAR", 12U, "2,1020,0,0,0,0,0,6,0,0,0");
+    assert(Device_PeerLink_Step(&link, 120U));
+    assert(link.status.car_state_rx_count == 3U);
+    assert(!Device_PeerLink_GetRemoteCarState(
+        &link, 120U, 50U, &state));
 }
 
 static void test_car_rejects_malformed_and_unknown_types(void)
@@ -235,7 +279,17 @@ static void test_car_rejects_malformed_and_unknown_types(void)
     assert(Device_PeerLink_Step(&link, 8U));
     queue_packet("CAR", 0U, "2,1,0,0,0,0,0,7");
     assert(Device_PeerLink_Step(&link, 9U));
-    assert(link.status.car_state_payload_error_count == 7U);
+    queue_packet("CAR", 0U, "2,1,0,0,0,0,1,4,100");
+    assert(Device_PeerLink_Step(&link, 10U));
+    queue_packet("CAR", 0U, "2,1,0,0,0,0,1,4,5001,1");
+    assert(Device_PeerLink_Step(&link, 11U));
+    queue_packet("CAR", 0U, "2,1,0,0,0,0,1,4,1,2");
+    assert(Device_PeerLink_Step(&link, 12U));
+    queue_packet("CAR", 0U, "2,1,0,0,0,0,1,4,1,0");
+    assert(Device_PeerLink_Step(&link, 13U));
+    queue_packet("CAR", 0U, "2,1,0,0,0,0,1,4,+1,1");
+    assert(Device_PeerLink_Step(&link, 14U));
+    assert(link.status.car_state_payload_error_count == 12U);
     assert(link.status.car_state_rx_count == 0U);
 }
 
@@ -537,6 +591,7 @@ int main(void)
 {
     test_heartbeat_only_tx_and_busy_sequence();
     test_car_boundaries_validity_and_freshness();
+    test_car_planned_acceleration_extension();
     test_car_rejects_malformed_and_unknown_types();
     test_car_order_wrap_and_restart();
     test_local_freshness_wrap();

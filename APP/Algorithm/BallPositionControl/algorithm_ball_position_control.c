@@ -31,6 +31,7 @@ static void reset_speed_loop(
     controller->integral_acceleration_mm_s2 = 0.0F;
     controller->desired_acceleration_mm_s2 = 0.0F;
     controller->stiction_assist_acceleration_mm_s2 = 0.0F;
+    controller->stiction_assist_velocity_integral_acceleration_mm_s2 = 0.0F;
     controller->stiction_assist_start_position_mm = 0.0F;
     controller->stiction_kick_angle_deg = 0.0F;
     reset_hold_candidate(controller);
@@ -106,6 +107,7 @@ static void reset_stiction_kick(
 {
     controller->stiction_kick_angle_deg = 0.0F;
     controller->stiction_assist_acceleration_mm_s2 = 0.0F;
+    controller->stiction_assist_velocity_integral_acceleration_mm_s2 = 0.0F;
     controller->stiction_assist_start_position_mm = 0.0F;
     controller->target_velocity_mm_s = 0.0F;
     controller->stiction_state_started_ms = 0U;
@@ -134,6 +136,7 @@ static void begin_stiction_wait(
     controller->stiction_error_direction = direction;
     controller->stiction_kick_angle_deg = 0.0F;
     controller->stiction_assist_acceleration_mm_s2 = 0.0F;
+    controller->stiction_assist_velocity_integral_acceleration_mm_s2 = 0.0F;
     controller->stiction_assist_start_position_mm =
         controller->position_mm;
     controller->target_velocity_mm_s = 0.0F;
@@ -164,6 +167,8 @@ static void update_stiction_kick(
         waiting_displacement_limit_mm;
     const uint32_t elapsed_ms =
         sample_ms - controller->stiction_state_started_ms;
+    const uint32_t delta_ms = controller->measurement_seen ?
+        sample_ms - controller->last_sample_ms : 0U;
 
     if (!enabled || !controller->velocity_valid || !position_qualifies ||
         (direction == 0)) {
@@ -210,6 +215,8 @@ static void update_stiction_kick(
     case ALGORITHM_BALL_STICTION_COOLDOWN:
         controller->target_velocity_mm_s = 0.0F;
         controller->stiction_assist_acceleration_mm_s2 = 0.0F;
+        controller->stiction_assist_velocity_integral_acceleration_mm_s2 =
+            0.0F;
         controller->stiction_kick_angle_deg = 0.0F;
         if (elapsed_ms >= controller->config.stiction_kick_cooldown_ms) {
             controller->stiction_state = ALGORITHM_BALL_STICTION_IDLE;
@@ -238,6 +245,26 @@ static void update_stiction_kick(
         controller->target_velocity_mm_s = (float)direction *
             controller->config.maximum_target_velocity_mm_s *
             speed_fraction;
+        if (stationary && (delta_ms > 0U) &&
+            (delta_ms <= controller->config.maximum_velocity_dt_ms)) {
+            controller->stiction_assist_velocity_integral_acceleration_mm_s2 +=
+                controller->config.
+                    stiction_assist_velocity_integral_gain_per_s2 *
+                (controller->target_velocity_mm_s -
+                    controller->velocity_mm_s) *
+                ((float)delta_ms / 1000.0F);
+            controller->stiction_assist_velocity_integral_acceleration_mm_s2 =
+                limit_symmetric(
+                    controller->
+                        stiction_assist_velocity_integral_acceleration_mm_s2,
+                    controller->config.maximum_target_acceleration_mm_s2);
+        }
+        else {
+            /* Once the ball is moving, remove the breakaway integral so it
+             * cannot become stored energy during the target hand-off. */
+            controller->stiction_assist_velocity_integral_acceleration_mm_s2 =
+                0.0F;
+        }
     }
 }
 
@@ -306,6 +333,8 @@ static bool valid_config(
         (config->stiction_kick_maximum_angle_deg == 0.0F) &&
         isfinite(config->stiction_assist_velocity_gain_per_s) &&
         (config->stiction_assist_velocity_gain_per_s >= 0.0F) &&
+        isfinite(config->stiction_assist_velocity_integral_gain_per_s2) &&
+        (config->stiction_assist_velocity_integral_gain_per_s2 >= 0.0F) &&
         isfinite(config->stiction_assist_exit_distance_mm) &&
         (config->stiction_assist_exit_distance_mm >= 0.0F) &&
         isfinite(config->stiction_kick_minimum_error_mm) &&
@@ -624,6 +653,9 @@ bool Algorithm_BallPositionControl_ComputeRodAngleDeg(
 {
     float measured_velocity;
     float velocity_gain;
+    float position_acceleration;
+    float speed_acceleration;
+    float speed_blend;
     float desired_acceleration;
     float assist_acceleration_limit;
     float assist_ramp_fraction;
@@ -655,10 +687,11 @@ bool Algorithm_BallPositionControl_ComputeRodAngleDeg(
         velocity_gain *=
             controller->config.near_target_velocity_gain_multiplier;
     }
-    desired_acceleration = controller->config.position_gain_per_s2 *
+    position_acceleration = controller->config.position_gain_per_s2 *
         (controller->target_position_mm - controller->position_mm) +
         controller->integral_acceleration_mm_s2 -
         velocity_gain * measured_velocity;
+    desired_acceleration = position_acceleration;
     controller->stiction_assist_acceleration_mm_s2 = 0.0F;
     controller->stiction_kick_angle_deg = 0.0F;
     if (controller->stiction_state == ALGORITHM_BALL_STICTION_ACTIVE) {
@@ -673,11 +706,25 @@ bool Algorithm_BallPositionControl_ComputeRodAngleDeg(
         assist_acceleration_limit =
             controller->config.maximum_target_acceleration_mm_s2 *
             (0.5F + 0.5F * assist_ramp_fraction);
-        controller->stiction_assist_acceleration_mm_s2 = limit_symmetric(
+        speed_acceleration = limit_symmetric(
             controller->config.stiction_assist_velocity_gain_per_s *
-                (controller->target_velocity_mm_s - measured_velocity),
+                (controller->target_velocity_mm_s - measured_velocity) +
+            controller->
+                stiction_assist_velocity_integral_acceleration_mm_s2,
             assist_acceleration_limit);
-        desired_acceleration +=
+        speed_blend = fabsf(controller->target_velocity_mm_s) /
+            controller->config.maximum_target_velocity_mm_s;
+        speed_blend = limit_symmetric(speed_blend, 1.0F);
+        /* Smoothstep gives a continuous hand-off: the stiction speed loop
+         * owns large-error travel, then rapidly fades to the position loop
+         * across the configured near-target band.  The two loops are not
+         * added, so activating stiction cannot double the rod command. */
+        speed_blend = speed_blend * speed_blend *
+            (3.0F - 2.0F * speed_blend);
+        controller->stiction_assist_acceleration_mm_s2 =
+            speed_blend * speed_acceleration;
+        desired_acceleration =
+            (1.0F - speed_blend) * position_acceleration +
             controller->stiction_assist_acceleration_mm_s2;
         assist_normalized = (1.0F + controller->config.inertia_ratio) *
             controller->stiction_assist_acceleration_mm_s2 /

@@ -57,6 +57,7 @@ static bool s_chassis_imu_sample_seen;
 static uint32_t s_next_debug_tx_ms;
 static uint32_t s_next_vision_status_tx_ms;
 static uint32_t s_bmi088_terminal_sequence_consumed;
+static bool s_competition_task_active;
 
 volatile uint32_t g_TASK_Heartbeat = 0U;
 volatile uint32_t g_TASK_Fault = 0U;
@@ -153,13 +154,28 @@ static void Task_TakePeerBallCommands(void)
         return;
     }
     if (Device_PeerLink_TakeBallTargetCommand(
-            &s_peer_link, &target_command) &&
-        !APP_Gateway_SetBallTargetMm(
-            (float)target_command.target_0p1mm * 0.1F)) {
-        if (g_TASK_BallTargetCommandErrors < UINT32_MAX) {
+            &s_peer_link, &target_command)) {
+        bool accepted = APP_Gateway_SetBallTargetMm(
+            (float)target_command.target_0p1mm * 0.1F);
+        if (!accepted && (g_TASK_BallTargetCommandErrors < UINT32_MAX)) {
             ++g_TASK_BallTargetCommandErrors;
         }
     }
+}
+
+static void Task_UpdateCompetitionTaskState(uint32_t now_ms)
+{
+    uint8_t competition_mode = 0U;
+    bool task_active = false;
+
+    s_competition_task_active =
+        Device_PeerLink_GetRemoteCompetitionMode(
+            &s_peer_link, now_ms, PEER_LINK_OFFLINE_TIMEOUT_MS,
+            &competition_mode) &&
+        Device_PeerLink_GetRemoteCompetitionTaskActive(
+            &s_peer_link, now_ms, PEER_LINK_OFFLINE_TIMEOUT_MS,
+            &task_active) &&
+        (competition_mode == GATEWAY_TASK3_COMPETITION_MODE) && task_active;
 }
 
 static void Task_VisionLinkInit(uint32_t now_ms)
@@ -363,8 +379,21 @@ static APP_Gateway_ControlInput Task_MakeControlInput(uint32_t now_ms)
 {
     APP_Gateway_ControlInput input = {0};
     Device_BMI088_Snapshot bmi088 = {0};
+    Device_PeerLink_CarState car_state = {0};
     Device_VisionLink_Measurement measurement;
     Algorithm_ChassisImuAcceleration_Output acceleration_output;
+    uint8_t competition_mode = 0U;
+    const bool acceleration_feedforward_blocked =
+        s_peer_link_ready &&
+        Device_PeerLink_GetRemoteCompetitionMode(
+            &s_peer_link,
+            now_ms,
+            PEER_LINK_OFFLINE_TIMEOUT_MS,
+            &competition_mode) &&
+        (competition_mode ==
+            GATEWAY_ACCELERATION_FF_DISABLED_COMPETITION_MODE);
+
+    input.competition_mode = competition_mode;
 
     if (s_bmi088_ready &&
         Device_BMI088_GetSnapshot(&s_bmi088, &bmi088)) {
@@ -404,7 +433,12 @@ static APP_Gateway_ControlInput Task_MakeControlInput(uint32_t now_ms)
                         ? 0.5F : -0.5F));
 
             g_TASK_BMI088_ProcessedAccel_mm_s2 = acceleration_mm_s2;
-            if (acceleration_output.bias_ready) {
+            if (acceleration_output.bias_ready &&
+                !acceleration_feedforward_blocked) {
+                /* Only the F407-local BMI088 may drive chassis
+                 * acceleration feedforward.  G3519 CAR acceleration is
+                 * intentionally excluded from the rod command. M3 keeps
+                 * sampling the BMI088 but does not submit it to control. */
                 input.chassis_acceleration_valid = true;
                 input.acceleration_now_mm_s2 = acceleration_mm_s2;
                 input.acceleration_next_mm_s2 = acceleration_mm_s2;
@@ -418,6 +452,37 @@ static APP_Gateway_ControlInput Task_MakeControlInput(uint32_t now_ms)
                     acceleration_mm_s2;
                 input.measured_chassis_acceleration_valid = true;
             }
+        }
+    }
+
+    if (s_peer_link_ready &&
+        Device_PeerLink_GetRemoteCarState(
+            &s_peer_link, now_ms, PEER_LINK_CAR_MAX_AGE_MS, &car_state)) {
+        /* G3519 measured acceleration never enters rod feedforward. The
+         * heartbeat-confirmed M4/M5/M6 profile is the shared longitudinal
+         * truth; M2 remains local-IMU-only and M3 blocks feedforward. */
+        if (!acceleration_feedforward_blocked &&
+            s_peer_link.status.online &&
+            (car_state.competition_mode >=
+                GATEWAY_PLANNED_ACCELERATION_COMPETITION_MODE_MIN) &&
+            (car_state.competition_mode <=
+                GATEWAY_PLANNED_ACCELERATION_COMPETITION_MODE_MAX) &&
+            car_state.planned_acceleration_valid) {
+            input.chassis_acceleration_valid = true;
+            input.chassis_acceleration_plan_valid = true;
+            input.acceleration_now_mm_s2 =
+                car_state.planned_acceleration_x_mm_per_second2;
+            input.acceleration_next_mm_s2 =
+                car_state.planned_acceleration_x_mm_per_second2;
+            input.acceleration_next_after_ms = UINT16_MAX;
+            input.acceleration_received_at_ms = car_state.received_at_ms;
+        }
+        if (car_state.valid) {
+            input.chassis_wheel_measurement_valid = true;
+            input.chassis_wheel_sequence = car_state.sequence;
+            input.chassis_wheel_sample_ms = car_state.sample_ms;
+            input.measured_chassis_wheel_speed_mm_s =
+                car_state.speed_x_mm_per_second;
         }
     }
 
@@ -529,6 +594,9 @@ static void Task_SendVisionControlStatus(
     }
     if (gateway->ball_velocity_valid) {
         flags |= DEVICE_VISION_LINK_STATUS_VELOCITY_VALID;
+    }
+    if (s_competition_task_active) {
+        flags |= DEVICE_VISION_LINK_STATUS_COMPETITION_TASK_ACTIVE;
     }
 
     if (!link_online &&
@@ -661,9 +729,11 @@ static void Task_SendDebugTelemetry(
     }
     debug = (Device_PeerLink_DebugTelemetry){
         .chassis_acceleration_mm_s2 =
-            g_TASK_BMI088_AccelX_mm_s2,
-        .chassis_compensation_mdeg = g_TASK_BMI088_AccelY_mm_s2,
-        .rod_command_mdeg = g_TASK_BMI088_AccelZ_mm_s2,
+            gateway->chassis_acceleration_mm_s2,
+        .chassis_compensation_mdeg = Task_ScaleFloatToI32(
+            gateway->chassis_compensation_angle_deg, 1000.0F),
+        .rod_command_mdeg = Task_ScaleFloatToI32(
+            gateway->rod_command_deg, 1000.0F),
         .motor_target_raw = gateway->target_single_turn_angle_raw,
         .motor_feedback_raw = gateway->single_turn_angle_raw,
         .motor_command_current_ma = Task_ScaleFloatToI32(
@@ -749,6 +819,7 @@ static void Task_Gateway(void *argument)
             s_peer_link_fault = 2U;
         }
         Task_TakePeerBallCommands();
+        Task_UpdateCompetitionTaskState(g_TASK_NowMs);
         if (s_vision_link_ready &&
             !Device_VisionLink_Step(&s_vision_link, g_TASK_NowMs)) {
             s_vision_link_fault = TASK_VISION_LINK_FAULT_STEP;
@@ -791,6 +862,7 @@ bool Task_Init(void)
     s_last_used_vision_sequence = 0U;
     s_vision_measurement_used_seen = false;
     s_bmi088_terminal_sequence_consumed = 0U;
+    s_competition_task_active = false;
 
     task = xTaskCreateStatic(
         Task_Gateway,

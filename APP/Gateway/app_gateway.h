@@ -46,6 +46,10 @@ typedef struct {
 } APP_Gateway_Telemetry;
 
 typedef struct {
+    /* Fresh G3519 competition mode forwarded by the Task. Zero means the
+     * mode is unavailable/offline for this control cycle. */
+    uint8_t competition_mode;
+
     bool ball_measurement_valid;
     uint16_t ball_sequence;
     uint32_t ball_sample_ms;
@@ -53,19 +57,28 @@ typedef struct {
     uint32_t ball_measurement_age_ms;
 
     bool chassis_acceleration_valid;
+    /* True only when the primary acceleration input is a fresh trajectory
+     * plan. Local BMI088-only fallback must not drive the fusion predictor. */
+    bool chassis_acceleration_plan_valid;
     int32_t acceleration_now_mm_s2;
     int32_t acceleration_next_mm_s2;
     uint16_t acceleration_next_after_ms;
     uint32_t acceleration_received_at_ms;
 
+    /* Local IMU acceleration and remote wheel speed are asynchronous
+     * observations. Keep independent sample identities so neither Latest
+     * Value is corrected more than once by the optional fusion filter. */
     bool chassis_motion_measurement_valid;
     uint16_t chassis_motion_sequence;
     uint32_t chassis_motion_sample_ms;
     uint32_t chassis_motion_age_ms;
     int32_t measured_chassis_acceleration_mm_s2;
-    int32_t measured_chassis_wheel_speed_mm_s;
     bool measured_chassis_acceleration_valid;
-    bool measured_chassis_wheel_speed_valid;
+
+    bool chassis_wheel_measurement_valid;
+    uint16_t chassis_wheel_sequence;
+    uint32_t chassis_wheel_sample_ms;
+    int32_t measured_chassis_wheel_speed_mm_s;
 } APP_Gateway_ControlInput;
 
 /* TCP<->CAN 双向网关。
@@ -97,6 +110,10 @@ void APP_Gateway_Step(
  * disabled feedback. Any single-turn raw may start; an off-range start first
  * uses bounded inward-only recovery. Stopping sends zero before Disable. */
 bool APP_Gateway_TogglePrimaryMotor(uint32_t now_ms);
+
+/* Idempotently start the same protected primary loop used by the local KEY.
+ * An already-active loop remains active; unsafe or stale feedback is rejected. */
+bool APP_Gateway_StartPrimaryMotor(uint32_t now_ms);
 
 /* Unconditionally end the primary level/ball loop through the existing safe
  * path: command zero current before disabling the QD4310. This never starts

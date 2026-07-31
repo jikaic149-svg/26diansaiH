@@ -14,19 +14,24 @@
 
 #define DEVICE_PEER_LINK_CAR_SPEED_ABS_MAX_MM_PER_SECOND INT32_C(5000)
 #define DEVICE_PEER_LINK_CAR_ACCEL_ABS_MAX_MM_PER_SECOND2 INT32_C(50000)
+#define DEVICE_PEER_LINK_CAR_PLAN_ACCEL_ABS_MAX_MM_PER_SECOND2 INT32_C(5000)
 #define DEVICE_PEER_LINK_CAR_PITCH_RATE_ABS_MAX_CENTI_DPS INT32_C(100000)
 #define DEVICE_PEER_LINK_COMPETITION_MODE_MIN UINT8_C(2)
 #define DEVICE_PEER_LINK_COMPETITION_MODE_MAX UINT8_C(6)
 #define DEVICE_PEER_LINK_BALL_TARGET_ABS_MAX_0P1MM INT32_C(1250)
 
 typedef struct {
+    uint16_t sequence;
     uint32_t sample_ms;
     int32_t speed_x_mm_per_second;
     int32_t acceleration_x_mm_per_second2;
     int32_t acceleration_z_mm_per_second2;
     int32_t pitch_rate_centi_dps;
+    int32_t planned_acceleration_x_mm_per_second2;
     uint8_t competition_mode;
+    bool competition_task_active;
     bool valid;
+    bool planned_acceleration_valid;
     uint32_t received_at_ms;
 } Device_PeerLink_CarState;
 
@@ -154,8 +159,10 @@ bool Device_PeerLink_Init(
 /* Non-blocking periodic service. Unknown packet types are ignored. */
 bool Device_PeerLink_Step(Device_PeerLink *link, uint32_t now_ms);
 
-/* Copy the latest source-valid CAR sample. Freshness uses the F407 local
- * receive clock; maximum_age_ms is inclusive and supports uint32_t wrap. */
+/* Copy the latest fresh CAR when either its physical-sensor branch or its
+ * planned-acceleration branch is valid. Callers must inspect both flags.
+ * Freshness uses the F407 local receive clock; maximum_age_ms is inclusive
+ * and supports uint32_t wrap. */
 bool Device_PeerLink_GetRemoteCarState(
     const Device_PeerLink *link,
     uint32_t now_ms,
@@ -169,6 +176,14 @@ bool Device_PeerLink_GetRemoteCompetitionMode(
     uint32_t now_ms,
     uint32_t maximum_age_ms,
     uint8_t *competition_mode);
+
+/* Copy the periodic competition task state independently of physical CAR
+ * sensor validity. Stale or never-seen CAR state returns false. */
+bool Device_PeerLink_GetRemoteCompetitionTaskActive(
+    const Device_PeerLink *link,
+    uint32_t now_ms,
+    uint32_t maximum_age_ms,
+    bool *task_active);
 
 /* BTG is a one-slot Latest Value. A newer accepted BTG replaces an untaken
  * value; Take copies the latest value once and clears the slot. */

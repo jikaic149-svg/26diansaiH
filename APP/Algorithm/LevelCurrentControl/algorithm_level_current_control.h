@@ -66,6 +66,16 @@ bool Algorithm_LevelCurrentControl_SetTargetDeg(
 bool Algorithm_LevelCurrentControl_SetTrackingTargetDeg(
     Algorithm_LevelCurrentControl *controller,
     float target_deg);
+/* Select an existing PID tuning set at runtime. Reapplying the active set is
+ * state-neutral; changing any value clears only the integral term. */
+bool Algorithm_LevelCurrentControl_SetTuning(
+    Algorithm_LevelCurrentControl *controller,
+    float kp_a_per_deg,
+    float ki_a_per_deg_s,
+    float kd_a_per_rpm,
+    float feedforward_current_a,
+    float deadband_deg,
+    float integral_limit_a);
 void Algorithm_LevelCurrentControl_Stop(
     Algorithm_LevelCurrentControl *controller);
 bool Algorithm_LevelCurrentControl_IsActive(

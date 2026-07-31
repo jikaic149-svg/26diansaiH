@@ -12,8 +12,9 @@ typedef struct {
     float target_position_mm;
     float maximum_absolute_target_position_mm;
     float target_slew_rate_mm_s;
-    /* Stiction-only speed-assist target and acceleration limit. The normal
-     * motion path does not use a cascaded speed loop. */
+    /* Stiction-only speed-loop target and acceleration limit. Large-error
+     * travel uses this loop only after a stationary gate; a smooth near-target
+     * blend hands control back to the normal position loop. */
     float maximum_target_velocity_mm_s;
     float maximum_target_acceleration_mm_s2;
     /* +1 or -1 maps camera-rule position into the physical rod coordinate. */
@@ -50,9 +51,10 @@ typedef struct {
     float stiction_kick_angle_deg;
     float stiction_kick_step_angle_deg;
     float stiction_kick_maximum_angle_deg;
-    /* Speed assist is armed only after the ball remains slow with sufficient
-     * position error. It exits immediately on detected motion. */
+    /* The speed loop is armed only after the ball remains slow with sufficient
+     * position error. exit_distance is the position-to-speed hand-off width. */
     float stiction_assist_velocity_gain_per_s;
+    float stiction_assist_velocity_integral_gain_per_s2;
     float stiction_assist_exit_distance_mm;
     float stiction_kick_minimum_error_mm;
     float stiction_kick_maximum_velocity_mm_s;
@@ -79,6 +81,7 @@ typedef struct {
     float desired_acceleration_mm_s2;
     float stiction_kick_angle_deg;
     float stiction_assist_acceleration_mm_s2;
+    float stiction_assist_velocity_integral_acceleration_mm_s2;
     float stiction_assist_start_position_mm;
     float velocity_history_position_mm[
         ALGORITHM_BALL_POSITION_CONTROL_VELOCITY_HISTORY_CAPACITY];
@@ -146,8 +149,8 @@ bool Algorithm_BallPositionControl_SetEstimatedState(
 void Algorithm_BallPositionControl_ResetMeasurement(
     Algorithm_BallPositionControl *controller);
 
-/* Use position PID plus an optional stiction-only speed assist and the
- * solid-ball rolling inverse model to obtain the rod-angle correction. */
+/* Use the position loop, or the gated stiction speed loop with a smooth
+ * near-target hand-off, then the solid-ball inverse model for rod angle. */
 bool Algorithm_BallPositionControl_ComputeRodAngleDeg(
     Algorithm_BallPositionControl *controller,
     float *rod_angle_deg);
