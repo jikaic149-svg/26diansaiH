@@ -40,6 +40,9 @@ PID_GAIN_SCALE = 1000.0
 PID_KP_MAX_PER_S2 = 5.0
 PID_KI_MAX_PER_S3 = 1.0
 PID_KD_MAX_PER_S = 5.0
+BALL_TARGET_MIN_MM = -120.0
+BALL_TARGET_MAX_MM = 120.0
+BALL_TARGET_SCALE_0P1MM = 10.0
 
 
 def _elapsed_ms(now_ms, previous_ms):
@@ -285,6 +288,7 @@ class F4VisionLink:
         self.available = False
         self.sequence = 0
         self.pid_sequence = 0
+        self.target_sequence = 0
         self.last_send_ms = None
         self.last_error = ""
 
@@ -303,6 +307,7 @@ class F4VisionLink:
         self.last_vpa = None
         self.tx_count = 0
         self.pid_tuning_tx_count = 0
+        self.ball_target_tx_count = 0
         self.busy_drop_count = 0
         self.short_write_count = 0
         self.tx_timeout_count = 0
@@ -354,8 +359,12 @@ class F4VisionLink:
 
     def _finish_tx(self, now_ms):
         tx_kind = self._tx_kind
-        sent_sequence = (
-            self.sequence if tx_kind == "VIS" else self.pid_sequence)
+        if tx_kind == "VIS":
+            sent_sequence = self.sequence
+        elif tx_kind == "VTP":
+            sent_sequence = self.pid_sequence
+        else:
+            sent_sequence = self.target_sequence
         sent_length = len(self._tx_frame)
         self._tx_frame = None
         self._tx_offset = 0
@@ -367,12 +376,18 @@ class F4VisionLink:
         elif tx_kind == "VTP":
             self.pid_sequence = (self.pid_sequence + 1) & 0xFFFF
             self.pid_tuning_tx_count += 1
+        elif tx_kind == "VBT":
+            self.target_sequence = (self.target_sequence + 1) & 0xFFFF
+            self.ball_target_tx_count += 1
         self.last_error = ""
         if tx_kind == "VIS" and self.tx_count == 1:
             print("F4_VIS_TX_STARTED|sequence=%d|bytes=%d" % (
                 sent_sequence, sent_length))
         elif tx_kind == "VTP":
             print("F4_VTP_TX|sequence=%d|bytes=%d" % (
+                sent_sequence, sent_length))
+        elif tx_kind == "VBT":
+            print("F4_VBT_TX|sequence=%d|bytes=%d" % (
                 sent_sequence, sent_length))
 
     def _drop_partial(self, needs_resync):
@@ -597,6 +612,32 @@ class F4VisionLink:
         self._write_pending(now_ms)
         return (self._tx_frame is not None or
                 self.pid_tuning_tx_count > completed_before)
+
+    def send_ball_target(self, target_mm, now_ms=None):
+        """Send one bounded VBT target in signed 0.1 mm fixed point."""
+        if not self.enabled or not self.available or self.port is None:
+            return False
+        target_mm = float(target_mm)
+        if not math.isfinite(target_mm) or \
+                target_mm < BALL_TARGET_MIN_MM or \
+                target_mm > BALL_TARGET_MAX_MM:
+            raise ValueError("ball target is outside the safe range")
+        if self._tx_frame is not None or self._needs_resync:
+            self.busy_drop_count += 1
+            return False
+
+        now_ms = self._clock() if now_ms is None else int(now_ms)
+        fixed = _round_half_away_from_zero(
+            target_mm * BALL_TARGET_SCALE_0P1MM)
+        completed_before = self.ball_target_tx_count
+        self._tx_frame = encode_packet(
+            "VBT", self.target_sequence, str(fixed))
+        self._tx_kind = "VBT"
+        self._tx_offset = 0
+        self._tx_started_ms = int(now_ms)
+        self._write_pending(now_ms)
+        return (self._tx_frame is not None or
+                self.ball_target_tx_count > completed_before)
 
     def close(self):
         if self.port is not None:

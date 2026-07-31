@@ -50,6 +50,30 @@ def highest_score_detection(detections):
     return max(valid, key=lambda item: float(item.get("score", 0.0)))
 
 
+def filter_detections_in_normalized_roi(
+        detections, frame_width, frame_height, roi_ratio):
+    """只保留中心落在归一化ROI内的检测框，保持输入顺序。"""
+    frame_width = float(frame_width)
+    frame_height = float(frame_height)
+    if frame_width <= 0.0 or frame_height <= 0.0 or \
+            roi_ratio is None or len(roi_ratio) != 4:
+        return []
+    roi_x, roi_y, roi_width, roi_height = (
+        float(value) for value in roi_ratio)
+    if roi_width <= 0.0 or roi_height <= 0.0:
+        return []
+    left = roi_x * frame_width
+    top = roi_y * frame_height
+    right = (roi_x + roi_width) * frame_width
+    bottom = (roi_y + roi_height) * frame_height
+    accepted = []
+    for detection in detections or ():
+        cx, cy = detection_center(detection)
+        if left <= cx <= right and top <= cy <= bottom:
+            accepted.append(detection)
+    return accepted
+
+
 def _axis_polyline(axis):
     if not axis or not axis.get("valid"):
         return None

@@ -65,6 +65,31 @@ class F4VisionLinkTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             decode_vst_packet(1, "0,0,0,0,0,0,0,16384,0")
 
+    def test_ball_target_packet_and_bounds(self):
+        port = FakePort()
+        link = F4VisionLink(
+            port_factory=lambda _device, _baud: port,
+            clock_ms=lambda: 200,
+        )
+        self.assertTrue(link.start())
+        self.assertTrue(link.send_ball_target(37.0))
+        packet_type, sequence, payload = parse_packet(
+            bytes(port.written).rstrip(b"\n"))
+        self.assertEqual(packet_type, "VBT")
+        self.assertEqual(sequence, 0)
+        self.assertEqual(payload, "370")
+        self.assertEqual(link.ball_target_tx_count, 1)
+
+        port.written.clear()
+        self.assertTrue(link.send_ball_target(-120.0))
+        packet_type, sequence, payload = parse_packet(
+            bytes(port.written).rstrip(b"\n"))
+        self.assertEqual(packet_type, "VBT")
+        self.assertEqual(sequence, 1)
+        self.assertEqual(payload, "-1200")
+        with self.assertRaises(ValueError):
+            link.send_ball_target(120.1)
+
 
 if __name__ == "__main__":
     unittest.main()

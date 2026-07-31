@@ -64,9 +64,22 @@ F4_UART_CALIBRATION_VALID = True
 # 运行时通过同一全双工视觉串口发送VTP，不需要重新编译F407。F407会再次按
 # 产品边界校验，并以VPA回报实际生效值；该命令不启动电机、不改变球目标。
 F4_PID_TUNING_ENABLED = True
-F4_PID_KP_PER_S2 = 0.60
+F4_PID_KP_PER_S2 = 0.75
 F4_PID_KI_PER_S3 = 0.03
 F4_PID_KD_PER_S = 0.55
+
+# 触屏只发送小球在水管中的目标位置（毫米）。F407继续计算杆球模型，
+# 并把其输出杆角与底盘加速度前馈杆角相加；触屏不会直接控制电机位置。
+F4_TOUCH_TARGET_ENABLED = True
+F4_TOUCH_TARGET_MIN_MM = -120
+F4_TOUCH_TARGET_MAX_MM = 120
+F4_TOUCH_TARGET_STEP_MM = 1
+# 屏幕/视觉坐标左负右正；F407杆球物理坐标左正右负，与VIS测量极性一致取-1。
+F4_TOUCH_TARGET_TO_F407_POLARITY = -1.0
+# 松手后等待VST中的target_mm确认；未确认时按该周期重发VBT。
+F4_TOUCH_TARGET_RETRY_MS = 250
+F4_TOUCH_TARGET_MAX_ATTEMPTS = 20
+F4_TOUCH_TARGET_OFFLINE_MS = 500
 
 # 快速实物闭环：槽轴识别失效时，按用户授权跳过现场标定，以整幅画面宽度
 # 线性映射为25 cm水平轴。该模式只依赖YOLO球心，完成槽端标定后应关闭。

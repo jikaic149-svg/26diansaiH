@@ -16,7 +16,9 @@ import os
 from maix import app, camera, display, image, nn, time
 
 import vision_config as config
+from ball_target_touch import BallTargetTouchController
 from ball_axis_position import (
+    filter_detections_in_normalized_roi,
     filter_detections_on_trough,
     highest_score_detection,
     project_ball_axis_position,
@@ -48,6 +50,7 @@ WHITE = image.Color.from_rgb(255, 255, 255)
 # 正常应用运行不会写图，避免闪存写入和JPEG编码影响视觉闭环时序。
 DEBUG_IMAGES = os.environ.get("MAIXPY_DEBUG_IMAGES") == "1"
 DEBUG_IMAGE_INTERVAL_FRAMES = 100
+DEBUG_MAX_FRAMES = 300
 
 
 def _save_debug_image(img, name):
@@ -559,6 +562,7 @@ def main():
     vofa_active = False
     f4_link = None
     f4_active = False
+    ball_target_touch = None
     try:
         # 位置计算要求框与横向凹槽来自当前帧，因此保持dual_buff=False。
         detector = nn.YOLO11(model=config.MODEL_PATH, dual_buff=False)
@@ -709,6 +713,30 @@ def main():
                 except Exception as error:
                     print("F4_PID_TUNING_ERROR|%s" % error)
 
+        touch_target_enabled = bool(getattr(
+            config, "F4_TOUCH_TARGET_ENABLED", False))
+        if touch_target_enabled and disp is not None:
+            ball_target_touch = BallTargetTouchController(
+                enabled=True,
+                minimum_mm=float(getattr(
+                    config, "F4_TOUCH_TARGET_MIN_MM", -120.0)),
+                maximum_mm=float(getattr(
+                    config, "F4_TOUCH_TARGET_MAX_MM", 120.0)),
+                step_mm=float(getattr(
+                    config, "F4_TOUCH_TARGET_STEP_MM", 1.0)),
+                retry_ms=int(getattr(
+                    config, "F4_TOUCH_TARGET_RETRY_MS", 250)),
+                max_attempts=int(getattr(
+                    config, "F4_TOUCH_TARGET_MAX_ATTEMPTS", 20)),
+                offline_ms=int(getattr(
+                    config, "F4_TOUCH_TARGET_OFFLINE_MS", 500)),
+                target_to_f4_polarity=float(getattr(
+                    config, "F4_TOUCH_TARGET_TO_F407_POLARITY", -1.0)),
+            )
+            ball_target_touch.start()
+        elif touch_target_enabled:
+            print("BALL_TARGET_TOUCH_UNAVAILABLE|error=DISPLAY_DISABLED")
+
         frame_index = 0
         # SHOW_TROUGH_BINARY开启时，隔帧复用中轴也要复用最近一次二值图，
         # 否则trough_mask=None会让显示逻辑退回原图，造成画面闪烁。
@@ -770,8 +798,14 @@ def main():
         )
 
         while not app.need_exit():
+            link_now_ms = time.ticks_ms()
             if f4_link is not None and f4_active:
-                f4_link.service(time.ticks_ms())
+                f4_link.service(link_now_ms)
+            if ball_target_touch is not None:
+                ball_target_touch.update_feedback(
+                    f4_link.last_vst if f4_link is not None else None)
+                # 已经处于等待确认状态时，即使相机偶发空帧，也继续按有限周期重发。
+                ball_target_touch.try_send(f4_link, link_now_ms)
             camera_started_ms = time.ticks_ms()
             frame = cam.read()
             perf.record("camera", time.ticks_ms() - camera_started_ms)
@@ -781,6 +815,8 @@ def main():
             # 作为本帧可用时间的近似采集时间。
             frame_timestamp_ms = time.ticks_ms()
             frame_index += 1
+            if ball_target_touch is not None:
+                ball_target_touch.poll_touch(frame, disp)
 
             yolo_started_ms = time.ticks_ms()
             objects = detector.detect(
@@ -793,20 +829,38 @@ def main():
             detections = snapshot_detections(objects)
             del objects
 
-            preliminary = highest_score_detection(detections)
+            direct_frame_axis_enabled = bool(getattr(
+                config, "F4_DIRECT_FRAME_AXIS_FALLBACK_ENABLED", False))
+            preliminary_detections = detections
+            if direct_frame_axis_enabled:
+                preliminary_detections = \
+                    filter_detections_in_normalized_roi(
+                        detections,
+                        frame.width(),
+                        frame.height(),
+                        config.TROUGH_ROI_RATIO,
+                    )
+            preliminary = highest_score_detection(preliminary_detections)
             trough_started_ms = time.ticks_ms()
             trough_mask = None
-            if config.TROUGH_TRACKING_ENABLED:
+            if direct_frame_axis_enabled:
+                # 快速闭环模式的最终坐标本来就始终使用整幅水平轴；直接走这条
+                # 路径，避免先执行随后必然被覆盖的逐列颜色扫描。
+                trough_axis = _direct_frame_axis(frame, preliminary)
+                if trough_axis is None:
+                    trough_axis = {
+                        "valid": False,
+                        "reason": "BALL_NOT_FOUND",
+                        "source": "NONE",
+                        "orientation": "HORIZONTAL",
+                        "inliers": [],
+                    }
+                last_trough_mask = None
+            elif config.TROUGH_TRACKING_ENABLED:
                 trough_axis, trough_mask = trough_tracker.update(
                     frame, exclusion_box=preliminary)
                 trough_axis = transform_calibrated_axis(
                     trough_axis, position_calibration)
-                if bool(getattr(
-                        config, "F4_DIRECT_FRAME_AXIS_FALLBACK_ENABLED",
-                        False)):
-                    direct_axis = _direct_frame_axis(frame, preliminary)
-                    if direct_axis is not None:
-                        trough_axis = direct_axis
                 if show_trough_binary and trough_mask is not None:
                     last_trough_mask = trough_mask
             else:
@@ -874,6 +928,10 @@ def main():
                 )
 
             if f4_link is not None and f4_active:
+                if ball_target_touch is not None:
+                    # VBT优先于本轮VIS；F407仍负责完整杆球模型与加速度前馈。
+                    ball_target_touch.try_send(
+                        f4_link, send_timestamp_ms)
                 f4_link.send_position(
                     position,
                     tracked_ball=tracked_ball,
@@ -913,6 +971,9 @@ def main():
                 _draw_status(
                     display_frame, perf, detections,
                     trough_axis, tracked_ball, position)
+                if ball_target_touch is not None:
+                    ball_target_touch.draw(
+                        display_frame, time.ticks_ms())
                 perf.record("draw", time.ticks_ms() - draw_started_ms)
 
                 if DEBUG_IMAGES and (
@@ -943,7 +1004,15 @@ def main():
             display_frame = None
             frame = None
 
+            if DEBUG_IMAGES and frame_index >= DEBUG_MAX_FRAMES:
+                print("STEELBALL_HORIZONTAL_DEBUG_DONE|frames=%d" %
+                      frame_index)
+                break
+
     finally:
+        if ball_target_touch is not None:
+            ball_target_touch.close()
+        ball_target_touch = None
         if f4_link is not None:
             f4_link.close()
         f4_link = None

@@ -5,6 +5,7 @@ author: wzy
 icon: app.png
 desc: 横向水管凹槽钢球位置测试
 files:
+  - ball_target_touch.py
   - ball_axis_position.py
   - f4_vision_link.py
   - horizontal_trough_tracker.py

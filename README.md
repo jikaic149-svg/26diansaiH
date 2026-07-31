@@ -22,6 +22,7 @@
 
 - `main.py`：相机、YOLO、横向凹槽调度、显示和结构化日志；
 - `vision_config.py`：模型、白色阈值、横向ROI、逐列扫描与调试开关；
+- `ball_target_touch.py`：底部毫米目标滑条、松手提交、VST确认与有限周期重发；
 - `horizontal_trough_tracker.py`：粗扫白段、端点逐列精扫、直线离群筛选和轻量折线中轴；
 - `ball_axis_position.py`：YOLO候选筛选、球心到折线投影及弧长位置；
 - `f4_vision_link.py`：MaixCAM2 UART2、Packet V1、VIS发送、VST接收与链路诊断；
@@ -34,6 +35,16 @@
 MaixCAM2使用B0 `UART2_TX`、B1 `UART2_RX`与F407 USART2通信，设备为
 `/dev/ttyS2`，参数为115200 8N1。程序最多50 Hz发送合作协议第11节定义的`VIS`帧，
 并保留`VST`解析；该链路与G3519↔F407的USART1 `HB/CAR`完全独立。
+
+屏幕底部滑条可选择`-120..+120 mm`整数目标。拖动时只更新屏幕选择值，松手后才以
+独立序号的`VBT`发送；首次收到`VST`且用户尚未操作时，滑条先同步F407当前目标，避免
+应用重启时误发`0 mm`。`VST.target_mm`匹配时显示`OK`，等待确认时显示`PENDING`并每
+250 ms重发，最多20次；500 ms没有VST时显示`OFFLINE`。该目标只是小球在水管中的位置：F407仍按
+`Kp*(target-position)+I-Kd*velocity`和实心球逆模型计算杆角，再叠加底盘加速度前馈；
+MaixCAM不直接发送杆角，也不控制QD4310内部位置环。触屏设置不会启动电机。
+滑条沿用画面坐标“左负右正”；发送和显示VST确认时通过
+`F4_TOUCH_TARGET_TO_F407_POLARITY=-1`转换为F407杆球物理坐标“左正右负”，与VIS测量
+进入控制器时的`measurement_polarity=-1`保持同一误差方向。
 
 出现`F4_UART_OPEN`表示串口打开，出现`F4_VIS_TX_STARTED`表示至少完整写出一帧；
 F407端仍须以`vis_rx_count`递增确认实收。正式标定流程中
