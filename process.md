@@ -1,5 +1,13 @@
 # Process
 
+## 2026-08-01：非Task3连续速度环到位置环锁存交接
+
+- 修改原因：旧逻辑等待100 ms后才启用速度辅助，并在3..11 mm内混合两环；误差噪声可反复重启状态机，表现为脉冲、早刹和停不到。
+- 最终决策：每个新目标按最终`target_command`建立一次旅程；误差超过11 mm立即由连续速度PI独占，按剩余制动距离生成目标球速；进入3 mm且球速不超过8 mm/s或越过目标后锁存位置环，直到新目标或测量复位。离散kick保持为0，Task3运行时旁路该交接。
+- 涉及文件：`APP/Algorithm/BallPositionControl/`、`APP/Gateway/app_gateway.c`、`config/core_config.h`及滚球控制测试；未修改协议、Task周期、电机启停或保护。
+- 验证方式和结果：BallPositionControl与control polarity chain严格主机测试PASS；ARM Debug clean-first链接通过，FLASH/RAM为`51236/20792 B`；`git diff --check`通过。未烧录、未启动电机。
+- 待确认：实机需验证远距离速度连续性、近目标单次切环以及任意非零目标停车；Task3应保持专属行为且不进入该速度旅程。
+
 ## 2026-08-01：Task3由G3519 KEY直接启停
 
 - 修改原因：用户明确纠正Task3必须由G3519的KEY启动和结束，不再等待F407本地KEY；旧Maix `WAIT_REARM`门控因此被否决。

@@ -12,9 +12,9 @@ typedef struct {
     float target_position_mm;
     float maximum_absolute_target_position_mm;
     float target_slew_rate_mm_s;
-    /* Stiction-only speed-loop target and acceleration limit. Large-error
-     * travel uses this loop only after a stationary gate; a smooth near-target
-     * blend hands control back to the normal position loop. */
+    /* Speed-approach target and acceleration limit. A distant target command
+     * starts one continuous speed-loop trip; the normal position loop takes
+     * over once near the final command and remains latched for that trip. */
     float maximum_target_velocity_mm_s;
     float maximum_target_acceleration_mm_s2;
     /* +1 or -1 maps camera-rule position into the physical rod coordinate. */
@@ -51,23 +51,24 @@ typedef struct {
     float stiction_kick_angle_deg;
     float stiction_kick_step_angle_deg;
     float stiction_kick_maximum_angle_deg;
-    /* The speed loop is armed only after the ball remains slow with sufficient
-     * position error. exit_distance is the position-to-speed hand-off width. */
+    /* Legacy field names are kept for the VST/config integration. The speed
+     * trip enters when command error exceeds minimum_error + exit_distance,
+     * tapers across that band, and permanently hands off to the position loop
+     * at minimum_error once ball speed is below maximum_velocity. A new target
+     * or measurement reset rearms the trip. duration_ms shapes only the speed
+     * loop acceleration limit; it does not gate loop activation. */
     float stiction_assist_velocity_gain_per_s;
     float stiction_assist_velocity_integral_gain_per_s2;
     float stiction_assist_exit_distance_mm;
     float stiction_kick_minimum_error_mm;
     float stiction_kick_maximum_velocity_mm_s;
-    uint32_t stiction_kick_stationary_ms;
     uint32_t stiction_kick_duration_ms;
-    uint32_t stiction_kick_cooldown_ms;
 } Algorithm_BallPositionControl_Config;
 
 typedef enum {
     ALGORITHM_BALL_STICTION_IDLE = 0,
-    ALGORITHM_BALL_STICTION_WAITING,
     ALGORITHM_BALL_STICTION_ACTIVE,
-    ALGORITHM_BALL_STICTION_COOLDOWN,
+    ALGORITHM_BALL_STICTION_POSITION_LATCHED,
 } Algorithm_BallPositionControl_StictionState;
 
 typedef struct {
@@ -82,7 +83,6 @@ typedef struct {
     float stiction_kick_angle_deg;
     float stiction_assist_acceleration_mm_s2;
     float stiction_assist_velocity_integral_acceleration_mm_s2;
-    float stiction_assist_start_position_mm;
     float velocity_history_position_mm[
         ALGORITHM_BALL_POSITION_CONTROL_VELOCITY_HISTORY_CAPACITY];
     uint32_t velocity_history_sample_ms[
@@ -96,6 +96,7 @@ typedef struct {
     uint32_t velocity_history_count;
     bool measurement_seen;
     bool velocity_valid;
+    bool speed_handoff_enabled;
     bool hold_active;
     bool hold_candidate_active;
     bool initialized;
@@ -120,6 +121,13 @@ bool Algorithm_BallPositionControl_AdvanceTarget(
 bool Algorithm_BallPositionControl_ResetTargetPositionMm(
     Algorithm_BallPositionControl *controller,
     float target_position_mm);
+
+/* Runtime gate used by the Gateway competition mode. Disabling the handoff
+ * immediately selects and latches the normal position loop without changing
+ * the target or measurement state. Re-enabling rearms a fresh trip. */
+bool Algorithm_BallPositionControl_SetSpeedHandoffEnabled(
+    Algorithm_BallPositionControl *controller,
+    bool enabled);
 
 /* Apply finite, non-negative runtime gains. The integral state is represented
  * directly as acceleration, so changing Ki does not rescale or jump it.
@@ -149,8 +157,8 @@ bool Algorithm_BallPositionControl_SetEstimatedState(
 void Algorithm_BallPositionControl_ResetMeasurement(
     Algorithm_BallPositionControl *controller);
 
-/* Use the position loop, or the gated stiction speed loop with a smooth
- * near-target hand-off, then the solid-ball inverse model for rod angle. */
+/* Use the latched position loop or the exclusive continuous speed-approach
+ * loop, then the solid-ball inverse model for rod angle. */
 bool Algorithm_BallPositionControl_ComputeRodAngleDeg(
     Algorithm_BallPositionControl *controller,
     float *rod_angle_deg);

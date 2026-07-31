@@ -32,7 +32,6 @@ static void reset_speed_loop(
     controller->desired_acceleration_mm_s2 = 0.0F;
     controller->stiction_assist_acceleration_mm_s2 = 0.0F;
     controller->stiction_assist_velocity_integral_acceleration_mm_s2 = 0.0F;
-    controller->stiction_assist_start_position_mm = 0.0F;
     controller->stiction_kick_angle_deg = 0.0F;
     reset_hold_candidate(controller);
 }
@@ -102,17 +101,31 @@ static bool calculate_window_velocity(
     return false;
 }
 
-static void reset_stiction_kick(
+static void clear_speed_handoff_output(
     Algorithm_BallPositionControl *controller)
 {
     controller->stiction_kick_angle_deg = 0.0F;
     controller->stiction_assist_acceleration_mm_s2 = 0.0F;
     controller->stiction_assist_velocity_integral_acceleration_mm_s2 = 0.0F;
-    controller->stiction_assist_start_position_mm = 0.0F;
     controller->target_velocity_mm_s = 0.0F;
+}
+
+static void reset_speed_handoff_trip(
+    Algorithm_BallPositionControl *controller)
+{
+    clear_speed_handoff_output(controller);
     controller->stiction_state_started_ms = 0U;
     controller->stiction_error_direction = 0;
     controller->stiction_state = ALGORITHM_BALL_STICTION_IDLE;
+}
+
+static void latch_position_loop(
+    Algorithm_BallPositionControl *controller)
+{
+    clear_speed_handoff_output(controller);
+    controller->stiction_state_started_ms = 0U;
+    controller->stiction_error_direction = 0;
+    controller->stiction_state = ALGORITHM_BALL_STICTION_POSITION_LATCHED;
 }
 
 static int8_t error_direction(float error_mm)
@@ -126,126 +139,89 @@ static int8_t error_direction(float error_mm)
     return 0;
 }
 
-static void begin_stiction_wait(
+static void begin_speed_handoff(
     Algorithm_BallPositionControl *controller,
     uint32_t sample_ms,
     int8_t direction)
 {
-    controller->stiction_state = ALGORITHM_BALL_STICTION_WAITING;
+    clear_speed_handoff_output(controller);
+    controller->stiction_state = ALGORITHM_BALL_STICTION_ACTIVE;
     controller->stiction_state_started_ms = sample_ms;
     controller->stiction_error_direction = direction;
-    controller->stiction_kick_angle_deg = 0.0F;
-    controller->stiction_assist_acceleration_mm_s2 = 0.0F;
-    controller->stiction_assist_velocity_integral_acceleration_mm_s2 = 0.0F;
-    controller->stiction_assist_start_position_mm =
-        controller->position_mm;
-    controller->target_velocity_mm_s = 0.0F;
 }
 
-static void update_stiction_kick(
+static void update_speed_handoff(
     Algorithm_BallPositionControl *controller,
     uint32_t sample_ms)
 {
-    const float error_mm = controller->target_position_mm -
+    const float error_mm = controller->target_command_mm -
         controller->position_mm;
     const float absolute_error_mm = fabsf(error_mm);
     const float absolute_velocity_mm_s = fabsf(controller->velocity_mm_s);
     const int8_t direction = error_direction(error_mm);
-    const bool enabled =
+    const bool configured =
         controller->config.stiction_assist_velocity_gain_per_s > 0.0F;
-    const bool position_qualifies = absolute_error_mm >
+    const float exit_error_mm =
         controller->config.stiction_kick_minimum_error_mm;
-    const bool stationary = controller->velocity_valid &&
+    const float entry_error_mm = exit_error_mm +
+        controller->config.stiction_assist_exit_distance_mm;
+    const bool handoff_velocity_qualifies = controller->velocity_valid &&
         (absolute_velocity_mm_s <=
             controller->config.stiction_kick_maximum_velocity_mm_s);
-    const float waiting_displacement_limit_mm = fmaxf(
-        1.0F,
-        controller->config.stiction_kick_maximum_velocity_mm_s *
-        (float)controller->config.stiction_kick_stationary_ms / 1000.0F);
-    const bool waiting_position_moved = fabsf(controller->position_mm -
-        controller->stiction_assist_start_position_mm) >=
-        waiting_displacement_limit_mm;
-    const uint32_t elapsed_ms =
-        sample_ms - controller->stiction_state_started_ms;
     const uint32_t delta_ms = controller->measurement_seen ?
         sample_ms - controller->last_sample_ms : 0U;
 
-    if (!enabled || !controller->velocity_valid || !position_qualifies ||
-        (direction == 0)) {
-        reset_stiction_kick(controller);
+    if (!configured) {
+        reset_speed_handoff_trip(controller);
+        return;
+    }
+    if (!controller->speed_handoff_enabled) {
+        latch_position_loop(controller);
+        return;
+    }
+    if (!controller->velocity_valid) {
+        clear_speed_handoff_output(controller);
+        return;
+    }
+    if (controller->stiction_state ==
+            ALGORITHM_BALL_STICTION_POSITION_LATCHED) {
+        clear_speed_handoff_output(controller);
+        return;
+    }
+    if (controller->stiction_state == ALGORITHM_BALL_STICTION_ACTIVE) {
+        if ((direction == 0) ||
+            (direction != controller->stiction_error_direction) ||
+            ((absolute_error_mm <= exit_error_mm) &&
+             handoff_velocity_qualifies)) {
+            latch_position_loop(controller);
+            return;
+        }
+    }
+    else if ((absolute_error_mm > entry_error_mm) && (direction != 0)) {
+        begin_speed_handoff(controller, sample_ms, direction);
+    }
+    else {
+        /* This command started inside the entry band, so it is a position-loop
+         * trip. Later measurement noise cannot arm the speed loop. */
+        latch_position_loop(controller);
         return;
     }
 
-    switch (controller->stiction_state) {
-    case ALGORITHM_BALL_STICTION_IDLE:
-        if (stationary) {
-            begin_stiction_wait(controller, sample_ms, direction);
-        }
-        break;
-
-    case ALGORITHM_BALL_STICTION_WAITING:
-        /* Use displacement across the dwell interval as the primary
-         * stationary test.  A noisy visual derivative must not restart the
-         * timer every frame when the ball position has barely changed. */
-        if (waiting_position_moved ||
-            (direction != controller->stiction_error_direction)) {
-            reset_stiction_kick(controller);
-            if (stationary) {
-                begin_stiction_wait(controller, sample_ms, direction);
-            }
-        }
-        else if (elapsed_ms >=
-            controller->config.stiction_kick_stationary_ms) {
-            controller->stiction_state = ALGORITHM_BALL_STICTION_ACTIVE;
-            controller->stiction_state_started_ms = sample_ms;
-            controller->stiction_assist_start_position_mm =
-                controller->position_mm;
-        }
-        break;
-
-    case ALGORITHM_BALL_STICTION_ACTIVE:
-        /* Remain in the speed loop throughout the large-error travel.  The
-         * target speed below tapers continuously before the hand-off band;
-         * there is no timed or fixed-displacement pulse exit. */
-        if (direction != controller->stiction_error_direction) {
-            reset_stiction_kick(controller);
-        }
-        break;
-
-    case ALGORITHM_BALL_STICTION_COOLDOWN:
-        controller->target_velocity_mm_s = 0.0F;
-        controller->stiction_assist_acceleration_mm_s2 = 0.0F;
-        controller->stiction_assist_velocity_integral_acceleration_mm_s2 =
-            0.0F;
-        controller->stiction_kick_angle_deg = 0.0F;
-        if (elapsed_ms >= controller->config.stiction_kick_cooldown_ms) {
-            controller->stiction_state = ALGORITHM_BALL_STICTION_IDLE;
-            controller->stiction_state_started_ms = 0U;
-            controller->stiction_error_direction = 0;
-            if (stationary) {
-                begin_stiction_wait(controller, sample_ms, direction);
-            }
-        }
-        break;
-
-    default:
-        reset_stiction_kick(controller);
-        break;
-    }
-
     if (controller->stiction_state == ALGORITHM_BALL_STICTION_ACTIVE) {
-        float speed_fraction = (absolute_error_mm -
-            controller->config.stiction_kick_minimum_error_mm) /
-            controller->config.stiction_assist_exit_distance_mm;
+        const float braking_distance_mm = fmaxf(
+            0.0F, absolute_error_mm - exit_error_mm);
+        float target_speed_magnitude_mm_s = sqrtf(
+            2.0F * controller->config.maximum_target_acceleration_mm_s2 *
+            braking_distance_mm);
 
-        speed_fraction = limit_symmetric(speed_fraction, 1.0F);
-        if (speed_fraction < 0.0F) {
-            speed_fraction = 0.0F;
+        if (target_speed_magnitude_mm_s >
+            controller->config.maximum_target_velocity_mm_s) {
+            target_speed_magnitude_mm_s =
+                controller->config.maximum_target_velocity_mm_s;
         }
         controller->target_velocity_mm_s = (float)direction *
-            controller->config.maximum_target_velocity_mm_s *
-            speed_fraction;
-        if (stationary && (delta_ms > 0U) &&
+            target_speed_magnitude_mm_s;
+        if ((delta_ms > 0U) &&
             (delta_ms <= controller->config.maximum_velocity_dt_ms)) {
             controller->stiction_assist_velocity_integral_acceleration_mm_s2 +=
                 controller->config.
@@ -258,12 +234,6 @@ static void update_stiction_kick(
                     controller->
                         stiction_assist_velocity_integral_acceleration_mm_s2,
                     controller->config.maximum_target_acceleration_mm_s2);
-        }
-        else {
-            /* Once the ball is moving, remove the breakaway integral so it
-             * cannot become stored energy during the target hand-off. */
-            controller->stiction_assist_velocity_integral_acceleration_mm_s2 =
-                0.0F;
         }
     }
 }
@@ -345,16 +315,12 @@ static bool valid_config(
           (config->stiction_kick_minimum_error_mm == 0.0F) &&
           (config->stiction_kick_maximum_velocity_mm_s == 0.0F) &&
           (config->stiction_assist_exit_distance_mm == 0.0F) &&
-          (config->stiction_kick_stationary_ms == 0U) &&
-          (config->stiction_kick_duration_ms == 0U) &&
-          (config->stiction_kick_cooldown_ms == 0U)) ||
+          (config->stiction_kick_duration_ms == 0U)) ||
          ((config->stiction_kick_minimum_error_mm > 0.0F) &&
           (config->stiction_kick_maximum_velocity_mm_s > 0.0F) &&
           (config->stiction_assist_velocity_gain_per_s > 0.0F) &&
           (config->stiction_assist_exit_distance_mm > 0.0F) &&
-          (config->stiction_kick_stationary_ms > 0U) &&
-          (config->stiction_kick_duration_ms > 0U) &&
-          (config->stiction_kick_cooldown_ms > 0U)));
+          (config->stiction_kick_duration_ms > 0U)));
 }
 
 bool Algorithm_BallPositionControl_Init(
@@ -370,7 +336,8 @@ bool Algorithm_BallPositionControl_Init(
     controller->config = *config;
     controller->target_position_mm = config->target_position_mm;
     controller->target_command_mm = config->target_position_mm;
-    reset_stiction_kick(controller);
+    controller->speed_handoff_enabled = true;
+    reset_speed_handoff_trip(controller);
     controller->initialized = true;
     return true;
 }
@@ -389,6 +356,7 @@ bool Algorithm_BallPositionControl_SetTargetPositionMm(
         controller->hold_active = false;
         controller->integral_acceleration_mm_s2 = 0.0F;
         reset_hold_candidate(controller);
+        reset_speed_handoff_trip(controller);
     }
     controller->target_command_mm = target_position_mm;
     return true;
@@ -411,6 +379,11 @@ static void update_position_loop_state(
     }
     if (controller->hold_active) {
         reset_speed_loop(controller);
+        return;
+    }
+    if (controller->stiction_state == ALGORITHM_BALL_STICTION_ACTIVE) {
+        controller->integral_acceleration_mm_s2 = 0.0F;
+        reset_hold_candidate(controller);
         return;
     }
 
@@ -488,6 +461,27 @@ bool Algorithm_BallPositionControl_ResetTargetPositionMm(
         return false;
     }
     controller->target_position_mm = target_position_mm;
+    return true;
+}
+
+bool Algorithm_BallPositionControl_SetSpeedHandoffEnabled(
+    Algorithm_BallPositionControl *controller,
+    bool enabled)
+{
+    if ((controller == NULL) || !controller->initialized) {
+        return false;
+    }
+    if (controller->speed_handoff_enabled == enabled) {
+        return true;
+    }
+    controller->speed_handoff_enabled = enabled;
+    controller->integral_acceleration_mm_s2 = 0.0F;
+    if (enabled) {
+        reset_speed_handoff_trip(controller);
+    }
+    else {
+        latch_position_loop(controller);
+    }
     return true;
 }
 
@@ -580,7 +574,7 @@ bool Algorithm_BallPositionControl_UpdateMeasurement(
     }
     controller->position_mm = position_mm;
     update_position_loop_state(controller, sample_ms, delta_ms);
-    update_stiction_kick(controller, sample_ms);
+    update_speed_handoff(controller, sample_ms);
     controller->last_sample_ms = sample_ms;
     controller->measurement_seen = true;
     return true;
@@ -625,7 +619,7 @@ bool Algorithm_BallPositionControl_SetEstimatedState(
     controller->measurement_seen = true;
     controller->velocity_valid = true;
     update_position_loop_state(controller, sample_ms, delta_ms);
-    update_stiction_kick(controller, sample_ms);
+    update_speed_handoff(controller, sample_ms);
     controller->last_sample_ms = sample_ms;
     return true;
 }
@@ -641,7 +635,7 @@ void Algorithm_BallPositionControl_ResetMeasurement(
     reset_speed_loop(controller);
     controller->last_sample_ms = 0U;
     reset_velocity_history(controller);
-    reset_stiction_kick(controller);
+    reset_speed_handoff_trip(controller);
     controller->measurement_seen = false;
     controller->velocity_valid = false;
     controller->hold_active = false;
@@ -655,11 +649,9 @@ bool Algorithm_BallPositionControl_ComputeRodAngleDeg(
     float velocity_gain;
     float position_acceleration;
     float speed_acceleration;
-    float speed_blend;
     float desired_acceleration;
     float assist_acceleration_limit;
     float assist_ramp_fraction;
-    float assist_normalized;
     float normalized;
     float angle;
 
@@ -712,26 +704,11 @@ bool Algorithm_BallPositionControl_ComputeRodAngleDeg(
             controller->
                 stiction_assist_velocity_integral_acceleration_mm_s2,
             assist_acceleration_limit);
-        speed_blend = fabsf(controller->target_velocity_mm_s) /
-            controller->config.maximum_target_velocity_mm_s;
-        speed_blend = limit_symmetric(speed_blend, 1.0F);
-        /* Smoothstep gives a continuous hand-off: the stiction speed loop
-         * owns large-error travel, then rapidly fades to the position loop
-         * across the configured near-target band.  The two loops are not
-         * added, so activating stiction cannot double the rod command. */
-        speed_blend = speed_blend * speed_blend *
-            (3.0F - 2.0F * speed_blend);
         controller->stiction_assist_acceleration_mm_s2 =
-            speed_blend * speed_acceleration;
-        desired_acceleration =
-            (1.0F - speed_blend) * position_acceleration +
-            controller->stiction_assist_acceleration_mm_s2;
-        assist_normalized = (1.0F + controller->config.inertia_ratio) *
-            controller->stiction_assist_acceleration_mm_s2 /
-            controller->config.gravity_mm_s2;
-        assist_normalized = limit_symmetric(assist_normalized, 1.0F);
-        controller->stiction_kick_angle_deg =
-            -asinf(assist_normalized) * BALL_POSITION_CONTROL_RAD_TO_DEG;
+            speed_acceleration;
+        /* Speed control exclusively owns the distant trip. No position-loop
+         * blend and no discrete stiction kick are added. */
+        desired_acceleration = speed_acceleration;
     }
     if (!isfinite(desired_acceleration)) {
         return false;

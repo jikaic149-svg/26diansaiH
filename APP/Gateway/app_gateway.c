@@ -414,6 +414,13 @@ static bool update_primary_tracking_target(
     bool total_angle_saturated;
     bool target_applied;
 
+    if (!Algorithm_BallPositionControl_SetSpeedHandoffEnabled(
+            &s_ball_controller,
+            (input == NULL) ||
+                (input->competition_mode !=
+                    GATEWAY_TASK3_COMPETITION_MODE))) {
+        return false;
+    }
     s_chassis_compensation_angle_deg = 0.0F;
     if (s_level_calibration_active) {
         s_chassis_acceleration_valid = false;
@@ -1224,12 +1231,8 @@ bool APP_Gateway_Init(uint32_t now_ms)
             GATEWAY_BALL_STICTION_MIN_ERROR_MM,
         .stiction_kick_maximum_velocity_mm_s =
             GATEWAY_BALL_STICTION_MAX_VELOCITY_MM_S,
-        .stiction_kick_stationary_ms =
-            GATEWAY_BALL_STICTION_STATIONARY_MS,
         .stiction_kick_duration_ms =
             GATEWAY_BALL_STICTION_DURATION_MS,
-        .stiction_kick_cooldown_ms =
-            GATEWAY_BALL_STICTION_COOLDOWN_MS,
     };
     const Algorithm_BallStateEstimator_Config estimator_config = {
         .measurement_polarity = GATEWAY_BALL_MEASUREMENT_POLARITY,

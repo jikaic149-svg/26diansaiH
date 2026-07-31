@@ -15,6 +15,7 @@
 #define DEVICE_PEER_LINK_CAR_SPEED_ABS_MAX_MM_PER_SECOND INT32_C(5000)
 #define DEVICE_PEER_LINK_CAR_ACCEL_ABS_MAX_MM_PER_SECOND2 INT32_C(50000)
 #define DEVICE_PEER_LINK_CAR_PLAN_ACCEL_ABS_MAX_MM_PER_SECOND2 INT32_C(5000)
+#define DEVICE_PEER_LINK_CAR_WHEEL_ACCEL_ABS_MAX_MM_PER_SECOND2 INT32_C(5000)
 #define DEVICE_PEER_LINK_CAR_PITCH_RATE_ABS_MAX_CENTI_DPS INT32_C(100000)
 #define DEVICE_PEER_LINK_COMPETITION_MODE_MIN UINT8_C(2)
 #define DEVICE_PEER_LINK_COMPETITION_MODE_MAX UINT8_C(6)
@@ -28,10 +29,12 @@ typedef struct {
     int32_t acceleration_z_mm_per_second2;
     int32_t pitch_rate_centi_dps;
     int32_t planned_acceleration_x_mm_per_second2;
+    int32_t filtered_wheel_acceleration_x_mm_per_second2;
     uint8_t competition_mode;
     bool competition_task_active;
     bool valid;
     bool planned_acceleration_valid;
+    bool filtered_wheel_acceleration_valid;
     uint32_t received_at_ms;
 } Device_PeerLink_CarState;
 

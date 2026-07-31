@@ -192,7 +192,7 @@
 #define GATEWAY_BALL_MAX_TARGET_ACCELERATION_MM_S2 180.0F
 
 /* 正常位置环生成目标球加速度：Kp*位置误差+Ki积分-Kd*视觉球速。
- * 位置参数恢复Git基线；速度环只在静止门控后负责起滚，并在靠近目标时平滑交接。 */
+ * 位置参数恢复Git基线；远距离旅程由速度PI独占，近目标低速后一次性切入位置环。 */
 #define GATEWAY_BALL_POSITION_KP_PER_S2      0.60F
 #define GATEWAY_BALL_POSITION_KI_PER_S3      0.000F
 #define GATEWAY_BALL_VELOCITY_KD_PER_S       0.55F
@@ -212,10 +212,9 @@
 #define GATEWAY_BALL_NEAR_TARGET_ERROR_MM        0.0F
 #define GATEWAY_BALL_NEAR_TARGET_KD_MULTIPLIER   0.0F
 
-/* 离散角度脉冲保持禁用。误差超过3 mm且球速不超过8 mm/s持续100 ms后启用
- * 破静摩擦速度环；远端由速度环独占，进入3..11 mm交接带后连续淡出并切回位置环。
- * 速度PI初始约0.245 deg，静止时积分增大，最高约1.47 deg；检测到起滚立即清积分，
- * 且速度环不与位置环直接叠加。 */
+/* 离散角度脉冲保持禁用。新目标最终误差超过11 mm时立即开始连续速度PI；目标球速按
+ * sqrt(2*a_max*(|e|-3 mm))限于30 mm/s，避免旧3..11 mm混环造成早刹。进入3 mm且
+ * 球速不超过8 mm/s（或越过目标）后锁存位置环，直到目标改变/测量复位；Task3禁用此路径。 */
 #define GATEWAY_BALL_STICTION_KICK_ANGLE_DEG          0.00F
 #define GATEWAY_BALL_STICTION_KICK_STEP_ANGLE_DEG     0.00F
 #define GATEWAY_BALL_STICTION_KICK_MAX_ANGLE_DEG      0.00F
@@ -224,9 +223,7 @@
 #define GATEWAY_BALL_STICTION_ASSIST_EXIT_DISTANCE_MM   8.0F
 #define GATEWAY_BALL_STICTION_MIN_ERROR_MM              3.0F
 #define GATEWAY_BALL_STICTION_MAX_VELOCITY_MM_S         8.0F
-#define GATEWAY_BALL_STICTION_STATIONARY_MS        UINT32_C(100)
 #define GATEWAY_BALL_STICTION_DURATION_MS          UINT32_C(250)
-#define GATEWAY_BALL_STICTION_COOLDOWN_MS          UINT32_C(100)
 
 /* 视觉串口实时调参的产品边界。协议值只有通过这些边界后才能进入控制器；
  * 角度、电流和raw保护仍在更下游独立生效。 */

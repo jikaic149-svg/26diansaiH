@@ -4,19 +4,21 @@
 也支持由BallStateEstimator输入带时间戳的`x/v`估计；后一条路径仍按实际间隔推进有界积分、
 破静摩擦状态和球速低通。测量真正过期时由Gateway调用`ResetMeasurement()`清除测量状态。
 
-正常位置环、破静摩擦速度环和实心球纯滚动逆模型为：
+正常位置环、远距离速度环和实心球纯滚动逆模型为：
 
 ```text
 a_position = Kp * (x_target - x) + I - Kd * v
+a_brake_distance = max(abs(x_command - x) - e_near, 0)
+v_target = direction * min(v_max, sqrt(2 * a_max * a_brake_distance))
 a_speed = limit(Kvp * (v_target - v) + integral(Kvi * (v_target - v)), +/-a_max)
-a_cmd = (1 - blend) * a_position + blend * a_speed
+a_cmd = speed_trip_active ? a_speed : a_position
 theta_ball = -asin((1 + 0.4) * a_cmd / g)
 ```
 
-`blend`只在钢球满足低速静止门控后启用；大误差时为1，由速度环克服静摩擦并驱动起滚，
-进入配置的近目标交接带后按smoothstep连续降到0，由位置环完成逼近和停车。两个环不直接
-相加，避免破静摩擦期间把杆角重复放大。速度积分只在球速不超过静止门槛时累积；一旦检测
-到起滚立即清零，防止静摩擦积分变成运动阶段的冲击能量。
+每次目标命令形成一次锁存旅程：最终目标误差超过入口阈值时速度PI立即、连续且独占控制，
+目标球速按剩余制动距离下降；进入近目标且球速足够低（或已经越过目标）后一次性切入位置环。
+测量噪声不会让同一旅程重新切回速度环；只有新目标或`ResetMeasurement()`才会重新判定。
+离散kick、100 ms等待门控和速度/位置smoothstep混环均不再参与控制；Task3运行时旁路速度旅程。
 
 统一物理坐标以右侧固定转轴指向左侧执行端为`x>0`，左侧执行端抬高为`theta>0`。
 MaixCAM当前输出画面左负右正，所以配置`measurement_polarity=-1`后，物理左侧为正。

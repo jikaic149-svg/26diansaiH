@@ -560,83 +560,11 @@ static Algorithm_BallPositionControl_Config stiction_config(void)
     config.stiction_assist_exit_distance_mm = 2.0F;
     config.stiction_kick_minimum_error_mm = 8.0F;
     config.stiction_kick_maximum_velocity_mm_s = 8.0F;
-    config.stiction_kick_stationary_ms = 100U;
     config.stiction_kick_duration_ms = 120U;
-    config.stiction_kick_cooldown_ms = 200U;
     return config;
 }
 
-static void test_stiction_speed_assist_gate_direction_and_continuous_exit(void)
-{
-    Algorithm_BallPositionControl controller;
-    const Algorithm_BallPositionControl_Config config = stiction_config();
-    float angle;
-
-    assert(Algorithm_BallPositionControl_Init(&controller, &config));
-    assert(Algorithm_BallPositionControl_UpdateMeasurement(
-        &controller, 0U, 20.0F));
-    assert(Algorithm_BallPositionControl_UpdateMeasurement(
-        &controller, 20U, 20.0F));
-    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
-        &controller, &angle));
-    assert(close_enough(angle, 0.0F, 0.001F));
-
-    /* A noisy derivative exceeds the instantaneous speed threshold, but
-     * sub-millimetre displacement must not restart the dwell timer. */
-    assert(Algorithm_BallPositionControl_UpdateMeasurement(
-        &controller, 60U, 19.5F));
-    assert(Algorithm_BallPositionControl_UpdateMeasurement(
-        &controller, 120U, 19.5F));
-    assert(controller.stiction_state == ALGORITHM_BALL_STICTION_ACTIVE);
-    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
-        &controller, &angle));
-    assert(close_enough(controller.target_velocity_mm_s, -20.0F, 0.001F));
-    assert(close_enough(
-        controller.stiction_assist_acceleration_mm_s2, -15.0F, 0.001F));
-    assert(angle > 0.0F);
-
-    assert(Algorithm_BallPositionControl_UpdateMeasurement(
-        &controller, 220U, 20.0F));
-    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
-        &controller, &angle));
-    assert(angle > 0.0F);
-    assert(Algorithm_BallPositionControl_UpdateMeasurement(
-        &controller, 240U, 20.0F));
-    assert(controller.stiction_state == ALGORITHM_BALL_STICTION_ACTIVE);
-    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
-        &controller, &angle));
-    assert(angle > 0.0F);
-
-    assert(Algorithm_BallPositionControl_UpdateMeasurement(
-        &controller, 340U, 17.0F));
-    assert(controller.stiction_state == ALGORITHM_BALL_STICTION_ACTIVE);
-    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
-        &controller, &angle));
-    assert(angle < 0.0F);
-
-    assert(Algorithm_BallPositionControl_UpdateMeasurement(
-        &controller, 440U, 7.0F));
-    assert(controller.stiction_state == ALGORITHM_BALL_STICTION_IDLE);
-    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
-        &controller, &angle));
-    assert(close_enough(angle, 0.0F, 0.001F));
-
-    assert(Algorithm_BallPositionControl_UpdateMeasurement(
-        &controller, 540U, 20.0F));
-    assert(Algorithm_BallPositionControl_UpdateMeasurement(
-        &controller, 640U, 20.0F));
-    assert(controller.stiction_state == ALGORITHM_BALL_STICTION_WAITING);
-    assert(Algorithm_BallPositionControl_UpdateMeasurement(
-        &controller, 740U, 20.0F));
-    assert(controller.stiction_state == ALGORITHM_BALL_STICTION_ACTIVE);
-    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
-        &controller, &angle));
-    assert(close_enough(
-        controller.stiction_assist_acceleration_mm_s2, -15.0F, 0.001F));
-    assert(angle > 0.0F);
-}
-
-static void test_stiction_speed_loop_is_exclusive_and_blends_to_position(void)
+static void test_speed_handoff_trip_is_immediate_exclusive_and_latched(void)
 {
     Algorithm_BallPositionControl controller;
     Algorithm_BallPositionControl_Config config = stiction_config();
@@ -646,171 +574,117 @@ static void test_stiction_speed_loop_is_exclusive_and_blends_to_position(void)
     assert(Algorithm_BallPositionControl_Init(&controller, &config));
     assert(Algorithm_BallPositionControl_SetEstimatedState(
         &controller, 0U, 20.0F, 0.0F));
-    assert(Algorithm_BallPositionControl_SetEstimatedState(
-        &controller, 100U, 20.0F, 0.0F));
     assert(controller.stiction_state == ALGORITHM_BALL_STICTION_ACTIVE);
     assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
         &controller, &angle));
-    /* Far from the target the -15 mm/s2 speed-loop output replaces, rather
-     * than adds to, the -20 mm/s2 position-loop output. */
-    assert(close_enough(
-        controller.stiction_assist_acceleration_mm_s2, -15.0F, 0.001F));
-    assert(close_enough(
-        controller.desired_acceleration_mm_s2, -15.0F, 0.001F));
+    assert(close_enough(controller.target_velocity_mm_s, -20.0F, 0.001F));
+    assert(close_enough(controller.desired_acceleration_mm_s2,
+        -15.0F, 0.001F));
+    assert(close_enough(controller.stiction_kick_angle_deg, 0.0F, 0.001F));
 
+    /* At 9 mm the model target remains 7.746 mm/s instead of the old 50%
+     * position/speed blend. The speed loop still owns the output. */
     assert(Algorithm_BallPositionControl_SetEstimatedState(
-        &controller, 200U, 9.0F, 0.0F));
+        &controller, 100U, 9.0F, -4.0F));
+    assert(controller.stiction_state == ALGORITHM_BALL_STICTION_ACTIVE);
+    assert(close_enough(controller.target_velocity_mm_s,
+        -sqrtf(60.0F), 0.001F));
     assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
         &controller, &angle));
-    /* Error 9 mm is halfway across the 8..10 mm hand-off band. Smoothstep is
-     * 0.5: -9 position and -20 speed blend to -14.5 mm/s2. */
-    assert(close_enough(controller.target_velocity_mm_s, -10.0F, 0.001F));
-    assert(close_enough(
-        controller.stiction_assist_acceleration_mm_s2, -10.0F, 0.001F));
-    assert(close_enough(
-        controller.desired_acceleration_mm_s2, -14.5F, 0.001F));
+    assert(close_enough(controller.desired_acceleration_mm_s2,
+        2.0F * (-sqrtf(60.0F) + 4.0F), 0.001F));
 
+    /* Near target is not enough while speed is high. Low speed then performs
+     * one position handoff; later error growth cannot restart speed control. */
     assert(Algorithm_BallPositionControl_SetEstimatedState(
-        &controller, 300U, 8.0F, 0.0F));
-    assert(controller.stiction_state == ALGORITHM_BALL_STICTION_IDLE);
+        &controller, 200U, 8.0F, -9.0F));
+    assert(controller.stiction_state == ALGORITHM_BALL_STICTION_ACTIVE);
+    assert(Algorithm_BallPositionControl_SetEstimatedState(
+        &controller, 300U, 7.0F, -4.0F));
+    assert(controller.stiction_state ==
+        ALGORITHM_BALL_STICTION_POSITION_LATCHED);
+    assert(Algorithm_BallPositionControl_SetEstimatedState(
+        &controller, 400U, 20.0F, 0.0F));
+    assert(controller.stiction_state ==
+        ALGORITHM_BALL_STICTION_POSITION_LATCHED);
     assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
         &controller, &angle));
     assert(close_enough(controller.target_velocity_mm_s, 0.0F, 0.001F));
-    assert(close_enough(
-        controller.stiction_assist_acceleration_mm_s2, 0.0F, 0.001F));
-    assert(close_enough(
-        controller.desired_acceleration_mm_s2, -8.0F, 0.001F));
+    assert(close_enough(controller.desired_acceleration_mm_s2,
+        -20.0F, 0.001F));
 }
 
-static void test_stiction_speed_integral_grows_until_motion(void)
+static void test_new_target_rearms_using_final_command(void)
+{
+    Algorithm_BallPositionControl controller;
+    const Algorithm_BallPositionControl_Config config = stiction_config();
+
+    assert(Algorithm_BallPositionControl_Init(&controller, &config));
+    assert(Algorithm_BallPositionControl_SetEstimatedState(
+        &controller, 0U, 0.0F, 0.0F));
+    assert(Algorithm_BallPositionControl_SetTargetPositionMm(
+        &controller, 40.0F));
+    assert(close_enough(controller.target_position_mm, 0.0F, 0.001F));
+    assert(Algorithm_BallPositionControl_SetEstimatedState(
+        &controller, 20U, 0.0F, 0.0F));
+    assert(controller.stiction_state == ALGORITHM_BALL_STICTION_ACTIVE);
+    assert(close_enough(controller.target_velocity_mm_s, 20.0F, 0.001F));
+}
+
+static void test_speed_pi_continues_after_motion(void)
 {
     Algorithm_BallPositionControl controller;
     Algorithm_BallPositionControl_Config config = stiction_config();
-    float angle;
 
     config.maximum_target_velocity_mm_s = 30.0F;
     config.maximum_target_acceleration_mm_s2 = 180.0F;
     config.stiction_assist_velocity_gain_per_s = 1.0F;
     config.stiction_assist_velocity_integral_gain_per_s2 = 10.0F;
-    config.stiction_kick_duration_ms = 250U;
     assert(Algorithm_BallPositionControl_Init(&controller, &config));
     assert(Algorithm_BallPositionControl_SetEstimatedState(
         &controller, 0U, 20.0F, 0.0F));
     assert(Algorithm_BallPositionControl_SetEstimatedState(
         &controller, 100U, 20.0F, 0.0F));
-    assert(controller.stiction_state == ALGORITHM_BALL_STICTION_ACTIVE);
-    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
-        &controller, &angle));
     assert(close_enough(
         controller.stiction_assist_velocity_integral_acceleration_mm_s2,
         -30.0F, 0.001F));
-    assert(close_enough(
-        controller.desired_acceleration_mm_s2, -60.0F, 0.001F));
-
     assert(Algorithm_BallPositionControl_SetEstimatedState(
-        &controller, 200U, 20.0F, 0.0F));
-    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
-        &controller, &angle));
+        &controller, 200U, 19.0F, -10.0F));
     assert(close_enough(
         controller.stiction_assist_velocity_integral_acceleration_mm_s2,
-        -60.0F, 0.001F));
-    assert(close_enough(
-        controller.desired_acceleration_mm_s2, -90.0F, 0.001F));
-
-    assert(Algorithm_BallPositionControl_SetEstimatedState(
-        &controller, 300U, 19.0F, -10.0F));
-    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
-        &controller, &angle));
-    assert(close_enough(
-        controller.stiction_assist_velocity_integral_acceleration_mm_s2,
-        0.0F, 0.001F));
-    assert(close_enough(
-        controller.desired_acceleration_mm_s2, -20.0F, 0.001F));
+        -50.0F, 0.001F));
 }
 
-static void test_estimated_state_advances_integral_and_stiction(void)
+static void test_speed_handoff_runtime_gate_for_task3(void)
 {
     Algorithm_BallPositionControl controller;
     Algorithm_BallPositionControl_Config config = stiction_config();
+    float angle;
 
     config.position_gain_per_s2 = 1.0F;
-    config.position_integral_gain_per_s3 = 0.5F;
     assert(Algorithm_BallPositionControl_Init(&controller, &config));
+    assert(Algorithm_BallPositionControl_SetSpeedHandoffEnabled(
+        &controller, false));
     assert(Algorithm_BallPositionControl_SetEstimatedState(
         &controller, 0U, 20.0F, 0.0F));
+    assert(controller.stiction_state ==
+        ALGORITHM_BALL_STICTION_POSITION_LATCHED);
+    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
+        &controller, &angle));
+    assert(close_enough(controller.desired_acceleration_mm_s2,
+        -20.0F, 0.001F));
+    assert(close_enough(controller.stiction_assist_acceleration_mm_s2,
+        0.0F, 0.001F));
+
+    assert(Algorithm_BallPositionControl_SetSpeedHandoffEnabled(
+        &controller, true));
     assert(Algorithm_BallPositionControl_SetEstimatedState(
-        &controller, 100U, 20.0F, 0.0F));
-    assert(close_enough(
-        controller.integral_acceleration_mm_s2, -1.0F, 0.001F));
+        &controller, 20U, 20.0F, 0.0F));
     assert(controller.stiction_state == ALGORITHM_BALL_STICTION_ACTIVE);
-    assert(close_enough(controller.target_velocity_mm_s, -20.0F, 0.001F));
-}
-
-static void test_stiction_speed_assist_hands_off_near_target(void)
-{
-    Algorithm_BallPositionControl controller;
-    const Algorithm_BallPositionControl_Config config = stiction_config();
-    float angle;
-
-    assert(Algorithm_BallPositionControl_Init(&controller, &config));
-    assert(Algorithm_BallPositionControl_UpdateMeasurement(
-        &controller, 0U, -20.0F));
-    assert(Algorithm_BallPositionControl_UpdateMeasurement(
-        &controller, 20U, -20.0F));
-    assert(Algorithm_BallPositionControl_UpdateMeasurement(
-        &controller, 120U, -20.0F));
-    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
-        &controller, &angle));
-    assert(angle < 0.0F);
-
-    assert(Algorithm_BallPositionControl_UpdateMeasurement(
-        &controller, 140U, -18.0F));
-    assert(controller.stiction_state == ALGORITHM_BALL_STICTION_ACTIVE);
-    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
-        &controller, &angle));
-    assert(angle > 0.0F);
-
-    assert(Algorithm_BallPositionControl_UpdateMeasurement(
-        &controller, 240U, -7.0F));
-    assert(controller.stiction_state == ALGORITHM_BALL_STICTION_IDLE);
-    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
-        &controller, &angle));
-    assert(close_enough(angle, 0.0F, 0.001F));
-
-    Algorithm_BallPositionControl_ResetMeasurement(&controller);
-    assert(Algorithm_BallPositionControl_UpdateMeasurement(
-        &controller, 1000U, 8.0F));
-    assert(Algorithm_BallPositionControl_UpdateMeasurement(
-        &controller, 1100U, 8.0F));
-    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
-        &controller, &angle));
-    assert(close_enough(angle, 0.0F, 0.001F));
-    assert(controller.stiction_state == ALGORITHM_BALL_STICTION_IDLE);
-}
-
-static void test_stiction_direction_uses_nonzero_target_error(void)
-{
-    Algorithm_BallPositionControl controller;
-    const Algorithm_BallPositionControl_Config config = stiction_config();
-    float angle;
-
-    assert(Algorithm_BallPositionControl_Init(&controller, &config));
-    assert(Algorithm_BallPositionControl_ResetTargetPositionMm(
-        &controller, 40.0F));
-    /* Position is positive, but target-position is also positive.  A
-     * zero-origin implementation would choose the opposite kick direction. */
-    assert(Algorithm_BallPositionControl_UpdateMeasurement(
-        &controller, 0U, 20.0F));
-    assert(Algorithm_BallPositionControl_UpdateMeasurement(
-        &controller, 20U, 20.0F));
-    assert(Algorithm_BallPositionControl_UpdateMeasurement(
-        &controller, 120U, 20.0F));
-    assert(controller.stiction_state == ALGORITHM_BALL_STICTION_ACTIVE);
-    assert(controller.stiction_error_direction == 1);
-    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
-        &controller, &angle));
-    assert(close_enough(controller.target_velocity_mm_s, 20.0F, 0.001F));
-    assert(angle < 0.0F);
+    assert(Algorithm_BallPositionControl_SetSpeedHandoffEnabled(
+        &controller, false));
+    assert(controller.stiction_state ==
+        ALGORITHM_BALL_STICTION_POSITION_LATCHED);
 }
 
 static void test_invalid_stiction_configuration(void)
@@ -855,12 +729,10 @@ int main(void)
     test_invalid_quiet_hold_configuration();
     test_near_target_velocity_damping_gain_schedule();
     test_invalid_near_target_gain_schedule();
-    test_stiction_speed_assist_gate_direction_and_continuous_exit();
-    test_stiction_speed_loop_is_exclusive_and_blends_to_position();
-    test_stiction_speed_integral_grows_until_motion();
-    test_estimated_state_advances_integral_and_stiction();
-    test_stiction_speed_assist_hands_off_near_target();
-    test_stiction_direction_uses_nonzero_target_error();
+    test_speed_handoff_trip_is_immediate_exclusive_and_latched();
+    test_new_target_rearms_using_final_command();
+    test_speed_pi_continues_after_motion();
+    test_speed_handoff_runtime_gate_for_task3();
     test_invalid_stiction_configuration();
     puts("ball position control tests: PASS");
     return 0;

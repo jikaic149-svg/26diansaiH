@@ -251,6 +251,39 @@ static void test_car_planned_acceleration_extension(void)
         &link, 120U, 50U, &state));
 }
 
+static void test_car_filtered_wheel_acceleration_extension(void)
+{
+    Device_PeerLink link;
+    const Device_PeerLink_Config config = make_config();
+    Device_PeerLink_CarState state;
+
+    fake_reset();
+    assert(Device_PeerLink_Init(&link, &config, 100U));
+    queue_packet(
+        "CAR", 10U, "2,1000,234,100,9807,0,1,6,0,0,1,-75,1");
+    assert(Device_PeerLink_Step(&link, 100U));
+    assert(Device_PeerLink_GetRemoteCarState(
+        &link, 100U, 50U, &state));
+    assert(state.planned_acceleration_valid);
+    assert(state.planned_acceleration_x_mm_per_second2 == 0);
+    assert(state.filtered_wheel_acceleration_valid);
+    assert(state.filtered_wheel_acceleration_x_mm_per_second2 == -75);
+
+    /* An explicit invalid bit requires the corresponding value to be zero. */
+    queue_packet(
+        "CAR", 11U, "2,1010,234,100,9807,0,1,6,0,0,1,1,0");
+    assert(Device_PeerLink_Step(&link, 110U));
+    assert(link.status.car_state_payload_error_count == 1U);
+    assert(link.status.car_state_rx_count == 1U);
+
+    /* Wheel acceleration cannot be valid without a valid trajectory plan. */
+    queue_packet(
+        "CAR", 11U, "2,1010,234,100,9807,0,1,6,0,0,0,1,1");
+    assert(Device_PeerLink_Step(&link, 111U));
+    assert(link.status.car_state_payload_error_count == 2U);
+    assert(link.status.car_state_rx_count == 1U);
+}
+
 static void test_car_rejects_malformed_and_unknown_types(void)
 {
     Device_PeerLink link;
@@ -592,6 +625,7 @@ int main(void)
     test_heartbeat_only_tx_and_busy_sequence();
     test_car_boundaries_validity_and_freshness();
     test_car_planned_acceleration_extension();
+    test_car_filtered_wheel_acceleration_extension();
     test_car_rejects_malformed_and_unknown_types();
     test_car_order_wrap_and_restart();
     test_local_freshness_wrap();
