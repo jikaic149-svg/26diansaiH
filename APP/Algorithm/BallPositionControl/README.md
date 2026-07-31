@@ -23,7 +23,7 @@ VIS过期时Gateway清测量状态并令该反馈项归零，不自动失能电�
 运行时目标由`SetTargetPositionMm()`只更新指令值，再由`AdvanceTarget()`按配置斜率推进
 活动参考；切换目标不会清位置、差分速度或速度有效位。Gateway允许在停机和回零phase 1
 预设目标，并跨停止/再次启动保留；只有进入phase 2且视觉测量有效时，杆球模型输出才实际
-进入杆角命令。产品目标范围为`[-120,+120] mm`，斜率为`50 mm/s`。
+进入杆角命令。产品目标范围为`[-120,+120] mm`，当前产品斜率为`80 mm/s`。
 
 `SetEstimatedState()`是默认关闭的BallStateEstimator接入边界：输入已是物理坐标的
 `x/v`，不再应用相机极性，也不再做差分。当前`GATEWAY_BALL_KALMAN_ENABLE=0`，

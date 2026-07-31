@@ -315,8 +315,7 @@ static bool update_kalman_ball_feedback(
     Algorithm_BallStateEstimator_State state;
     float rod_angle_deg;
 
-    if ((input == NULL) || !input->ball_measurement_valid ||
-        !get_estimator_rod_angle_deg(now_ms, &rod_angle_deg)) {
+    if (!get_estimator_rod_angle_deg(now_ms, &rod_angle_deg)) {
         reset_estimated_ball_feedback(now_ms);
         return true;
     }
@@ -329,8 +328,9 @@ static bool update_kalman_ball_feedback(
         s_last_ball_sequence_seen = false;
         return true;
     }
-    if (!s_last_ball_sequence_seen ||
-        (input->ball_sequence != s_last_ball_sequence)) {
+    if ((input != NULL) && input->ball_measurement_valid &&
+        (!s_last_ball_sequence_seen ||
+         (input->ball_sequence != s_last_ball_sequence))) {
         if (!Algorithm_BallStateEstimator_CorrectPosition(
                 &s_ball_estimator,
                 now_ms,
@@ -407,6 +407,9 @@ static bool update_primary_tracking_target(
                 now_ms, input, &ball_angle_deg)) {
             return false;
         }
+        s_ball_measurement_valid =
+            Algorithm_BallStateEstimator_IsTrusted(
+                &s_ball_estimator, now_ms);
     }
     else if (s_ball_measurement_valid) {
         if (!s_last_ball_sequence_seen ||
@@ -1373,6 +1376,10 @@ void APP_Gateway_Step(
     const uint32_t target_elapsed_ms =
         now_ms - s_last_ball_target_update_ms;
 
+    /* Report raw limiting for the current control cycle. The protection
+     * itself remains active; only the diagnostic state stops latching an
+     * old recovery or rejected target forever. */
+    s_motor_raw_limit_blocked = false;
     s_last_ball_target_update_ms = now_ms;
     if (!Algorithm_BallPositionControl_AdvanceTarget(
             &s_ball_controller, target_elapsed_ms)) {

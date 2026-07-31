@@ -1805,3 +1805,22 @@
 - 待确认事项：本轮未烧录、未启动MaixPy、未按KEY、未发送Enable/电流命令。部署F407前
   必须再次确认电机已失能；按用户要求烧录后不做verify/readback，视觉应用必须由设备完整
   工程的`maixpy_run.py`入口启动，且不得代用户按KEY。
+## 2026-07-31：任意位置闭环首轮提速、增阻尼与破静摩擦增强
+
+- 结论：已根据MaixCAM实测轨迹完成首轮参数更新、烧录和视觉重连；电机保持失能，动态效果待用户按KEY验证。
+- 修改原因：目标`-59 mm`时，MaixCAM记录到小球由`+34 mm`长时间静止后冲到`-72 mm`，随后多次往返，表现为起步脉冲偏弱、闭环响应慢且阻尼不足。
+- 最终决策：球外环改为`Kp/Ki/Kd=1.00/0.030/1.00`，活动目标斜率由`50`提高到`80 mm/s`。破静摩擦脉冲改为`0.45°`起步、每次`+0.10°`、上限`0.70°`，误差门槛`3 mm`、静止速度门槛`12 mm/s`、静止门控/脉宽/冷却分别为`150/150/200 ms`。raw限制保护本身不变，仅把`motor_raw_limit_blocked`诊断从历史粘滞改为当前控制周期状态。
+- 涉及文件：`config/core_config.h`、`APP/Gateway/app_gateway.c`、根`README.md`、`APP/Algorithm/BallPositionControl/README.md`和本记录；Maix端同步`vision_config.py`运行时VTP。
+- 验证方式和结果：BallPositionControl和全链路极性主机测试均PASS；ARM Debug clean-first链接成功，FLASH/RAM为`44948/20648 B`。确认VST为停机失能后，使用CMSIS-DAP `0416:5051`写入并复位，OpenOCD报告`Programming Finished`；按要求未做verify/readback。Maix重启后VPA接受`1.000/0.030/1.000`，持续VST显示`fault=0x0000`。
+- 已知限制：本轮只完成软件、烧录和失能状态链路验证；更强脉冲是否一次起滚、超调是否下降、任意目标停车精度仍需实机动态确认。
+- 待确认事项：用户按KEY后先做小范围目标变化；观察起滚延迟、首次峰值、过零次数和最终误差，异常时立即再按KEY停机。
+
+## 2026-07-31：F407杆球模型视觉帧间插值启用
+
+- 结论：已启用现有三状态固定滞后Kalman；YOLO实测帧负责位置校正，F407以实际杆角和BMI088底盘加速度在1 ms Gateway周期内传播位置、速度和模型偏差，最后一次实测达到100 ms后停止球外环输出。
+- 修改原因：约50 Hz视觉帧之间以及短时漏检会令原视觉差分控制离散或立即回水平；用户要求先用简单方案提高最终控制计算频率，不引入自适应权重或目标轮速差分。
+- 最终决策：设置`GATEWAY_BALL_KALMAN_ENABLE=1`；无当前视觉实测时不再立即重置估计器，只要杆角反馈有效且估计仍可信就继续模型预测。只接受YOLO实测帧作Kalman校正，Maix预测帧不作为二次测量。PID保持`1.00/0.030/1.00`，静摩擦脉冲和全部电流/raw保护不变。
+- 涉及文件：`config/core_config.h`、`APP/Gateway/app_gateway.c`、根README、`APP/Algorithm/BallStateEstimator/README.md`和本记录。
+- 验证方式和结果：BallStateEstimator严格主机测试PASS；Maix 12项Python测试PASS；ARM Debug clean-first完整链接成功，FLASH/RAM为`47732/20648 B`。烧录前VST为`status=0x323F`、`theta=0`且电机未使能；CMSIS-DAP `0416:5051`写入并复位，OpenOCD报告`Programming Finished`，按要求未做verify/readback。
+- 已知限制：1 kHz结果是模型状态预测，不是1 kHz新视觉测量；首次可信输出需要可靠杆角反馈并接受至少3帧真实视觉。底盘三状态融合、自适应高低通权重和目标轮速差分均未启用。
+- 待确认事项：用户按KEY后观察VST的估计有效/速度有效位、短时`NO_BALL`期间杆角连续性、超调和稳定时间；异常立即再按KEY停机。

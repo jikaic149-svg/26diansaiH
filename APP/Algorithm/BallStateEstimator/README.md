@@ -1,6 +1,6 @@
 # BallStateEstimator
 
-该模块是无MCU/RTOS依赖的三状态固定滞后Kalman估计器，默认不启用。状态为球位置
+该模块是无MCU/RTOS依赖的三状态固定滞后Kalman估计器，当前用于滚球闭环。状态为球位置
 `x`、球速度`v`和模型残差等效加速度`b`。实心球滚动模型是：
 
 ```text
