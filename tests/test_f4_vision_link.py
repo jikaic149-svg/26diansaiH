@@ -64,14 +64,17 @@ class F4VisionLinkTest(unittest.TestCase):
         self.assertEqual(link.last_vst["stiction_kick_mdeg"], -450)
         self.assertEqual(link.last_vst["competition_mode"], 6)
 
-    def test_decoders_reject_reserved_or_malformed_fields(self):
+    def test_decoders_accept_task_active_and_reject_reserved_or_malformed(self):
         accepted = decode_vpa_packet(1, "2,1,1200,150,1800")
         self.assertTrue(accepted["accepted"])
         with self.assertRaises(ValueError):
             decode_vpa_packet(1, "2,2,1200,150,1800")
+        task_active = decode_vst_packet(
+            1, "0,0,0,0,0,0,0,0,0,0,0,0,16384,0,3")
+        self.assertEqual(task_active["status_flags"] & 0x4000, 0x4000)
         with self.assertRaises(ValueError):
             decode_vst_packet(
-                1, "0,0,0,0,0,0,0,0,0,0,0,0,16384,0,0")
+                1, "0,0,0,0,0,0,0,0,0,0,0,0,0,32768,0")
         with self.assertRaises(ValueError):
             decode_vst_packet(
                 1, "0,0,0,0,0,0,0,0,0,0,0,0,0,0,1")

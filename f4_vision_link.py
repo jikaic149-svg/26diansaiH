@@ -193,8 +193,8 @@ def decode_vst_packet(sequence, payload):
         "fault_bits": _parse_uint(fields[13], 0xFFFF),
         "competition_mode": _parse_uint(fields[14], 6),
     }
-    if status["status_flags"] & 0x4000 or status["fault_bits"] & 0x8000:
-        raise ValueError("VST reserved bit is nonzero")
+    if status["fault_bits"] & 0x8000:
+        raise ValueError("VST reserved fault bit is nonzero")
     if status["competition_mode"] not in (0, 2, 3, 4, 5, 6):
         raise ValueError("VST competition mode is invalid")
     return status

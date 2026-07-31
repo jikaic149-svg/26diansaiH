@@ -1,5 +1,13 @@
 # PROCESS
 
+## 2026-08-01 修复Task3活动位被视觉解码器拒收
+
+- 修改原因：F407已正式用VST `status_flags.bit14/0x4000`转发G3519的Task3活动状态，但Maix解码器仍把该位当保留位，导致活动帧被整帧拒收，Task3无法启动。
+- 最终决策：允许VST状态位`0x4000`进入任务管理器；仅保留`fault_bits.bit15`的保留位检查。Task3仍要求本地滚球环已使能、视觉有效且无故障才开始目标序列，G3519 KEY不控制F407电机使能。
+- 涉及文件：`f4_vision_link.py`、`tests/test_f4_vision_link.py`及本记录。
+- 验证与部署：VST与任务管理器8项单测通过，覆盖`0x4000`接受和fault保留位拒绝。完整17个Python文件已同步至`/root/steelball_horizontal_trough_pro`并由`maixpy_run.py`重启；单进程持续运行，60 FPS相机、VIS和VST在线。部署时F407回报mode 2、命令电流0、速度0，未启动电机。
+- 待确认：切换到M3并在F407本地滚球环已就绪后，实测G3519第一次短按启动、第二次短按停止。
+
 ## 2026-08-01 Task3改由G3519 KEY直接启停
 
 - 修改原因：用户否决“选择M3后还要F407失能并重新按本地KEY”的`WAIT_REARM`设计，明确第一次G3519短按启动、第二次短按结束。
