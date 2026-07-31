@@ -1,0 +1,7 @@
+.maixpy/
+__pycache__/
+*.py[cod]
+*.log
+*.csv
+.DS_Store
+Thumbs.db

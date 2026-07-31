@@ -1,0 +1,17 @@
+id: h2026h
+name: H2026_Horizontal
+version: 1.0.0
+author: wzy
+icon: app.png
+desc: 横向水管凹槽钢球位置测试
+files:
+  - ball_axis_position.py
+  - f4_vision_link.py
+  - horizontal_trough_tracker.py
+  - kalman_tracker.py
+  - main.py
+  - quick_position_calibration.py
+  - rtsp_debug_stream.py
+  - threshold_tuning_menu.py
+  - vofa_udp_telemetry.py
+  - vision_config.py

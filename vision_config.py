@@ -1,0 +1,208 @@
+"""MaixCAM2横向钢球凹槽视觉配置。
+
+本目录是从竖向水管版本复制出的独立实验。横向位置使用25cm物理长度做简单线性
+换算，不启用旧机位透视打表。颜色阈值与ROI必须按新车结构上板复测。
+"""
+
+
+# ---------- YOLO与相机 ----------
+
+# .mud与对应模型文件均预先放在板端/root/mymodel。
+MODEL_PATH = (
+    "/root/mymodel/"
+    "steelball_yolo11n_v32_best_320x416_maixcam2.mud"
+)
+CONF_TH = 0.12
+IOU_TH = 0.45
+TRACKER_ENABLED = True
+CAMERA_FPS = 60
+
+
+# ---------- RTSP原始画面调试 ----------
+
+# 横向算法首轮测试默认关闭图传，避免编码与Wi-Fi干扰性能判断。
+RTSP_DEBUG_ENABLED = False
+RTSP_REQUIRED = False
+RTSP_WIFI_MODE = "AP"  # "EXISTING" 或 "AP"
+RTSP_FPS = 15
+RTSP_BITRATE = 1_000_000
+RTSP_WAIT_IP_MS = 5000
+RTSP_AP_SSID = "H_BALL_MAIXCAM"
+RTSP_AP_PASSWORD = "88888888"
+
+# Git版本不保存个人热点凭据；False时程序结束后保留板端AP。
+RTSP_RESTORE_STA_ON_EXIT = False
+RTSP_RESTORE_STA_SSID = ""
+RTSP_RESTORE_STA_PASSWORD = ""
+RTSP_RESTORE_STA_TIMEOUT_SEC = 20
+
+# ---------- VOFA+ FireWater UDP调试 ----------
+
+# VOFA+截图中的“本地端口”是电脑接收端口；板端广播到同一个1347端口。
+# 本模块只发UDP，不负责start_ap/connect，避免调试结束后改变Wi-Fi持久状态。
+VOFA_UDP_ENABLED = True
+VOFA_UDP_HOST = "255.255.255.255"
+VOFA_UDP_PORT = 1347
+# 0表示每个完成的视觉循环都尝试发送，避免轻重帧交替时被25ms节流跳帧。
+VOFA_UDP_INTERVAL_MS = 0
+VOFA_UDP_BROADCAST = True
+
+
+# ---------- F407 独立 UART 闭环链路 ----------
+
+# MaixCAM2固定使用B0/B1、UART2、/dev/ttyS2，115200 8N1；板级映射
+# 由f4_vision_link.py持有。VIS最多50 Hz，BUSY/短写不阻塞视觉主循环。
+F4_UART_ENABLED = True
+F4_UART_REQUIRED = False
+F4_UART_SEND_INTERVAL_MS = 20
+F4_UART_TX_TIMEOUT_MS = 100
+F4_UART_RX_LIMIT = 256
+# 临时直接控制模式：按用户要求跳过现场点标定，允许当前25 cm线性坐标进入
+# F407控制门。该值不代表已完成精度标定；恢复正式标定流程时改回False。
+F4_UART_CALIBRATION_VALID = True
+
+# 运行时通过同一全双工视觉串口发送VTP，不需要重新编译F407。F407会再次按
+# 产品边界校验，并以VPA回报实际生效值；该命令不启动电机、不改变球目标。
+F4_PID_TUNING_ENABLED = True
+F4_PID_KP_PER_S2 = 0.60
+F4_PID_KI_PER_S3 = 0.03
+F4_PID_KD_PER_S = 0.55
+
+# 快速实物闭环：槽轴识别失效时，按用户授权跳过现场标定，以整幅画面宽度
+# 线性映射为25 cm水平轴。该模式只依赖YOLO球心，完成槽端标定后应关闭。
+F4_DIRECT_FRAME_AXIS_FALLBACK_ENABLED = True
+
+
+# ---------- 横向凹槽颜色与逐列扫描 ----------
+
+TROUGH_TRACKING_ENABLED = True
+
+# 当前新结构使用白色半截水管，默认直接选择WHITE。若换回绿管只改为GREEN。
+TROUGH_COLOR_MODE = "WHITE"  # "GREEN" 或 "WHITE"
+TROUGH_GREEN_LAB_THRESHOLDS_WIDE = (
+    (35, 95, -60, -10, 5, 70),
+)
+# 截图中的绿色二值噪声较多，默认先用收紧版；若真实管体断裂可改为WIDE。
+TROUGH_GREEN_LAB_THRESHOLDS_TIGHT = (
+    (34, 93, -52, -10, 9, 57),
+)
+TROUGH_GREEN_THRESHOLD_PRESET = "WIDE"  # "TIGHT" 或 "WIDE"
+TROUGH_GREEN_LAB_THRESHOLDS = (
+    TROUGH_GREEN_LAB_THRESHOLDS_TIGHT
+    if TROUGH_GREEN_THRESHOLD_PRESET == "TIGHT"
+    else TROUGH_GREEN_LAB_THRESHOLDS_WIDE
+)
+TROUGH_WHITE_LAB_THRESHOLDS = (
+    (77, 100, -18, 18, -18, 22),
+)
+
+
+def trough_lab_thresholds_for_mode(mode):
+    normalized = str(mode or "").strip().upper()
+    if normalized == "GREEN":
+        selected = TROUGH_GREEN_LAB_THRESHOLDS
+    elif normalized == "WHITE":
+        selected = TROUGH_WHITE_LAB_THRESHOLDS
+    else:
+        raise ValueError(
+            "TROUGH_COLOR_MODE must be GREEN or WHITE, got %r" % mode)
+    return [tuple(threshold) for threshold in selected]
+
+
+TROUGH_LAB_THRESHOLDS = trough_lab_thresholds_for_mode(
+    TROUGH_COLOR_MODE)
+
+# 归一化ROI：(x, y, width, height)。装车实测后让左右边和下边严格贴住画面边缘，
+# 仅从上方收紧检测范围，减少车体上方背景进入候选。
+TROUGH_ROI_RATIO = (0.00, 0.45, 1.00, 0.55)
+# True时先裁出上述ROI再做LAB二值化，减少全帧复制和颜色处理开销。
+# SHOW_TROUGH_BINARY=True时入口会临时停用它，以显示完整尺寸二值图。
+TROUGH_ROI_MASK_ENABLED = True
+
+# 主体每隔8列粗扫；粗端点附近再以步长1向外精扫，不把整幅ROI改成逐列处理。
+TROUGH_COLUMN_STEP = 8
+TROUGH_MIN_RUN_HEIGHT_PX = 4
+TROUGH_MAX_RUN_HEIGHT_RATIO_ROI = 0.45
+
+# 已有中轴时只在预测y附近扫描；候选不足会自动回退完整ROI。
+TROUGH_GUIDED_SCAN_HALF_HEIGHT_PX = 28
+
+# 白色凹槽可能被反光或钢球切断，允许合并较小的列内黑色间隙。
+TROUGH_MAX_INTERNAL_GAP_PX = 6
+TROUGH_LOCAL_SEARCH_RADIUS_PX = 20
+TROUGH_MAX_TRACK_GAP_X_PX = 48
+TROUGH_HEIGHT_CHANGE_WEIGHT = 0.15
+TROUGH_GAP_PENALTY_WEIGHT = 0.12
+# 端点保持动态：不写死左右坐标，只对细长形状、端点局部支撑和单帧跨度变化做门控。
+TROUGH_ENDPOINT_BAND_PX = 18
+TROUGH_ENDPOINT_MIN_SUPPORT_POINTS = 3
+TROUGH_ENDPOINT_MIN_ASPECT_RATIO = 5.0
+TROUGH_ENDPOINT_REFINE_ENABLED = True
+TROUGH_ENDPOINT_REFINE_RADIUS_PX = 12
+TROUGH_ENDPOINT_REFINE_MAX_MISSES = 0
+# 钢球挡住管体端部颜色时，只保持被遮挡一侧的历史端点；启动即在端部且
+# YOLO无框时，允许用“单侧球宽缺口+另一端贴边”从ROI边界低置信度初始化。
+TROUGH_ENDPOINT_OCCLUSION_ENABLED = True
+TROUGH_ENDPOINT_OCCLUSION_EDGE_MARGIN_PX = 18
+TROUGH_ENDPOINT_OCCLUSION_MIN_INSET_PX = 8
+TROUGH_ENDPOINT_OCCLUSION_MAX_GAP_RATIO_ROI = 0.18
+TROUGH_ENDPOINT_OCCLUSION_RELEASE_FRAMES = 2
+
+# 横向中轴有效门限。
+TROUGH_MIN_POINTS = 24
+TROUGH_MIN_LENGTH_RATIO_FRAME = 0.45
+TROUGH_MIN_FIT_RESIDUAL_PX = 3.0
+TROUGH_MAX_FIT_RESIDUAL_PX = 8.0
+TROUGH_BALL_EXCLUSION_MARGIN_PX = 5
+TROUGH_CACHE_FRAMES = 3
+# 水管相对相机近似刚性固定：每2帧重测一次，中间帧沿用最近有效中轴；
+# YOLO钢球检测、位置投影和VOFA发送仍然每帧执行。
+TROUGH_UPDATE_INTERVAL_FRAMES = 2
+TROUGH_AXIS_FILTER_ENABLED = True
+TROUGH_AXIS_FILTER_ALPHA = 0.25
+TROUGH_AXIS_FILTER_SPAN_ALPHA = 0.20
+TROUGH_AXIS_FILTER_MIN_CONFIDENCE = 0.30
+TROUGH_AXIS_FILTER_SNAP_SHIFT_PX = 14.0
+TROUGH_AXIS_FILTER_SNAP_SLOPE_DELTA = 0.06
+TROUGH_AXIS_FILTER_ENDPOINT_MAX_SHIFT_PX = 24.0
+TROUGH_AXIS_FILTER_ENDPOINT_MIN_SPAN_RATIO = 0.75
+
+# 直线拟合继续负责剔除离群点；6段7节点折线只补偿轻微镜头弯曲。
+TROUGH_CURVED_CENTERLINE_ENABLED = True
+TROUGH_CENTERLINE_SEGMENTS = 6
+# 只平滑折线相对整体直线的局部弯曲残差，不拖慢整体平移、倾斜和端点跟随。
+TROUGH_CENTERLINE_RESIDUAL_FILTER_ENABLED = True
+TROUGH_CENTERLINE_RESIDUAL_FILTER_ALPHA = 0.20
+TROUGH_CENTERLINE_RESIDUAL_MAX_STEP_PX = 1.5
+
+# True：画面左端P0、右端P1，position_px/norm左负右正；False时相反。
+TROUGH_POSITIVE_AT_RIGHT = True
+
+
+# ---------- 钢球轴向位置 ----------
+
+# False时不显示启动阈值菜单，直接使用本文件中的管体颜色与LAB阈值。
+STARTUP_THRESHOLD_TUNING_ENABLED = False
+# False时跳过五点/端点触摸标定，直接使用动态中轴端点和25 cm线性换算。
+QUICK_POSITION_CALIBRATION_ENABLED = False
+# 仅做横向凹槽的线性厘米换算，不调用旧竖向透视表：
+# position_cm = position_norm * TROUGH_PHYSICAL_LENGTH_CM / 2。
+POSITION_MAPPING_ENABLED = True
+TROUGH_PHYSICAL_LENGTH_CM = 25.0
+BALL_MIN_AXIS_DISTANCE_LIMIT_PX = 24.0
+BALL_AXIS_DISTANCE_WIDTH_FACTOR = 1.35
+BALL_ENDPOINT_MARGIN_RATIO = 0.08
+
+
+# ---------- 调试显示与日志 ----------
+
+SHOW_TROUGH_BINARY = False
+DRAW_RAW_YOLO_BOXES = True
+DRAW_TROUGH_SAMPLE_POINTS = False
+# 正式位置输出性能测试关闭板载显示；需要看画面时可临时改回True。
+DISPLAY_ENABLED = True
+# Pro调试时打开可让画面、YOLO框和中轴标识每帧刷新；正式运行可关闭。
+DISPLAY_EVERY_FRAME = False
+DISPLAY_INTERVAL_FRAMES = 2
+DISPLAY_DETAILED_STATUS = False
+PRINT_INTERVAL_FRAMES = 40
