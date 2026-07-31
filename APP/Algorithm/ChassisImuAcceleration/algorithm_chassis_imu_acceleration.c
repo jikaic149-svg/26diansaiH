@@ -4,16 +4,20 @@
 #include <stddef.h>
 
 #define CHASSIS_IMU_TWO_PI 6.28318530717958647692F
+#define CHASSIS_IMU_BUTTERWORTH_Q 0.70710678118654752440F
+#define CHASSIS_IMU_MAX_FILTER_STEPS 32.0F
 
 static bool valid_config(
     const Algorithm_ChassisImuAcceleration_Config *config)
 {
     return (config != NULL) &&
         (config->bias_calibration_samples > 0U) &&
-        isfinite(config->acceleration_filter_stage_time_constant_s) &&
-        (config->acceleration_filter_stage_time_constant_s >= 0.0F) &&
         isfinite(config->notch_sample_frequency_hz) &&
         (config->notch_sample_frequency_hz > 0.0F) &&
+        isfinite(config->acceleration_lowpass_cutoff_frequency_hz) &&
+        (config->acceleration_lowpass_cutoff_frequency_hz > 0.0F) &&
+        (config->acceleration_lowpass_cutoff_frequency_hz <
+            (0.5F * config->notch_sample_frequency_hz)) &&
         isfinite(config->notch_center_frequency_hz) &&
         (config->notch_center_frequency_hz > 0.0F) &&
         (config->notch_center_frequency_hz <
@@ -22,7 +26,10 @@ static bool valid_config(
         (config->notch_quality_factor > 0.0F) &&
         isfinite(config->maximum_absolute_acceleration_mm_s2) &&
         (config->maximum_absolute_acceleration_mm_s2 > 0.0F) &&
-        (config->maximum_sample_step_ms > 0U);
+        (config->maximum_sample_step_ms > 0U) &&
+        (config->notch_sample_frequency_hz *
+            (float)config->maximum_sample_step_ms * 0.001F <=
+            CHASSIS_IMU_MAX_FILTER_STEPS);
 }
 
 static bool configure_notch(Algorithm_ChassisImuAcceleration *processor)
@@ -52,6 +59,35 @@ static bool configure_notch(Algorithm_ChassisImuAcceleration *processor)
         (fabsf(processor->notch_a2) < 1.0F);
 }
 
+static bool configure_lowpass(Algorithm_ChassisImuAcceleration *processor)
+{
+    const float angular_frequency = CHASSIS_IMU_TWO_PI *
+        processor->config.acceleration_lowpass_cutoff_frequency_hz /
+        processor->config.notch_sample_frequency_hz;
+    const float cosine = cosf(angular_frequency);
+    const float alpha = sinf(angular_frequency) /
+        (2.0F * CHASSIS_IMU_BUTTERWORTH_Q);
+    const float denominator = 1.0F + alpha;
+    const float one_minus_cosine = 1.0F - cosine;
+
+    if (!isfinite(cosine) || !isfinite(alpha) || (alpha <= 0.0F) ||
+        !isfinite(denominator) || (denominator <= 0.0F) ||
+        !isfinite(one_minus_cosine) || (one_minus_cosine <= 0.0F)) {
+        return false;
+    }
+    processor->lowpass_b0 = 0.5F * one_minus_cosine / denominator;
+    processor->lowpass_b1 = one_minus_cosine / denominator;
+    processor->lowpass_b2 = processor->lowpass_b0;
+    processor->lowpass_a1 = -2.0F * cosine / denominator;
+    processor->lowpass_a2 = (1.0F - alpha) / denominator;
+    return isfinite(processor->lowpass_b0) &&
+        isfinite(processor->lowpass_b1) &&
+        isfinite(processor->lowpass_b2) &&
+        isfinite(processor->lowpass_a1) &&
+        isfinite(processor->lowpass_a2) &&
+        (fabsf(processor->lowpass_a2) < 1.0F);
+}
+
 static void seed_notch(
     Algorithm_ChassisImuAcceleration *processor,
     float acceleration_mm_s2)
@@ -63,46 +99,86 @@ static void seed_notch(
         acceleration_mm_s2;
 }
 
-static bool evaluate_notch(
+static void seed_lowpass(
+    Algorithm_ChassisImuAcceleration *processor,
+    float acceleration_mm_s2)
+{
+    processor->lowpass_state_one =
+        (1.0F - processor->lowpass_b0) * acceleration_mm_s2;
+    processor->lowpass_state_two =
+        (processor->lowpass_b2 - processor->lowpass_a2) *
+        acceleration_mm_s2;
+}
+
+static bool evaluate_filter_cascade(
     const Algorithm_ChassisImuAcceleration *processor,
-    float input_mm_s2,
+    float previous_input_mm_s2,
+    float current_input_mm_s2,
     uint32_t step_count,
     float *output_mm_s2,
-    float *state_one,
-    float *state_two)
+    float *notch_state_one,
+    float *notch_state_two,
+    float *lowpass_state_one,
+    float *lowpass_state_two)
 {
-    float local_state_one;
-    float local_state_two;
-    float output = input_mm_s2;
+    float local_notch_state_one;
+    float local_notch_state_two;
+    float local_lowpass_state_one;
+    float local_lowpass_state_two;
+    float output = current_input_mm_s2;
 
     if ((processor == NULL) || (output_mm_s2 == NULL) ||
-        (state_one == NULL) || (state_two == NULL) ||
+        (notch_state_one == NULL) || (notch_state_two == NULL) ||
+        (lowpass_state_one == NULL) || (lowpass_state_two == NULL) ||
         (step_count == 0U)) {
         return false;
     }
-    local_state_one = processor->notch_state_one;
-    local_state_two = processor->notch_state_two;
+    local_notch_state_one = processor->notch_state_one;
+    local_notch_state_two = processor->notch_state_two;
+    local_lowpass_state_one = processor->lowpass_state_one;
+    local_lowpass_state_two = processor->lowpass_state_two;
     for (uint32_t step = 0U; step < step_count; ++step) {
-        const float next_output =
-            processor->notch_b0 * input_mm_s2 + local_state_one;
-        const float next_state_one =
+        const float input_mm_s2 = ((step + 1U) == step_count) ?
+            current_input_mm_s2 : previous_input_mm_s2;
+        const float notch_output =
+            processor->notch_b0 * input_mm_s2 + local_notch_state_one;
+        const float next_notch_state_one =
             processor->notch_b1 * input_mm_s2 -
-            processor->notch_a1 * next_output + local_state_two;
-        const float next_state_two =
+            processor->notch_a1 * notch_output +
+            local_notch_state_two;
+        const float next_notch_state_two =
             processor->notch_b2 * input_mm_s2 -
-            processor->notch_a2 * next_output;
+            processor->notch_a2 * notch_output;
+        const float lowpass_output =
+            processor->lowpass_b0 * notch_output +
+            local_lowpass_state_one;
+        const float next_lowpass_state_one =
+            processor->lowpass_b1 * notch_output -
+            processor->lowpass_a1 * lowpass_output +
+            local_lowpass_state_two;
+        const float next_lowpass_state_two =
+            processor->lowpass_b2 * notch_output -
+            processor->lowpass_a2 * lowpass_output;
 
-        if (!isfinite(next_output) || !isfinite(next_state_one) ||
-            !isfinite(next_state_two)) {
+        if (!isfinite(notch_output) ||
+            !isfinite(next_notch_state_one) ||
+            !isfinite(next_notch_state_two) ||
+            !isfinite(lowpass_output) ||
+            !isfinite(next_lowpass_state_one) ||
+            !isfinite(next_lowpass_state_two)) {
             return false;
         }
-        output = next_output;
-        local_state_one = next_state_one;
-        local_state_two = next_state_two;
+        output = lowpass_output;
+        local_notch_state_one = next_notch_state_one;
+        local_notch_state_two = next_notch_state_two;
+        local_lowpass_state_one = next_lowpass_state_one;
+        local_lowpass_state_two = next_lowpass_state_two;
     }
     *output_mm_s2 = output;
-    *state_one = local_state_one;
-    *state_two = local_state_two;
+    *notch_state_one = local_notch_state_one;
+    *notch_state_two = local_notch_state_two;
+    *lowpass_state_one = local_lowpass_state_one;
+    *lowpass_state_two = local_lowpass_state_two;
     return true;
 }
 
@@ -117,7 +193,7 @@ bool Algorithm_ChassisImuAcceleration_Init(
         return false;
     }
     processor->config = *config;
-    if (!configure_notch(processor)) {
+    if (!configure_notch(processor) || !configure_lowpass(processor)) {
         *processor = (Algorithm_ChassisImuAcceleration){0};
         return false;
     }
@@ -203,7 +279,7 @@ bool Algorithm_ChassisImuAcceleration_Update(
                 processor->bias_mm_s2;
 
             seed_notch(processor, 0.0F);
-            processor->acceleration_filter_stage_one_mm_s2 = 0.0F;
+            seed_lowpass(processor, 0.0F);
             processor->output.unfiltered_acceleration_mm_s2 = acceleration;
             processor->output.filtered_acceleration_mm_s2 = 0.0F;
         }
@@ -213,7 +289,6 @@ bool Algorithm_ChassisImuAcceleration_Update(
     {
         const float acceleration = longitudinal_specific_force -
             processor->bias_mm_s2;
-        float stage_one;
         float filtered;
 
         if (!isfinite(acceleration) ||
@@ -224,38 +299,24 @@ bool Algorithm_ChassisImuAcceleration_Update(
         }
 
         if (sample_step_valid) {
-            const float dt_s = (float)delta_ms * 0.001F;
-            const float nominal_steps = dt_s *
+            const float nominal_steps = (float)delta_ms * 0.001F *
                 processor->config.notch_sample_frequency_hz;
-            uint32_t notch_step_count =
+            uint32_t filter_step_count =
                 (uint32_t)(nominal_steps + 0.5F);
-            float notch_output;
             float notch_state_one;
             float notch_state_two;
-            float filter_gain;
+            float lowpass_state_one;
+            float lowpass_state_two;
 
-            if (notch_step_count == 0U) {
-                notch_step_count = 1U;
+            if (filter_step_count == 0U) {
+                filter_step_count = 1U;
             }
-            if (!evaluate_notch(
-                    processor, acceleration, notch_step_count,
-                    &notch_output, &notch_state_one, &notch_state_two) ||
-                (fabsf(notch_output) >
-                    processor->config.maximum_absolute_acceleration_mm_s2)) {
-                ++processor->invalid_sample_count;
-                return false;
-            }
-            filter_gain =
-                (processor->config.
-                    acceleration_filter_stage_time_constant_s == 0.0F)
-                ? 1.0F
-                : 1.0F - expf(-dt_s / processor->config.
-                    acceleration_filter_stage_time_constant_s);
-            stage_one = processor->acceleration_filter_stage_one_mm_s2;
-            filtered = processor->output.filtered_acceleration_mm_s2;
-            stage_one += filter_gain * (notch_output - stage_one);
-            filtered += filter_gain * (stage_one - filtered);
-            if (!isfinite(stage_one) || !isfinite(filtered) ||
+            if (!evaluate_filter_cascade(
+                    processor,
+                    processor->output.unfiltered_acceleration_mm_s2,
+                    acceleration, filter_step_count, &filtered,
+                    &notch_state_one, &notch_state_two,
+                    &lowpass_state_one, &lowpass_state_two) ||
                 (fabsf(filtered) >
                     processor->config.maximum_absolute_acceleration_mm_s2)) {
                 ++processor->invalid_sample_count;
@@ -263,15 +324,16 @@ bool Algorithm_ChassisImuAcceleration_Update(
             }
             processor->notch_state_one = notch_state_one;
             processor->notch_state_two = notch_state_two;
+            processor->lowpass_state_one = lowpass_state_one;
+            processor->lowpass_state_two = lowpass_state_two;
         }
         else {
             seed_notch(processor, acceleration);
-            stage_one = acceleration;
+            seed_lowpass(processor, acceleration);
             filtered = acceleration;
             ++processor->gap_reseed_count;
         }
 
-        processor->acceleration_filter_stage_one_mm_s2 = stage_one;
         processor->output = (Algorithm_ChassisImuAcceleration_Output){
             .sample_ms = sample->sample_ms,
             .bias_mm_s2 = processor->bias_mm_s2,

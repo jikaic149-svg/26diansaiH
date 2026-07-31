@@ -9,11 +9,11 @@ typedef struct {
      * longitudinal accelerometer bias. Control output stays invalid until
      * this calibration completes, then the bias is frozen. */
     uint32_t bias_calibration_samples;
-    /* Each of the two cascaded acceleration EMA stages uses this time
-     * constant, in seconds. Zero makes both stages track the input. */
-    float acceleration_filter_stage_time_constant_s;
-    /* Fixed-rate RBJ notch applied after bias removal and before both EMA
-     * stages. Units are Hz; center must be below half the sample rate. */
+    /* Fixed-rate second-order Butterworth low-pass cutoff in Hz. It must be
+     * below half the notch/filter sample rate. */
+    float acceleration_lowpass_cutoff_frequency_hz;
+    /* Fixed-rate RBJ notch applied after bias removal and before the
+     * Butterworth low-pass. Units are Hz; center must be below Nyquist. */
     float notch_sample_frequency_hz;
     float notch_center_frequency_hz;
     float notch_quality_factor;
@@ -54,7 +54,13 @@ typedef struct {
     float notch_a2;
     float notch_state_one;
     float notch_state_two;
-    float acceleration_filter_stage_one_mm_s2;
+    float lowpass_b0;
+    float lowpass_b1;
+    float lowpass_b2;
+    float lowpass_a1;
+    float lowpass_a2;
+    float lowpass_state_one;
+    float lowpass_state_two;
     bool sample_seen;
     bool bias_ready;
     bool initialized;
@@ -68,9 +74,9 @@ void Algorithm_ChassisImuAcceleration_Reset(
     Algorithm_ChassisImuAcceleration *processor);
 
 /* Startup samples establish and freeze the Sensor-Y stationary bias. After
- * calibration, Ay-bias passes through the fixed-rate notch and two exact EMA
- * stages. A long sample gap re-seeds all filter states from the current
- * bias-corrected sample so stale acceleration is never republished. */
+ * calibration, Ay-bias passes through the fixed-rate notch and second-order
+ * Butterworth low-pass. A long sample gap re-seeds all filter states from
+ * the current bias-corrected sample so stale acceleration is not reused. */
 bool Algorithm_ChassisImuAcceleration_Update(
     Algorithm_ChassisImuAcceleration *processor,
     const Algorithm_ChassisImuAcceleration_Sample *sample);

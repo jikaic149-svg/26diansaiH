@@ -662,8 +662,8 @@ static void Task_Gateway(void *argument)
         const Algorithm_ChassisImuAcceleration_Config imu_config = {
             .bias_calibration_samples =
                 GATEWAY_BMI088_ACCEL_Y_BIAS_CALIBRATION_SAMPLES,
-            .acceleration_filter_stage_time_constant_s =
-                GATEWAY_BMI088_ACCEL_FILTER_STAGE_TAU_S,
+            .acceleration_lowpass_cutoff_frequency_hz =
+                GATEWAY_BMI088_ACCEL_LOWPASS_CUTOFF_HZ,
             .notch_sample_frequency_hz =
                 GATEWAY_BMI088_ACCEL_NOTCH_SAMPLE_HZ,
             .notch_center_frequency_hz =

@@ -103,11 +103,14 @@ static float processed_chassis_acceleration(float sensor_y_specific_force)
     Algorithm_ChassisImuAcceleration_Output output;
     const Algorithm_ChassisImuAcceleration_Config config = {
         .bias_calibration_samples = 1U,
-        .notch_sample_frequency_hz = 1000.0F,
-        .notch_center_frequency_hz = 11.7F,
-        .notch_quality_factor = 1.2F,
-        .acceleration_filter_stage_time_constant_s =
-            GATEWAY_BMI088_ACCEL_FILTER_STAGE_TAU_S,
+        .notch_sample_frequency_hz =
+            GATEWAY_BMI088_ACCEL_NOTCH_SAMPLE_HZ,
+        .notch_center_frequency_hz =
+            GATEWAY_BMI088_ACCEL_NOTCH_CENTER_HZ,
+        .notch_quality_factor =
+            GATEWAY_BMI088_ACCEL_NOTCH_QUALITY_FACTOR,
+        .acceleration_lowpass_cutoff_frequency_hz =
+            GATEWAY_BMI088_ACCEL_LOWPASS_CUTOFF_HZ,
         .maximum_absolute_acceleration_mm_s2 =
             GATEWAY_BMI088_ACCEL_MAX_ABS_OUTPUT_MM_S2,
         .maximum_sample_step_ms =

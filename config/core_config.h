@@ -192,7 +192,7 @@
 /* a_cmd=Kp*(target-x)+I-Kd*v。Kp/Ki/Kd单位分别为1/s^2、1/s^3、1/s；
  * I直接保存为加速度贡献并做对称抗饱和。首版为低动态台架初值，需由真实VIS日志整定。 */
 #define GATEWAY_BALL_POSITION_KP_PER_S2      0.6F
-#define GATEWAY_BALL_POSITION_KI_PER_S3      0.03F
+#define GATEWAY_BALL_POSITION_KI_PER_S3      0.045F
 #define GATEWAY_BALL_VELOCITY_KD_PER_S       0.55F
 #define GATEWAY_BALL_INTEGRAL_ACCEL_LIMIT_MM_S2 10.0F
 #define GATEWAY_BALL_VELOCITY_FILTER_TAU_S   0.180F
@@ -265,13 +265,13 @@
  * 连续样本求静止Ay零偏并冻结；完成前不向电机控制提交加速度。1kHz下约
  * 需300ms。控制链不使用Pitch、Gyro Y或Z轴重力补偿。 */
 #define GATEWAY_BMI088_ACCEL_Y_BIAS_CALIBRATION_SAMPLES UINT32_C(300)
-/* 纵向输出先用1kHz RBJ陷波抑制实测9.3~13.5Hz机构回灌，再使用两级相同
- * 的精确EMA，alpha=1-exp(-dt/tau)。第二组VOFA确认电机失能时Ay噪声约
- * 30mm/s^2，使能后约500~600mm/s^2；中心11.7Hz、Q=1.2兼顾抑振与1~3Hz响应。 */
+/* 纵向输出先用1kHz RBJ陷波抑制实测约14Hz机构回灌，再使用12Hz二阶
+ * Butterworth低通。实测噪声主要来自电机使能后的机构耦合；该组合保留
+ * 1~3Hz加速度前馈响应，同时压低机械高频振动。截止频率单位Hz。 */
 #define GATEWAY_BMI088_ACCEL_NOTCH_SAMPLE_HZ       1000.0F
-#define GATEWAY_BMI088_ACCEL_NOTCH_CENTER_HZ         11.7F
-#define GATEWAY_BMI088_ACCEL_NOTCH_QUALITY_FACTOR     1.2F
-#define GATEWAY_BMI088_ACCEL_FILTER_STAGE_TAU_S       0.00225F
+#define GATEWAY_BMI088_ACCEL_NOTCH_CENTER_HZ         14.0F
+#define GATEWAY_BMI088_ACCEL_NOTCH_QUALITY_FACTOR     0.7F
+#define GATEWAY_BMI088_ACCEL_LOWPASS_CUTOFF_HZ        12.0F
 #define GATEWAY_BMI088_ACCEL_MAX_ABS_OUTPUT_MM_S2    40000.0F
 #define GATEWAY_BMI088_ACCEL_MAX_SAMPLE_STEP_MS   UINT32_C(5)
 #define GATEWAY_BMI088_ACCEL_MAX_INPUT_AGE_MS     UINT32_C(10)
@@ -297,19 +297,19 @@
  * 目标点使用负静态前馈承重；当位置误差请求相反方向时，前馈在DEADBAND范围内
  * 连续释放，并在P项开始作用前降为0，避免负前馈压过raw增大的下行请求。 */
 #define GATEWAY_LEVEL_KP_A_PER_DEG          0.014F
-#define GATEWAY_LEVEL_KI_A_PER_DEG_S        0.0010F
+#define GATEWAY_LEVEL_KI_A_PER_DEG_S        0.0020F
 #define GATEWAY_LEVEL_KD_A_PER_RPM          0.0010F
-#define GATEWAY_LEVEL_FEEDFORWARD_CURRENT_A (-0.072F)
+#define GATEWAY_LEVEL_FEEDFORWARD_CURRENT_A (-0.090F)
 
 /* 角误差限幅、死区和积分作用区，单位 deg。先限幅再扣除死区；仅在
  * |原始误差|<=INTEGRAL_ZONE 时积分，离开该区立即清积分。 */
 #define GATEWAY_LEVEL_ERROR_LIMIT_DEG       10.0F
-#define GATEWAY_LEVEL_DEADBAND_DEG           0.20F
+#define GATEWAY_LEVEL_DEADBAND_DEG           0.05F
 #define GATEWAY_LEVEL_INTEGRAL_ZONE_DEG      2.0F
 
 /* 积分分量和最终电流的对称限幅，单位 A。控制电流限幅不得超过 Device
  * 产品侧电流限幅；POLARITY 只能是 +1 或 -1，用于实机确认电机方向。 */
-#define GATEWAY_LEVEL_INTEGRAL_LIMIT_A       0.010F
+#define GATEWAY_LEVEL_INTEGRAL_LIMIT_A       0.020F
 #define GATEWAY_LEVEL_CURRENT_LIMIT_A        0.30F
 #define GATEWAY_LEVEL_CURRENT_POLARITY       1.0F
 
