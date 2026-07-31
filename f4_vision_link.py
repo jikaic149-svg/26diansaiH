@@ -173,8 +173,8 @@ def encode_vis_frame(sequence, sample_ms, processing_age_ms,
 def decode_vst_packet(sequence, payload):
     """解析 cooperation 第11.3节定义的 VST Payload。"""
     fields = str(payload).split(",")
-    if len(fields) != 9:
-        raise ValueError("VST field count must be 9")
+    if len(fields) != 15:
+        raise ValueError("VST field count must be 15")
     status = {
         "sequence": int(sequence) & 0xFFFF,
         "last_rx_vis_seq": _parse_uint(fields[0], 0xFFFF),
@@ -184,11 +184,19 @@ def decode_vst_packet(sequence, payload):
         "velocity_mm_s": _parse_int(fields[4], -32768, 32767),
         "target_mm": _parse_int(fields[5], -125, 125),
         "theta_cmd_mdeg": _parse_int(fields[6], -85000, 85000),
-        "status_flags": _parse_uint(fields[7], 0xFFFF),
-        "fault_bits": _parse_uint(fields[8], 0xFFFF),
+        "motor_target_raw": _parse_uint(fields[7], 0xFFFF),
+        "motor_feedback_raw": _parse_uint(fields[8], 0xFFFF),
+        "motor_command_ma": _parse_int(fields[9], -32768, 32767),
+        "motor_speed_centi_rpm": _parse_int(fields[10], -32768, 32767),
+        "stiction_kick_mdeg": _parse_int(fields[11], -32768, 32767),
+        "status_flags": _parse_uint(fields[12], 0xFFFF),
+        "fault_bits": _parse_uint(fields[13], 0xFFFF),
+        "competition_mode": _parse_uint(fields[14], 6),
     }
     if status["status_flags"] & 0x4000 or status["fault_bits"] & 0x8000:
         raise ValueError("VST reserved bit is nonzero")
+    if status["competition_mode"] not in (0, 2, 3, 4, 5, 6):
+        raise ValueError("VST competition mode is invalid")
     return status
 
 
@@ -511,7 +519,8 @@ class F4VisionLink:
                     "F4_VST|rx=%d|last_rx_vis=%d|last_used_vis=%d|"
                     "age_ms=%d|estimate_mm=%d|velocity_mm_s=%d|"
                     "target_mm=%d|theta_mdeg=%d|status=0x%04X|"
-                    "fault=0x%04X" % (
+                    "fault=0x%04X|target_raw=%d|feedback_raw=%d|"
+                    "command_ma=%d|speed_rpm=%.2f|kick_mdeg=%d|mode=%d" % (
                         self.vst_rx_count,
                         status["last_rx_vis_seq"],
                         status["last_used_vis_seq"],
@@ -522,6 +531,12 @@ class F4VisionLink:
                         status["theta_cmd_mdeg"],
                         status["status_flags"],
                         status["fault_bits"],
+                        status["motor_target_raw"],
+                        status["motor_feedback_raw"],
+                        status["motor_command_ma"],
+                        status["motor_speed_centi_rpm"] / 100.0,
+                        status["stiction_kick_mdeg"],
+                        status["competition_mode"],
                     )
                 )
 

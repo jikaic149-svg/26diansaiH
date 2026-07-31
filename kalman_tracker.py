@@ -1,9 +1,9 @@
 """钢球YOLO的轻量单目标卡尔曼跟踪器。
 
 本模块不依赖MaixPy或NumPy，便于在PC上做纯逻辑测试，也避免给
-MaixCAM Pro增加大型运行依赖。只跟踪一个主钢球：YOLO正常时按连续轨迹
-关联并输出卡尔曼校正位置；短暂漏检或出现门外假框时输出短时预测，超过
-限制才允许重建轨迹。
+MaixCAM Pro增加大型运行依赖。只跟踪一个主钢球：YOLO正常时直接输出
+本帧原始框，同时在内部更新卡尔曼状态；短暂漏检时才输出预测框，超过
+限制立即判为丢失。
 """
 
 
@@ -75,7 +75,7 @@ class PrimaryBallTracker:
 
     def __init__(
         self,
-        max_predict_frames=4,
+        max_predict_frames=2,
         max_predict_ms=350,
         min_gate_px=45.0,
         gate_diagonal_scale=1.25,
@@ -170,19 +170,16 @@ class PrimaryBallTracker:
             "missed": self.missed_frames,
         }
 
-    def _measurement_result(self, detection):
-        """返回当前轨迹的校正位置，保留本帧YOLO置信度用于诊断。"""
+    def _raw_measurement_result(self, detection):
+        """原样返回本帧YOLO框；速度字段只供诊断，不改变测量坐标。"""
         output = dict(detection)
+        center_x, center_y = self._center(detection)
         output.update({
-            "x": self.x_filter.position - 0.5 * self.width,
-            "y": self.y_filter.position - 0.5 * self.height,
-            "w": self.width,
-            "h": self.height,
-            "cx": self.x_filter.position,
-            "cy": self.y_filter.position,
+            "cx": center_x,
+            "cy": center_y,
             "vx": self.x_filter.velocity,
             "vy": self.y_filter.velocity,
-            "source": "MEASURED",
+            "source": "YOLO_RAW",
             "missed": 0,
         })
         return output
@@ -197,7 +194,7 @@ class PrimaryBallTracker:
                 return None
             measured = self._best_initial_detection(detections)
             self._start(measured, timestamp_ms)
-            return self._measurement_result(measured)
+            return self._raw_measurement_result(measured)
 
         elapsed_ms = timestamp_ms - self.last_step_ms
         # 防止异常时间戳把预测一步推到很远；正常板端约0.1~0.2秒一帧。
@@ -218,21 +215,15 @@ class PrimaryBallTracker:
             self.score = float(matched.get("score", self.score))
             self.missed_frames = 0
             self.last_measurement_ms = timestamp_ms
-            return self._measurement_result(matched)
+            # 卡尔曼只更新内部速度/协方差；控制与显示使用本帧原始YOLO框。
+            return self._raw_measurement_result(matched)
 
         if detections:
-            # 门外候选不能立即抢占当前钢球轨迹，否则多假框会让位置在整幅
-            # 图像间跳变。先按短时漏检处理；只有连续超时后才允许重建。
-            self.missed_frames += 1
-            lost_ms = timestamp_ms - self.last_measurement_ms
-            if (
-                self.missed_frames > self.max_predict_frames
-                or lost_ms > self.max_predict_ms
-            ):
-                measured = self._best_initial_detection(detections)
-                self._start(measured, timestamp_ms)
-                return self._measurement_result(measured)
-            return self._result("PREDICTED")
+            # 本帧并未漏检，只是新框落在旧轨迹关联门外。单球任务中应立即
+            # 用当前最高置信框重建轨迹，不能让旧卡尔曼预测覆盖真实YOLO框。
+            measured = self._best_initial_detection(detections)
+            self._start(measured, timestamp_ms)
+            return self._raw_measurement_result(measured)
 
         self.missed_frames += 1
         lost_ms = timestamp_ms - self.last_measurement_ms

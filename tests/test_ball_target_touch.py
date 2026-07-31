@@ -5,6 +5,7 @@ import unittest
 from ball_target_touch import (
     BallTargetTouchController,
     quantize_target_mm,
+    question3_button_geometry,
     slider_geometry,
     slider_target_from_x,
     slider_x_from_target,
@@ -12,6 +13,23 @@ from ball_target_touch import (
 
 
 class BallTargetTouchTest(unittest.TestCase):
+    @staticmethod
+    def _position(position_mm, valid=True):
+        return {
+            "valid": valid,
+            "position_cm": float(position_mm) / 10.0,
+        }
+
+    @staticmethod
+    def _vst(now_ms, fault_bits=0):
+        return {
+            "received_at_ms": now_ms,
+            "fault_bits": fault_bits,
+            "motor_target_raw": 1200,
+            "motor_feedback_raw": 1190,
+            "motor_speed_centi_rpm": 250,
+        }
+
     def test_slider_boundaries_and_center(self):
         geometry = slider_geometry(320, 240)
         left = geometry["left"]
@@ -109,6 +127,57 @@ class BallTargetTouchTest(unittest.TestCase):
         link = FakeLink()
         self.assertTrue(controller.try_send(link, 2))
         self.assertEqual(link.target_mm, 42)
+
+    def test_question3_button_is_separate_from_slider(self):
+        button = question3_button_geometry(320, 240)
+        slider = slider_geometry(320, 240)
+        self.assertLess(
+            button["y"] + button["height"], slider["touch_top"])
+
+    def test_question3_uses_real_frames_and_runs_local_sequence(self):
+        controller = BallTargetTouchController(
+            target_to_f4_polarity=-1.0)
+        self.assertTrue(controller.start_question3())
+        self.assertEqual(controller.question3_state, "CENTERING")
+        self.assertEqual(controller.selected_target_mm, 0)
+
+        # Invalid vision and faulted VST must not start the timed sequence.
+        self.assertFalse(controller.update_question3(
+            self._position(0, valid=False), self._vst(100), 100))
+        self.assertFalse(controller.update_question3(
+            self._position(0), self._vst(110, fault_bits=2), 110))
+        self.assertEqual(controller.question3_state, "CENTERING")
+
+        self.assertTrue(controller.update_question3(
+            self._position(5), self._vst(120), 120))
+        self.assertEqual(controller.question3_state, "RIGHT")
+        self.assertEqual(controller.selected_target_mm, 70)
+        self.assertEqual(controller.question3_start_ms, 120)
+
+        self.assertTrue(controller.update_question3(
+            self._position(56), self._vst(1500), 1500))
+        self.assertEqual(controller.question3_state, "LEFT")
+        self.assertEqual(controller.selected_target_mm, -70)
+
+        self.assertTrue(controller.update_question3(
+            self._position(-52), self._vst(4100), 4100))
+        self.assertEqual(controller.question3_state, "DONE")
+        self.assertEqual(controller.selected_target_mm, -50)
+        self.assertEqual(controller.question3_elapsed_ms, 3980)
+        self.assertTrue(controller.question3_passed)
+
+    def test_question3_timeout_parks_at_last_real_position(self):
+        controller = BallTargetTouchController(
+            question3_hard_timeout_ms=8000)
+        controller.start_question3()
+        controller.update_question3(
+            self._position(0), self._vst(10), 10)
+        controller.update_question3(
+            self._position(32), self._vst(100), 100)
+        self.assertTrue(controller.update_question3(
+            self._position(33, valid=False), self._vst(8011), 8011))
+        self.assertEqual(controller.question3_state, "FAILED")
+        self.assertEqual(controller.selected_target_mm, 32)
 
 
 if __name__ == "__main__":

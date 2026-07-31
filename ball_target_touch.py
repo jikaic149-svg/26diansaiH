@@ -41,6 +41,28 @@ def slider_geometry(width, height):
     }
 
 
+def question3_button_geometry(width, height):
+    """Return a clearly separated top-right Q3 touch button."""
+    width = max(1, int(width))
+    height = max(1, int(height))
+    button_width = min(108, max(1, width - 8))
+    button_height = min(34, max(1, height - 8))
+    return {
+        "x": max(0, width - button_width - 4),
+        "y": 4,
+        "width": button_width,
+        "height": button_height,
+    }
+
+
+def _point_in_rect(x, y, rectangle):
+    return (
+        int(x) >= rectangle["x"] and
+        int(x) < rectangle["x"] + rectangle["width"] and
+        int(y) >= rectangle["y"] and
+        int(y) < rectangle["y"] + rectangle["height"])
+
+
 def slider_target_from_x(
         x, left, right, minimum_mm, maximum_mm, step_mm):
     """Map a frame x coordinate to a bounded, quantized millimetre target."""
@@ -77,7 +99,16 @@ class BallTargetTouchController:
     def __init__(self, enabled=True, minimum_mm=-120.0,
                  maximum_mm=120.0, step_mm=1.0, retry_ms=250,
                  max_attempts=20, offline_ms=500,
-                 target_to_f4_polarity=1.0, touch_factory=None):
+                 target_to_f4_polarity=1.0, touch_factory=None,
+                 question3_enabled=True, question3_center_mm=0.0,
+                 question3_center_tolerance_mm=10.0,
+                 question3_right_command_mm=70.0,
+                 question3_right_reached_mm=55.0,
+                 question3_left_command_mm=-70.0,
+                 question3_left_reached_mm=-50.0,
+                 question3_final_target_mm=-50.0,
+                 question3_limit_ms=5000,
+                 question3_hard_timeout_ms=8000):
         self.enabled = bool(enabled)
         self.minimum_mm = float(minimum_mm)
         self.maximum_mm = float(maximum_mm)
@@ -106,6 +137,31 @@ class BallTargetTouchController:
         self.retry_exhausted_logged = False
         self.tx_count = 0
         self.last_error = ""
+        self.question3_enabled = bool(question3_enabled)
+        self.question3_center_mm = float(question3_center_mm)
+        self.question3_center_tolerance_mm = max(
+            0.0, float(question3_center_tolerance_mm))
+        self.question3_right_command_mm = float(
+            question3_right_command_mm)
+        self.question3_right_reached_mm = float(
+            question3_right_reached_mm)
+        self.question3_left_command_mm = float(
+            question3_left_command_mm)
+        self.question3_left_reached_mm = float(
+            question3_left_reached_mm)
+        self.question3_final_target_mm = float(
+            question3_final_target_mm)
+        self.question3_limit_ms = max(1, int(question3_limit_ms))
+        self.question3_hard_timeout_ms = max(
+            self.question3_limit_ms, int(question3_hard_timeout_ms))
+        self.question3_state = "IDLE"
+        self.question3_button_armed = False
+        self.question3_start_ms = None
+        self.question3_elapsed_ms = None
+        self.question3_right_position_mm = None
+        self.question3_left_position_mm = None
+        self.question3_last_position_mm = None
+        self.question3_passed = None
 
     def start(self):
         if not self.enabled:
@@ -120,8 +176,10 @@ class BallTargetTouchController:
             if not self.available:
                 raise RuntimeError("touchscreen factory returned no device")
             print(
-                "BALL_TARGET_TOUCH_READY|min_mm=%.0f|max_mm=%.0f|step_mm=%.0f"
-                % (self.minimum_mm, self.maximum_mm, self.step_mm))
+                "BALL_TARGET_TOUCH_READY|min_mm=%.0f|max_mm=%.0f|"
+                "step_mm=%.0f|q3=%d"
+                % (self.minimum_mm, self.maximum_mm, self.step_mm,
+                   1 if self.question3_enabled else 0))
             return True
         except Exception as error:
             self.touch = None
@@ -169,6 +227,133 @@ class BallTargetTouchController:
             self.pending = False
             print("BALL_TARGET_CONFIRMED|target_mm=%.0f" % reported)
 
+    def _select_target_mm(self, target_mm, source):
+        self.selected_target_mm = quantize_target_mm(
+            target_mm, self.minimum_mm, self.maximum_mm, self.step_mm)
+        self.user_selected = True
+        self.initial_sync_done = True
+        self.pending = True
+        self.last_attempt_ms = None
+        self.pending_attempt_count = 0
+        self.retry_exhausted_logged = False
+        print("BALL_TARGET_SELECTED|target_mm=%.0f|source=%s" % (
+            self.selected_target_mm, str(source)))
+
+    def _question3_active(self):
+        return self.question3_state in ("CENTERING", "RIGHT", "LEFT")
+
+    def _question3_log(self, event, now_ms, position_mm, vst):
+        elapsed_ms = -1
+        if self.question3_start_ms is not None:
+            elapsed_ms = _elapsed_ms(now_ms, self.question3_start_ms)
+        vst = vst or {}
+        print(
+            "%s|state=%s|elapsed_ms=%d|visual_position_mm=%.1f|"
+            "target_raw=%d|feedback_raw=%d|speed_rpm=%.2f|fault=0x%04X"
+            % (
+                str(event), self.question3_state, elapsed_ms,
+                float(position_mm),
+                int(vst.get("motor_target_raw", 0)),
+                int(vst.get("motor_feedback_raw", 0)),
+                float(vst.get("motor_speed_centi_rpm", 0)) / 100.0,
+                int(vst.get("fault_bits", 0xFFFF)) & 0xFFFF,
+            ))
+
+    def start_question3(self):
+        """Arm the on-device Q3 sequence; timing begins after centering."""
+        if not self.question3_enabled or self._question3_active():
+            return False
+        self.question3_state = "CENTERING"
+        self.question3_start_ms = None
+        self.question3_elapsed_ms = None
+        self.question3_right_position_mm = None
+        self.question3_left_position_mm = None
+        self.question3_last_position_mm = None
+        self.question3_passed = None
+        self._select_target_mm(self.question3_center_mm, "Q3_CENTER")
+        print("Q3_UI_START|state=CENTERING")
+        return True
+
+    def update_question3(self, position, vst, now_ms):
+        """Advance Q3 from current real visual data and fresh fault-free VST."""
+        if not self._question3_active():
+            return False
+        position = position or {}
+        vst = vst or {}
+        try:
+            visual_valid = bool(
+                position.get("valid") and
+                position.get("position_cm") is not None)
+            position_mm = float(position.get("position_cm")) * 10.0
+        except (TypeError, ValueError, OverflowError):
+            visual_valid = False
+            position_mm = 0.0
+        if visual_valid:
+            self.question3_last_position_mm = position_mm
+
+        try:
+            vst_fresh = (
+                _elapsed_ms(now_ms, int(vst["received_at_ms"])) <=
+                self.offline_ms)
+            fault_free = int(vst["fault_bits"]) == 0
+        except (KeyError, TypeError, ValueError, OverflowError):
+            vst_fresh = False
+            fault_free = False
+
+        if self.question3_start_ms is not None and _elapsed_ms(
+                now_ms, self.question3_start_ms) > \
+                self.question3_hard_timeout_ms:
+            park_mm = self.question3_last_position_mm
+            if park_mm is None:
+                park_mm = self.question3_center_mm
+            self.question3_elapsed_ms = _elapsed_ms(
+                now_ms, self.question3_start_ms)
+            self.question3_state = "FAILED"
+            self.question3_passed = False
+            self._select_target_mm(park_mm, "Q3_TIMEOUT_PARK")
+            self._question3_log(
+                "Q3_UI_RESULT", now_ms, park_mm, vst)
+            return True
+
+        if not visual_valid or not vst_fresh or not fault_free:
+            return False
+
+        if self.question3_state == "CENTERING" and abs(
+                position_mm - self.question3_center_mm) <= \
+                self.question3_center_tolerance_mm:
+            self.question3_start_ms = int(now_ms)
+            self.question3_state = "RIGHT"
+            self._question3_log(
+                "Q3_CENTER_READY", now_ms, position_mm, vst)
+            self._select_target_mm(
+                self.question3_right_command_mm, "Q3_RIGHT")
+            return True
+
+        if self.question3_state == "RIGHT" and position_mm >= \
+                self.question3_right_reached_mm:
+            self.question3_right_position_mm = position_mm
+            self.question3_state = "LEFT"
+            self._question3_log(
+                "Q3_RIGHT_REACHED", now_ms, position_mm, vst)
+            self._select_target_mm(
+                self.question3_left_command_mm, "Q3_LEFT")
+            return True
+
+        if self.question3_state == "LEFT" and position_mm <= \
+                self.question3_left_reached_mm:
+            self.question3_left_position_mm = position_mm
+            self.question3_elapsed_ms = _elapsed_ms(
+                now_ms, self.question3_start_ms)
+            self.question3_passed = (
+                self.question3_elapsed_ms <= self.question3_limit_ms)
+            self.question3_state = "DONE"
+            self._select_target_mm(
+                self.question3_final_target_mm, "Q3_FINAL")
+            self._question3_log(
+                "Q3_UI_RESULT", now_ms, position_mm, vst)
+            return True
+        return False
+
     def poll_touch(self, frame, disp):
         """Update while dragging and queue one command on release."""
         if not self.enabled or not self.available or self.touch is None or \
@@ -189,8 +374,15 @@ class BallTargetTouchController:
             return False
 
         geometry = slider_geometry(frame.width(), frame.height())
+        button = question3_button_geometry(
+            frame.width(), frame.height())
         if pressed and not self.was_pressed:
+            self.question3_button_armed = (
+                self.question3_enabled and
+                _point_in_rect(touch_x, touch_y, button))
             self.dragging = (
+                not self.question3_button_armed and
+                not self._question3_active() and
                 geometry["touch_top"] <= touch_y <
                 geometry["touch_bottom"])
         if pressed and self.dragging:
@@ -199,17 +391,17 @@ class BallTargetTouchController:
                 self.minimum_mm, self.maximum_mm, self.step_mm)
 
         committed = False
+        if not pressed and self.was_pressed and \
+                self.question3_button_armed:
+            self.question3_button_armed = False
+            committed = self.start_question3()
         if not pressed and self.was_pressed and self.dragging:
             self.dragging = False
-            self.user_selected = True
-            self.initial_sync_done = True
-            self.pending = True
-            self.last_attempt_ms = None
-            self.pending_attempt_count = 0
-            self.retry_exhausted_logged = False
+            self.question3_state = "IDLE"
+            self.question3_passed = None
+            self._select_target_mm(
+                self.selected_target_mm, "TOUCH_SLIDER")
             committed = True
-            print("BALL_TARGET_SELECTED|target_mm=%.0f" %
-                  self.selected_target_mm)
         self.was_pressed = pressed
         return committed
 
@@ -292,6 +484,36 @@ class BallTargetTouchController:
             marker_x, geometry["track_y"] - 9,
             marker_x, geometry["track_y"] + 9,
             color=cyan, thickness=3)
+
+        if self.question3_enabled:
+            button = question3_button_geometry(
+                frame.width(), frame.height())
+            active = self._question3_active()
+            button_color = yellow if active else (
+                green if self.question3_passed is not False else red)
+            frame.draw_rect(
+                button["x"], button["y"],
+                button["width"], button["height"],
+                color=button_color, thickness=2)
+            button_label = "Q3 RUN" if active else "Q3 START"
+            frame.draw_string(
+                button["x"] + 7, button["y"] + 8,
+                button_label, color=button_color, scale=0.66)
+            if self.question3_state != "IDLE":
+                elapsed_ms = self.question3_elapsed_ms
+                if elapsed_ms is None and self.question3_start_ms is not None:
+                    elapsed_ms = _elapsed_ms(
+                        now_ms, self.question3_start_ms)
+                elapsed_text = "WAIT" if elapsed_ms is None else (
+                    "%.3fs" % (float(elapsed_ms) / 1000.0))
+                result_text = self.question3_state
+                if self.question3_state == "DONE":
+                    result_text = (
+                        "PASS" if self.question3_passed else "OVER 5S")
+                frame.draw_string(
+                    button["x"], button["y"] + button["height"] + 2,
+                    "Q3:%s %s" % (result_text, elapsed_text),
+                    color=button_color, scale=0.56)
 
     def close(self):
         self.touch = None

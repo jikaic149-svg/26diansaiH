@@ -19,6 +19,7 @@ from ball_axis_position import (
     project_ball_axis_position,
     snapshot_detections,
 )
+from yolo_roi import prepare_yolo_input, map_detections_to_frame
 
 
 MIDDLE_TARGETS_CM = (-10.0, -5.0, 0.0, 5.0, 10.0)
@@ -449,6 +450,7 @@ def run_quick_position_calibration(
     detections = []
     trough_axis = None
     selected_ball = None
+    last_yolo_input_source = None
 
     def reset_all():
         return (
@@ -462,13 +464,34 @@ def run_quick_position_calibration(
             if frame is None:
                 continue
 
-            objects = detector.detect(
+            yolo_input, yolo_metadata = prepare_yolo_input(
                 frame,
+                detector.input_width(),
+                detector.input_height(),
+                getattr(config, "YOLO_ROI_RATIO", config.TROUGH_ROI_RATIO),
+                enabled=bool(getattr(config, "YOLO_ROI_ENABLED", False)),
+            )
+            objects = detector.detect(
+                yolo_input,
                 conf_th=float(config.CONF_TH),
                 iou_th=float(config.IOU_TH),
             )
-            detections = snapshot_detections(objects)
+            detections = map_detections_to_frame(
+                snapshot_detections(objects), yolo_metadata)
             del objects
+            if yolo_input is not frame:
+                del yolo_input
+            yolo_input_source = yolo_metadata.get("source", "FULL")
+            if yolo_input_source != last_yolo_input_source:
+                print(
+                    "QUICK_CAL_YOLO_INPUT|source=%s|roi=%s|error=%s"
+                    % (
+                        yolo_input_source,
+                        str(yolo_metadata.get("roi")),
+                        yolo_metadata.get("error") or "NONE",
+                    )
+                )
+                last_yolo_input_source = yolo_input_source
             preliminary = highest_score_detection(detections)
             trough_axis, _ = trough_tracker.update(
                 frame, exclusion_box=preliminary)

@@ -50,12 +50,19 @@ class F4VisionLinkTest(unittest.TestCase):
         port.rx.extend(encode_packet(
             "VPA", 0, "0,1,1200,150,1800"))
         port.rx.extend(encode_packet(
-            "VST", 0, "4,4,25,-12,34,0,-456,49151,3"))
+            "VST", 0,
+            "4,4,25,-12,34,0,-456,54329,54340,-91,325,-450,49151,3,6"))
         self.assertTrue(link.service(now[0]))
         self.assertTrue(link.last_vpa["accepted"])
         self.assertEqual(link.last_vpa["request_sequence"], 0)
         self.assertEqual(link.last_vst["estimate_mm"], -12)
         self.assertEqual(link.last_vst["theta_cmd_mdeg"], -456)
+        self.assertEqual(link.last_vst["motor_target_raw"], 54329)
+        self.assertEqual(link.last_vst["motor_feedback_raw"], 54340)
+        self.assertEqual(link.last_vst["motor_command_ma"], -91)
+        self.assertEqual(link.last_vst["motor_speed_centi_rpm"], 325)
+        self.assertEqual(link.last_vst["stiction_kick_mdeg"], -450)
+        self.assertEqual(link.last_vst["competition_mode"], 6)
 
     def test_decoders_reject_reserved_or_malformed_fields(self):
         accepted = decode_vpa_packet(1, "2,1,1200,150,1800")
@@ -63,7 +70,11 @@ class F4VisionLinkTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             decode_vpa_packet(1, "2,2,1200,150,1800")
         with self.assertRaises(ValueError):
-            decode_vst_packet(1, "0,0,0,0,0,0,0,16384,0")
+            decode_vst_packet(
+                1, "0,0,0,0,0,0,0,0,0,0,0,0,16384,0,0")
+        with self.assertRaises(ValueError):
+            decode_vst_packet(
+                1, "0,0,0,0,0,0,0,0,0,0,0,0,0,0,1")
 
     def test_ball_target_packet_and_bounds(self):
         port = FakePort()

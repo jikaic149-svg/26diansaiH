@@ -18,7 +18,6 @@ from maix import app, camera, display, image, nn, time
 import vision_config as config
 from ball_target_touch import BallTargetTouchController
 from ball_axis_position import (
-    filter_detections_in_normalized_roi,
     filter_detections_on_trough,
     highest_score_detection,
     project_ball_axis_position,
@@ -35,6 +34,7 @@ from quick_position_calibration import (
 from rtsp_debug_stream import RtspDebugStream
 from threshold_tuning_menu import run_threshold_tuning_menu
 from vofa_udp_telemetry import VofaUdpTelemetry
+from yolo_roi import prepare_yolo_input, map_detections_to_frame
 
 
 RED = image.Color.from_rgb(255, 0, 0)
@@ -148,6 +148,16 @@ def _trough_settings():
             config, "TROUGH_HEIGHT_CHANGE_WEIGHT", 0.15),
         "gap_penalty_weight": getattr(
             config, "TROUGH_GAP_PENALTY_WEIGHT", 0.12),
+        "seeded_growth_enabled": getattr(
+            config, "TROUGH_SEEDED_GROWTH_ENABLED", True),
+        "seed_column_trials": getattr(
+            config, "TROUGH_SEED_COLUMN_TRIALS", 11),
+        "seed_track_trials": getattr(
+            config, "TROUGH_SEED_TRACK_TRIALS", 4),
+        "seed_growth_half_height_px": getattr(
+            config, "TROUGH_SEED_GROWTH_HALF_HEIGHT_PX", 16),
+        "seed_early_accept_span_ratio": getattr(
+            config, "TROUGH_SEED_EARLY_ACCEPT_SPAN_RATIO", 0.70),
         "min_points": config.TROUGH_MIN_POINTS,
         "min_length_ratio_frame": config.TROUGH_MIN_LENGTH_RATIO_FRAME,
         "min_fit_residual_px": config.TROUGH_MIN_FIT_RESIDUAL_PX,
@@ -170,6 +180,18 @@ def _trough_settings():
             config, "TROUGH_ENDPOINT_REFINE_RADIUS_PX", 12),
         "endpoint_refine_max_misses": getattr(
             config, "TROUGH_ENDPOINT_REFINE_MAX_MISSES", 0),
+        "endpoint_search_coarse_step_px": getattr(
+            config, "TROUGH_ENDPOINT_SEARCH_COARSE_STEP_PX", 2),
+        "endpoint_inner_edge_enabled": getattr(
+            config, "TROUGH_ENDPOINT_INNER_EDGE_ENABLED", True),
+        "endpoint_inner_search_radius_px": getattr(
+            config, "TROUGH_ENDPOINT_INNER_SEARCH_RADIUS_PX", 16),
+        "endpoint_inner_min_height_ratio": getattr(
+            config, "TROUGH_ENDPOINT_INNER_MIN_HEIGHT_RATIO", 0.55),
+        "endpoint_inner_center_tolerance_ratio": getattr(
+            config, "TROUGH_ENDPOINT_INNER_CENTER_TOLERANCE_RATIO", 0.28),
+        "endpoint_inner_confirm_columns": getattr(
+            config, "TROUGH_ENDPOINT_INNER_CONFIRM_COLUMNS", 2),
         "endpoint_occlusion_enabled": getattr(
             config, "TROUGH_ENDPOINT_OCCLUSION_ENABLED", True),
         "endpoint_occlusion_edge_margin_px": getattr(
@@ -194,6 +216,22 @@ def _trough_settings():
         "axis_filter_endpoint_min_span_ratio":
             getattr(
                 config, "TROUGH_AXIS_FILTER_ENDPOINT_MIN_SPAN_RATIO", 0.75),
+        "endpoint_ab_enabled": getattr(
+            config, "TROUGH_ENDPOINT_AB_ENABLED", True),
+        "endpoint_ab_alpha": getattr(
+            config, "TROUGH_ENDPOINT_AB_ALPHA", 0.70),
+        "endpoint_ab_beta": getattr(
+            config, "TROUGH_ENDPOINT_AB_BETA", 0.15),
+        "endpoint_ab_max_innovation_px": getattr(
+            config, "TROUGH_ENDPOINT_AB_MAX_INNOVATION_PX", 48.0),
+        "endpoint_ab_max_velocity_px_s": getattr(
+            config, "TROUGH_ENDPOINT_AB_MAX_VELOCITY_PX_S", 240.0),
+        "endpoint_ab_max_predict_px": getattr(
+            config, "TROUGH_ENDPOINT_AB_MAX_PREDICT_PX", 12.0),
+        "endpoint_ab_reset_gap_ms": getattr(
+            config, "TROUGH_ENDPOINT_AB_RESET_GAP_MS", 600),
+        "endpoint_ab_nominal_dt_ms": getattr(
+            config, "TROUGH_ENDPOINT_AB_NOMINAL_DT_MS", 100),
         "curved_centerline_enabled": getattr(
             config, "TROUGH_CURVED_CENTERLINE_ENABLED", True),
         "centerline_segments": getattr(
@@ -357,7 +395,7 @@ def _draw_position(frame, position):
 
 
 def _draw_status(frame, perf, detections, trough_axis,
-                 tracked_ball, position):
+                 tracked_ball, position, f4_status=None):
     # 不再铺设实心黑色状态栏，让文字直接叠加在实时画面上。
     valid = bool(position.get("valid"))
     status_color = GREEN if valid else RED
@@ -378,11 +416,14 @@ def _draw_status(frame, perf, detections, trough_axis,
         str(tracked_ball.get("source", "M")) if tracked_ball else "-")
     trough_source = str(trough_axis.get(
         "source", "-")) if trough_axis else "-"
+    competition_mode = int((f4_status or {}).get("competition_mode", 0))
+    mode_text = str(competition_mode) if 2 <= competition_mode <= 6 else "-"
     frame.draw_string(
         3, 3,
-        "AXIS %s t:%s" % (
+        "AXIS %s t:%s M%s" % (
             position_text,
-            _format_number(position.get("t"), 3, "-")),
+            _format_number(position.get("t"), 3, "-"),
+            mode_text),
         color=status_color,
         scale=0.68,
     )
@@ -642,7 +683,8 @@ def main():
             camera_actual_fps = -1.0
         perf = PerformanceMeter(1000)
         trough_tracker = HorizontalTroughTracker(
-            _trough_settings(), clock_ms=time.ticks_ms)
+            _trough_settings(), clock_ms=time.ticks_ms,
+            clock_diff_ms=_elapsed_ms)
         quick_calibration_enabled = bool(getattr(
             config, "QUICK_POSITION_CALIBRATION_ENABLED", True))
         if quick_calibration_enabled:
@@ -732,6 +774,26 @@ def main():
                     config, "F4_TOUCH_TARGET_OFFLINE_MS", 500)),
                 target_to_f4_polarity=float(getattr(
                     config, "F4_TOUCH_TARGET_TO_F407_POLARITY", -1.0)),
+                question3_enabled=bool(getattr(
+                    config, "F4_TOUCH_QUESTION3_ENABLED", True)),
+                question3_center_mm=float(getattr(
+                    config, "F4_TOUCH_QUESTION3_CENTER_MM", 0.0)),
+                question3_center_tolerance_mm=float(getattr(
+                    config, "F4_TOUCH_QUESTION3_CENTER_TOLERANCE_MM", 10.0)),
+                question3_right_command_mm=float(getattr(
+                    config, "F4_TOUCH_QUESTION3_RIGHT_COMMAND_MM", 70.0)),
+                question3_right_reached_mm=float(getattr(
+                    config, "F4_TOUCH_QUESTION3_RIGHT_REACHED_MM", 55.0)),
+                question3_left_command_mm=float(getattr(
+                    config, "F4_TOUCH_QUESTION3_LEFT_COMMAND_MM", -70.0)),
+                question3_left_reached_mm=float(getattr(
+                    config, "F4_TOUCH_QUESTION3_LEFT_REACHED_MM", -50.0)),
+                question3_final_target_mm=float(getattr(
+                    config, "F4_TOUCH_QUESTION3_FINAL_TARGET_MM", -50.0)),
+                question3_limit_ms=int(getattr(
+                    config, "F4_TOUCH_QUESTION3_LIMIT_MS", 5000)),
+                question3_hard_timeout_ms=int(getattr(
+                    config, "F4_TOUCH_QUESTION3_HARD_TIMEOUT_MS", 8000)),
             )
             ball_target_touch.start()
         elif touch_target_enabled:
@@ -741,6 +803,7 @@ def main():
         # SHOW_TROUGH_BINARY开启时，隔帧复用中轴也要复用最近一次二值图，
         # 否则trough_mask=None会让显示逻辑退回原图，造成画面闪烁。
         last_trough_mask = None
+        last_yolo_input_source = None
         print(
             "STEELBALL_HORIZONTAL_START|model=%s|size=%dx%d|"
             "trough_color=%s|trough=%d|binary_view=%d|trough_roi_mask=%d|"
@@ -819,44 +882,40 @@ def main():
                 ball_target_touch.poll_touch(frame, disp)
 
             yolo_started_ms = time.ticks_ms()
-            objects = detector.detect(
+            yolo_input, yolo_metadata = prepare_yolo_input(
                 frame,
+                detector.input_width(),
+                detector.input_height(),
+                getattr(config, "YOLO_ROI_RATIO", config.TROUGH_ROI_RATIO),
+                enabled=bool(getattr(config, "YOLO_ROI_ENABLED", False)),
+            )
+            objects = detector.detect(
+                yolo_input,
                 conf_th=config.CONF_TH,
                 iou_th=config.IOU_TH,
             )
             current_ai_ms = time.ticks_ms() - yolo_started_ms
             perf.record("yolo", current_ai_ms)
-            detections = snapshot_detections(objects)
+            detections = map_detections_to_frame(
+                snapshot_detections(objects), yolo_metadata)
             del objects
-
-            direct_frame_axis_enabled = bool(getattr(
-                config, "F4_DIRECT_FRAME_AXIS_FALLBACK_ENABLED", False))
-            preliminary_detections = detections
-            if direct_frame_axis_enabled:
-                preliminary_detections = \
-                    filter_detections_in_normalized_roi(
-                        detections,
-                        frame.width(),
-                        frame.height(),
-                        config.TROUGH_ROI_RATIO,
+            if yolo_input is not frame:
+                del yolo_input
+            yolo_input_source = yolo_metadata.get("source", "FULL")
+            if yolo_input_source != last_yolo_input_source:
+                print(
+                    "YOLO_INPUT|source=%s|roi=%s|error=%s" % (
+                        yolo_input_source,
+                        str(yolo_metadata.get("roi")),
+                        yolo_metadata.get("error") or "NONE",
                     )
-            preliminary = highest_score_detection(preliminary_detections)
+                )
+                last_yolo_input_source = yolo_input_source
+
+            preliminary = highest_score_detection(detections)
             trough_started_ms = time.ticks_ms()
             trough_mask = None
-            if direct_frame_axis_enabled:
-                # 快速闭环模式的最终坐标本来就始终使用整幅水平轴；直接走这条
-                # 路径，避免先执行随后必然被覆盖的逐列颜色扫描。
-                trough_axis = _direct_frame_axis(frame, preliminary)
-                if trough_axis is None:
-                    trough_axis = {
-                        "valid": False,
-                        "reason": "BALL_NOT_FOUND",
-                        "source": "NONE",
-                        "orientation": "HORIZONTAL",
-                        "inliers": [],
-                    }
-                last_trough_mask = None
-            elif config.TROUGH_TRACKING_ENABLED:
+            if config.TROUGH_TRACKING_ENABLED:
                 trough_axis, trough_mask = trough_tracker.update(
                     frame, exclusion_box=preliminary)
                 trough_axis = transform_calibrated_axis(
@@ -916,6 +975,12 @@ def main():
                 "frame_index": int(frame_index),
             })
 
+            if ball_target_touch is not None:
+                ball_target_touch.update_question3(
+                    position,
+                    f4_link.last_vst if f4_link is not None else None,
+                    send_timestamp_ms)
+
             if vofa is not None and vofa_active:
                 vofa.send_position(
                     position,
@@ -925,6 +990,8 @@ def main():
                     measurement_age_ms=measurement_age_ms,
                     frame_timestamp_ms=frame_timestamp_ms,
                     frame_index=frame_index,
+                    f4_status=(
+                        f4_link.last_vst if f4_link is not None else None),
                 )
 
             if f4_link is not None and f4_active:
@@ -970,7 +1037,8 @@ def main():
                 _draw_position(display_frame, position)
                 _draw_status(
                     display_frame, perf, detections,
-                    trough_axis, tracked_ball, position)
+                    trough_axis, tracked_ball, position,
+                    f4_link.last_vst if f4_link is not None else None)
                 if ball_target_touch is not None:
                     ball_target_touch.draw(
                         display_frame, time.ticks_ms())

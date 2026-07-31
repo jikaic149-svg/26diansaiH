@@ -35,6 +35,8 @@
 MaixCAM2使用B0 `UART2_TX`、B1 `UART2_RX`与F407 USART2通信，设备为
 `/dev/ttyS2`，参数为115200 8N1。程序最多50 Hz发送合作协议第11节定义的`VIS`帧，
 并保留`VST`解析；该链路与G3519↔F407的USART1 `HB/CAR`完全独立。
+F407会把G3519当前赛题mode `2..6`追加到VST；`0`表示当前没有新鲜mode。Maix只解析、
+记录和显示`M2..M6`，不拥有模式选择，也不据此启动或停止滚球控制。
 
 屏幕底部滑条可选择`-120..+120 mm`整数目标。拖动时只更新屏幕选择值，松手后才以
 独立序号的`VBT`发送；首次收到`VST`且用户尚未操作时，滑条先同步F407当前目标，避免
@@ -169,10 +171,15 @@ VOFA_UDP_PORT = 1347
 VOFA_UDP_INTERVAL_MS = 25
 ```
 
-FireWater每行7个数值，依次为：
+FireWater前10个字段保持原视觉时序顺序，随后追加12个F407状态字段：
 
 ```text
-position_mm,valid,predicted,axis_source,score_pct,dt_ms,sequence
+position_mm,valid,predicted,axis_source,score_pct,tx_dt_ms,udp_sequence,
+measurement_age_ms,frame_timestamp_ms,frame_index,
+f4_estimate_mm,f4_velocity_mm_s,f4_target_mm,f4_theta_cmd_mdeg,
+f4_motor_target_raw,f4_motor_feedback_raw,f4_motor_command_ma,
+f4_motor_speed_centi_rpm,f4_stiction_kick_mdeg,f4_status_flags,
+f4_fault_bits,competition_mode
 ```
 
 VOFA调试数据只用于观察波形，不参与控制闭环；正式控制仍应使用独立的UART二进制
@@ -199,7 +206,7 @@ frame_ts_ms=帧读出完成时间|measure_age_ms=结果准备时距离帧读出�
 axis_filter=INIT/EMA/SNAP|axis_conf=中轴置信度|axis_filter_shift_px=滤波前后中心线偏移
 ```
 
-VOFA+ FireWater新增字段顺序为：
+VOFA+ FireWater前10个视觉字段顺序为：
 
 ```text
 position_mm,valid,predicted,axis_source,score_pct,tx_dt_ms,udp_sequence,measurement_age_ms,frame_timestamp_ms,frame_index

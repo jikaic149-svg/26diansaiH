@@ -12,10 +12,12 @@
 除 ``make_trough_mask`` 外不依赖MaixPy，方便电脑构造二值图回归测试。
 """
 
+from alpha_beta_filter import AlphaBetaFilter1D
+
 
 DEFAULT_SETTINGS = {
     "lab_thresholds": [(77, 100, -18, 18, -18, 22)],
-    "roi_ratio": (0.00, 0.45, 1.00, 0.55),
+    "roi_ratio": (0.00, 0.62, 1.00, 0.38),
     # 先裁ROI再做LAB二值化，避免每帧复制和处理整幅RGB图。
     # 二值调试画面需要完整尺寸掩膜时，由入口临时关闭此开关。
     "roi_mask_enabled": True,
@@ -28,12 +30,28 @@ DEFAULT_SETTINGS = {
     "max_track_gap_x_px": 48,
     "height_change_weight": 0.15,
     "gap_penalty_weight": 0.12,
+    # 快速路径：只尝试少量中心种子，再沿预测中轴小窗口向左右生长；
+    # 贯穿不足时自动回退原来的全采样列候选算法。
+    "seeded_growth_enabled": True,
+    "seed_column_trials": 11,
+    "seed_track_trials": 4,
+    "seed_growth_half_height_px": 16,
+    "seed_early_accept_span_ratio": 0.70,
     "endpoint_band_px": 18,
     "endpoint_min_support_points": 3,
     "endpoint_min_aspect_ratio": 5.0,
     "endpoint_refine_enabled": True,
     "endpoint_refine_radius_px": 12,
     "endpoint_refine_max_misses": 0,
+    # 中间水管仍按column_step粗采样；左右端点只先按2列粗定位，
+    # 再在最后一个变化区间内逐列确认，兼顾速度与1像素端点分辨率。
+    "endpoint_search_coarse_step_px": 2,
+    # 半圆凹槽俯视时外壁轮廓可能略长；只接受中轴附近仍具有正常厚度的内缘。
+    "endpoint_inner_edge_enabled": True,
+    "endpoint_inner_search_radius_px": 16,
+    "endpoint_inner_min_height_ratio": 0.55,
+    "endpoint_inner_center_tolerance_ratio": 0.28,
+    "endpoint_inner_confirm_columns": 2,
     "endpoint_occlusion_enabled": True,
     "endpoint_occlusion_edge_margin_px": 18,
     "endpoint_occlusion_min_inset_px": 8,
@@ -46,15 +64,24 @@ DEFAULT_SETTINGS = {
     "ball_exclusion_margin_px": 5,
     "cache_frames": 3,
     "update_interval_frames": 1,
-    # 中轴线时间滤波：只对通过质量门限的当前测量做EMA。
+    # 整体中轴斜率/截距仍做轻量EMA；左右动态端点改用独立alpha-beta，
+    # 重测帧校正位置和速度，HELD中间帧只做有界预测。
     "axis_filter_enabled": True,
     "axis_filter_alpha": 0.25,
-    "axis_filter_span_alpha": 0.20,
     "axis_filter_min_confidence": 0.30,
     "axis_filter_snap_shift_px": 14.0,
     "axis_filter_snap_slope_delta": 0.06,
     "axis_filter_endpoint_max_shift_px": 24.0,
     "axis_filter_endpoint_min_span_ratio": 0.75,
+    "endpoint_ab_enabled": True,
+    "endpoint_ab_alpha": 0.70,
+    "endpoint_ab_beta": 0.15,
+    "endpoint_ab_max_innovation_px": 48.0,
+    "endpoint_ab_max_velocity_px_s": 240.0,
+    "endpoint_ab_max_predict_px": 12.0,
+    "endpoint_ab_reset_gap_ms": 600,
+    # PC直接调用且没有板端ticks_ms时，仅用于构造可重复的逻辑时间。
+    "endpoint_ab_nominal_dt_ms": 100,
     "curved_centerline_enabled": True,
     "centerline_segments": 6,
     "centerline_residual_filter_enabled": True,
@@ -562,24 +589,68 @@ def _best_endpoint_run(buffer_view, x, roi, settings,
 
 def _refine_endpoint_x(buffer_view, start_x, direction, roi, settings,
                        exclusion_box, centerline, expected_height):
-    """从粗端点向外逐列搜索，返回(精扫横坐标, 是否确实延伸)。"""
+    """从粗端点向外做步长2粗扫，再在末端变化区间逐列确认。
+
+    末端精扫会从倒数第二个有效粗采样点重新检查，因此若两个粗采样点
+    之间存在单列断裂，后方偶发毛刺不会被误当成连续端点。
+    """
     if not bool(settings.get("endpoint_refine_enabled", True)):
         return float(start_x), False
     radius = max(0, int(settings.get("endpoint_refine_radius_px", 12)))
     max_misses = max(
         0, int(settings.get("endpoint_refine_max_misses", 0)))
+    coarse_step = max(
+        1, int(settings.get("endpoint_search_coarse_step_px", 2)))
     exclusion_margin = max(
         0, int(settings["ball_exclusion_margin_px"]))
-    best_x = int(start_x)
+    start_x = int(round(start_x))
+    best_x = start_x
     misses = 0
-    refined = False
-    for offset in range(1, radius + 1):
-        x = int(start_x) + int(direction) * offset
+    coarse_valid_x = [start_x]
+    coarse_runs = {}
+    fine_limit = radius
+
+    # 第一级只探测稀疏列，快速找到端点由白变黑的大致区间。
+    for offset in range(coarse_step, radius + 1, coarse_step):
+        x = start_x + int(direction) * offset
         if _excluded_x(x, exclusion_box, exclusion_margin):
+            fine_limit = max(0, offset - 1)
             break
         expected_y = _polyline_y_at(centerline, x)
         run = _best_endpoint_run(
             buffer_view, x, roi, settings, expected_y, expected_height)
+        coarse_runs[x] = run
+        if run is None:
+            misses += 1
+            if misses > max_misses:
+                fine_limit = offset
+                break
+            continue
+        coarse_valid_x.append(x)
+        misses = 0
+
+    # 第二级从倒数第二个有效粗采样点开始逐列确认。已粗扫的列直接复用
+    # 结果，不重复读取缓冲；这既找回奇数列端点，也能识别粗点间的断裂。
+    fine_anchor_x = (
+        coarse_valid_x[-2]
+        if len(coarse_valid_x) >= 2 else start_x
+    )
+    fine_anchor_offset = abs(int(fine_anchor_x) - start_x)
+    # 锚点本身已经在粗扫中确认有效；精扫若在下一列遇到断裂，应保留
+    # 该锚点，而不是错误退回最初的主体粗端点。
+    best_x = int(fine_anchor_x)
+    misses = 0
+    for offset in range(fine_anchor_offset + 1, fine_limit + 1):
+        x = start_x + int(direction) * offset
+        if _excluded_x(x, exclusion_box, exclusion_margin):
+            break
+        if x in coarse_runs:
+            run = coarse_runs[x]
+        else:
+            expected_y = _polyline_y_at(centerline, x)
+            run = _best_endpoint_run(
+                buffer_view, x, roi, settings,
+                expected_y, expected_height)
         if run is None:
             misses += 1
             if misses > max_misses:
@@ -587,12 +658,197 @@ def _refine_endpoint_x(buffer_view, start_x, direction, roi, settings,
             continue
         best_x = x
         misses = 0
-        refined = True
-    return float(best_x), refined
+    return float(best_x), best_x != start_x
 
 
-def _longest_white_track(buffer_view, roi, settings, exclusion_box,
-                         previous_axis, allow_guided_scan=True):
+def _seed_column_candidates(buffer_view, x, roi, settings,
+                            exclusion_box, expected_y=None,
+                            half_height=None):
+    """只扫描一列的局部窗口，返回满足厚度门限的白段候选。"""
+    roi_x, roi_y, roi_width, roi_height = roi
+    if x < roi_x or x >= roi_x + roi_width:
+        return []
+    exclusion_margin = max(
+        0, int(settings["ball_exclusion_margin_px"]))
+    if _excluded_x(x, exclusion_box, exclusion_margin):
+        return []
+
+    scan_top = roi_y
+    scan_bottom = roi_y + roi_height
+    if expected_y is not None and half_height is not None:
+        radius = max(2, int(half_height))
+        scan_top = max(roi_y, int(round(expected_y)) - radius)
+        scan_bottom = min(
+            roi_y + roi_height,
+            int(round(expected_y)) + radius + 1,
+        )
+    runs = merge_nearby_runs(
+        column_white_runs(buffer_view, x, scan_top, scan_bottom),
+        max(0, int(settings["max_internal_gap_px"])),
+    )
+    min_height = max(1, int(settings["min_run_height_px"]))
+    max_height = max(
+        min_height,
+        int(round(roi_height * float(
+            settings["max_run_height_ratio_roi"]))),
+    )
+    return [
+        run for run in runs
+        if min_height <= int(run[2]) <= max_height
+    ]
+
+
+def _seeded_white_track(buffer_view, roi, settings, exclusion_box,
+                        previous_axis, allow_guided_scan=True):
+    """从少量种子直接局部生长；成功时避免预扫全部采样列。"""
+    if not bool(settings.get("seeded_growth_enabled", True)):
+        return []
+
+    roi_x, roi_y, roi_width, _ = roi
+    column_step = max(1, int(settings["column_step"]))
+    local_radius = max(1.0, float(settings["local_search_radius_px"]))
+    max_gap_x = max(column_step, int(settings["max_track_gap_x_px"]))
+    height_change_weight = max(
+        0.0, float(settings.get("height_change_weight", 0.15)))
+    gap_penalty_weight = max(
+        0.0, float(settings.get("gap_penalty_weight", 0.12)))
+    growth_half_height = max(
+        2, int(settings.get("seed_growth_half_height_px", 16)))
+    guided_half_height = max(
+        0, int(settings.get("guided_scan_half_height_px", 0)))
+    seed_column_trials = max(
+        1, int(settings.get("seed_column_trials", 11)))
+    seed_track_trials = max(
+        1, int(settings.get("seed_track_trials", 4)))
+    minimum_points = max(2, int(settings["min_points"]))
+    early_span_ratio = max(
+        float(settings["min_length_ratio_frame"]),
+        min(1.0, float(settings.get(
+            "seed_early_accept_span_ratio", 0.70))),
+    )
+    roi_center_y = roi_y + roi[3] * 0.5
+
+    def point_from_run(x, run):
+        return {
+            "x": int(x),
+            "top": int(run[0]),
+            "bottom": int(run[1]),
+            "height": int(run[2]),
+            "cy": float(run[3]),
+        }
+
+    def follow(seed_x, seed_run, direction):
+        output = [point_from_run(seed_x, seed_run)]
+        current_x = int(seed_x)
+        current_y = float(seed_run[3])
+        current_height = float(seed_run[2])
+        slope = 0.0
+        cost = 0.0
+        x = int(seed_x) + int(direction) * column_step
+        end_x = roi_x + roi_width
+        while roi_x <= x < end_x:
+            signed_gap = int(x) - current_x
+            gap_x = abs(signed_gap)
+            if gap_x > max_gap_x:
+                break
+            predicted_y = current_y + slope * signed_gap
+            candidates = _seed_column_candidates(
+                buffer_view, x, roi, settings, exclusion_box,
+                expected_y=predicted_y,
+                half_height=growth_half_height,
+            )
+            best = None
+            best_cost = None
+            for run in candidates:
+                center_delta = abs(float(run[3]) - predicted_y)
+                if center_delta > local_radius + 0.20 * gap_x:
+                    continue
+                candidate_cost = center_delta + \
+                    height_change_weight * abs(
+                        float(run[2]) - current_height) + \
+                    gap_penalty_weight * max(0.0, gap_x - column_step)
+                if best_cost is None or candidate_cost < best_cost:
+                    best = run
+                    best_cost = candidate_cost
+            if best is not None:
+                instantaneous_slope = (
+                    float(best[3]) - current_y) / signed_gap
+                slope = 0.70 * slope + 0.30 * instantaneous_slope
+                current_x = int(x)
+                current_y = float(best[3])
+                current_height = float(best[2])
+                output.append(point_from_run(x, best))
+                cost += float(best_cost)
+            x += int(direction) * column_step
+        return output, cost
+
+    columns = list(range(roi_x, roi_x + roi_width, column_step))
+    center_x = roi_x + roi_width * 0.5
+    columns.sort(key=lambda x: abs(float(x) - center_x))
+    best_track = []
+    best_key = None
+    tracks_tried = 0
+
+    seed_columns_checked = 0
+    for seed_x in columns:
+        # 中心种子可能恰好被钢球排除区覆盖；这类列不消耗试探额度，
+        # 继续向外扩展寻找可生长种子。
+        if _excluded_x(
+                seed_x, exclusion_box,
+                max(0, int(settings["ball_exclusion_margin_px"]))):
+            continue
+        seed_columns_checked += 1
+        if seed_columns_checked > seed_column_trials:
+            break
+        expected_y = _axis_y_at(previous_axis, seed_x)
+        if expected_y is None:
+            expected_y = roi_center_y
+        use_guided_seed = bool(
+            allow_guided_scan and previous_axis and
+            guided_half_height > 0)
+        candidates = _seed_column_candidates(
+            buffer_view, seed_x, roi, settings, exclusion_box,
+            expected_y=expected_y if use_guided_seed else None,
+            half_height=guided_half_height if use_guided_seed else None,
+        )
+        ordered = sorted(
+            candidates,
+            key=lambda run: (
+                abs(float(run[3]) - float(expected_y)),
+                -int(run[2]),
+            ),
+        )
+        for seed_run in ordered[:2]:
+            leftward, left_cost = follow(seed_x, seed_run, -1)
+            rightward, right_cost = follow(seed_x, seed_run, 1)
+            leftward.reverse()
+            track = leftward[:-1] + rightward
+            span_x = track[-1]["x"] - track[0]["x"] if track else 0
+            expected_points = max(
+                1.0, span_x / float(column_step) + 1.0)
+            coverage = min(1.0, len(track) / expected_points)
+            span_ratio = min(
+                1.0, span_x / max(1.0, float(roi_width)))
+            average_cost = (
+                left_cost + right_cost) / max(1, len(track))
+            key = (
+                coverage * (0.5 + 0.5 * span_ratio),
+                span_x, -average_cost, len(track),
+            )
+            if best_key is None or key > best_key:
+                best_key = key
+                best_track = track
+            tracks_tried += 1
+            if len(track) >= minimum_points and \
+                    span_ratio >= early_span_ratio and coverage >= 0.72:
+                return track
+            if tracks_tried >= seed_track_trials:
+                return best_track
+    return best_track
+
+
+def _exhaustive_white_track(buffer_view, roi, settings, exclusion_box,
+                            previous_axis, allow_guided_scan=True):
     roi_x, roi_y, roi_width, roi_height = roi
     column_step = max(1, int(settings["column_step"]))
     min_height = max(1, int(settings["min_run_height_px"]))
@@ -739,8 +995,113 @@ def _longest_white_track(buffer_view, roi, settings, exclusion_box,
     return best_track
 
 
+def _longest_white_track(buffer_view, roi, settings, exclusion_box,
+                         previous_axis, allow_guided_scan=True):
+    """优先少种子局部生长；候选不足时回退原全列预扫。"""
+    minimum_points = max(2, int(settings["min_points"]))
+    if bool(settings.get("seeded_growth_enabled", True)):
+        seeded = _seeded_white_track(
+            buffer_view, roi, settings, exclusion_box,
+            previous_axis, allow_guided_scan=allow_guided_scan)
+        if len(seeded) >= minimum_points:
+            return seeded, "SEEDED"
+        exhaustive = _exhaustive_white_track(
+            buffer_view, roi, settings, exclusion_box,
+            previous_axis, allow_guided_scan=allow_guided_scan)
+        return exhaustive, "EXHAUSTIVE_FALLBACK"
+    return _exhaustive_white_track(
+        buffer_view, roi, settings, exclusion_box,
+        previous_axis, allow_guided_scan=allow_guided_scan), "EXHAUSTIVE"
+
+
+def _inner_endpoint_supported(buffer_view, x, roi, settings,
+                              centerline, expected_height):
+    """判断端点列是否仍包含中部、接近正常厚度的凹槽截面。"""
+    expected_y = _polyline_y_at(centerline, x)
+    candidates = _seed_column_candidates(
+        buffer_view, x, roi, settings, exclusion_box=None,
+        expected_y=expected_y,
+        half_height=max(2, int(settings["local_search_radius_px"])),
+    )
+    minimum_height = max(
+        float(settings["min_run_height_px"]),
+        float(expected_height) * float(settings.get(
+            "endpoint_inner_min_height_ratio", 0.55)),
+    )
+    center_tolerance = max(
+        1.5,
+        float(expected_height) * float(settings.get(
+            "endpoint_inner_center_tolerance_ratio", 0.28)),
+    )
+    return any(
+        float(run[2]) >= minimum_height and
+        abs(float(run[3]) - float(expected_y)) <= center_tolerance
+        for run in candidates
+    )
+
+
+def _trim_endpoint_to_inner_edge(buffer_view, start_x, direction, roi,
+                                 settings, exclusion_box,
+                                 centerline, expected_height):
+    """从外轮廓向内粗定位完整截面，再逐列确认较短的凹槽内缘。"""
+    if not bool(settings.get("endpoint_inner_edge_enabled", True)):
+        return float(start_x), False
+    radius = max(
+        0, int(settings.get("endpoint_inner_search_radius_px", 16)))
+    confirm = max(
+        1, int(settings.get("endpoint_inner_confirm_columns", 2)))
+    coarse_step = max(
+        1, int(settings.get("endpoint_search_coarse_step_px", 2)))
+    exclusion_margin = max(
+        0, int(settings["ball_exclusion_margin_px"]))
+    start_x = int(round(start_x))
+    support_cache = {}
+
+    def supported_at(offset):
+        x = start_x + int(direction) * int(offset)
+        if _excluded_x(x, exclusion_box, exclusion_margin):
+            return False
+        if x not in support_cache:
+            support_cache[x] = _inner_endpoint_supported(
+                buffer_view, x, roi, settings,
+                centerline, expected_height)
+        return support_cache[x]
+
+    # 先每隔2列寻找可能的完整截面。每次命中后，只在命中点前后的小区间
+    # 做步长1连续确认；若只是孤立毛刺，确认失败后继续寻找下一个粗命中。
+    for coarse_offset in range(0, radius + 1, coarse_step):
+        if not supported_at(coarse_offset):
+            continue
+        fine_start = max(0, coarse_offset - coarse_step)
+        fine_end = min(
+            radius, coarse_offset + coarse_step + confirm - 1)
+        streak_start = None
+        streak = 0
+        for offset in range(fine_start, fine_end + 1):
+            if supported_at(offset):
+                if streak == 0:
+                    streak_start = offset
+                streak += 1
+                if streak >= confirm:
+                    inner_x = start_x + int(direction) * streak_start
+                    return float(inner_x), inner_x != start_x
+            else:
+                streak_start = None
+                streak = 0
+    return float(start_x), False
+
+
+def _finish_stage_timing(result, field, clock_ms, started_ms):
+    """结束一个内部阶段计时；未传板端时钟时保持零开销兼容。"""
+    if clock_ms is None or started_ms is None:
+        return None
+    ended_ms = clock_ms()
+    result[field] = max(0, int(ended_ms - started_ms))
+    return ended_ms
+
+
 def extract_trough_axis(binary, settings=None, exclusion_box=None,
-                        previous_axis=None):
+                        previous_axis=None, clock_ms=None):
     """从二值图提取横向凹槽中轴，失败时返回带reason的诊断字典。"""
     settings = _settings(settings)
     result = {
@@ -763,9 +1124,14 @@ def extract_trough_axis(binary, settings=None, exclusion_box=None,
         "fit_rms_px": None,
         "confidence": 0.0,
         "scan_mode": "FULL",
+        "track_mode": "NONE",
         "endpoint_refine": "NONE",
         "endpoint_refine_left_px": 0.0,
         "endpoint_refine_right_px": 0.0,
+        "seed_ms": 0,
+        "fit_ms": 0,
+        "refine_ms": 0,
+        "inner_ms": 0,
     }
     try:
         buffer_view = BinaryBuffer(binary)
@@ -781,17 +1147,22 @@ def extract_trough_axis(binary, settings=None, exclusion_box=None,
         previous_axis and
         int(settings.get("guided_scan_half_height_px", 0)) > 0
     )
-    points = _longest_white_track(
+    stage_started_ms = clock_ms() if clock_ms else None
+    points, track_mode = _longest_white_track(
         buffer_view, roi, settings, exclusion_box, previous_axis,
         allow_guided_scan=True)
+    result["track_mode"] = track_mode
     minimum_points = max(2, int(settings["min_points"]))
     if guided and len(points) < minimum_points:
-        points = _longest_white_track(
+        points, track_mode = _longest_white_track(
             buffer_view, roi, settings, exclusion_box, previous_axis,
             allow_guided_scan=False)
         result["scan_mode"] = "FULL_FALLBACK"
+        result["track_mode"] = track_mode
     elif guided:
         result["scan_mode"] = "GUIDED"
+    stage_started_ms = _finish_stage_timing(
+        result, "seed_ms", clock_ms, stage_started_ms)
     result["points"] = points
     if not points:
         result["reason"] = "NO_WHITE_TRACK"
@@ -807,12 +1178,16 @@ def extract_trough_axis(binary, settings=None, exclusion_box=None,
     )
     if fitted is None:
         result["reason"] = "FIT_FAILED"
+        _finish_stage_timing(
+            result, "fit_ms", clock_ms, stage_started_ms)
         return result
     slope, intercept, inliers, rms = fitted
     result["inliers"] = inliers
     result["fit_rms_px"] = rms
     if len(inliers) < minimum_points:
         result["reason"] = "TOO_FEW_INLIERS"
+        _finish_stage_timing(
+            result, "fit_ms", clock_ms, stage_started_ms)
         return result
 
     left_x = min(int(point["x"]) for point in inliers)
@@ -869,12 +1244,16 @@ def extract_trough_axis(binary, settings=None, exclusion_box=None,
     })
     if aspect_ratio < float(settings.get("endpoint_min_aspect_ratio", 5.0)):
         result["reason"] = "NOT_SLENDER"
+        _finish_stage_timing(
+            result, "fit_ms", clock_ms, stage_started_ms)
         return result
 
     minimum_length = float(settings["min_length_ratio_frame"]) * \
         buffer_view.width
     if length_px < minimum_length:
         result["reason"] = "TROUGH_TOO_SHORT"
+        _finish_stage_timing(
+            result, "fit_ms", clock_ms, stage_started_ms)
         return result
 
     # 单侧端点正是钢球遮挡时最容易缺少一个拟合内点的区域。若主体已经
@@ -883,10 +1262,14 @@ def extract_trough_axis(binary, settings=None, exclusion_box=None,
     # 两侧都缺乏局部支撑时，才把它视为无法可靠确定跨度的假轨迹。
     if not left_endpoint_strong and not right_endpoint_strong:
         result["reason"] = "ENDPOINT_SUPPORT_LOW"
+        _finish_stage_timing(
+            result, "fit_ms", clock_ms, stage_started_ms)
         return result
 
     provisional_centerline = _build_centerline(
         inliers, left_x, right_x, slope, intercept, settings)
+    stage_started_ms = _finish_stage_timing(
+        result, "fit_ms", clock_ms, stage_started_ms)
     refined_left_x, left_refined = _refine_endpoint_x(
         buffer_view, left_x, -1, roi, settings, exclusion_box,
         provisional_centerline, thickness)
@@ -903,9 +1286,35 @@ def extract_trough_axis(binary, settings=None, exclusion_box=None,
         endpoint_refine = "RIGHT"
     else:
         endpoint_refine = "NONE"
+    stage_started_ms = _finish_stage_timing(
+        result, "refine_ms", clock_ms, stage_started_ms)
+
+    # 俯视半圆槽时，薄外壁可能比槽底真实有效长度多伸出数像素。
+    # 从最外轮廓向内找连续完整截面，取中部较短的内缘作为最终端点。
+    inner_left_x, left_inner_trimmed = _trim_endpoint_to_inner_edge(
+        buffer_view, refined_left_x, 1, roi, settings, exclusion_box,
+        provisional_centerline, thickness)
+    inner_right_x, right_inner_trimmed = _trim_endpoint_to_inner_edge(
+        buffer_view, refined_right_x, -1, roi, settings, exclusion_box,
+        provisional_centerline, thickness)
+    if inner_left_x >= inner_right_x:
+        inner_left_x = refined_left_x
+        inner_right_x = refined_right_x
+        left_inner_trimmed = False
+        right_inner_trimmed = False
+    if left_inner_trimmed and right_inner_trimmed:
+        endpoint_inner = "BOTH"
+    elif left_inner_trimmed:
+        endpoint_inner = "LEFT"
+    elif right_inner_trimmed:
+        endpoint_inner = "RIGHT"
+    else:
+        endpoint_inner = "NONE"
+    inner_left_px = max(0.0, inner_left_x - refined_left_x)
+    inner_right_px = max(0.0, refined_right_x - inner_right_x)
 
     left_to_right = _build_centerline(
-        inliers, refined_left_x, refined_right_x,
+        inliers, inner_left_x, inner_right_x,
         slope, intercept, settings)
     if bool(settings["positive_at_right"]):
         centerline = left_to_right
@@ -943,19 +1352,26 @@ def extract_trough_axis(binary, settings=None, exclusion_box=None,
         "endpoint_refine": endpoint_refine,
         "endpoint_refine_left_px": left_refine_px,
         "endpoint_refine_right_px": right_refine_px,
+        "endpoint_inner": endpoint_inner,
+        "endpoint_inner_left_px": inner_left_px,
+        "endpoint_inner_right_px": inner_right_px,
         "confidence": support * residual_score,
         "slope_y_per_x": slope,
         "intercept_y": intercept,
     })
+    _finish_stage_timing(
+        result, "inner_ms", clock_ms, stage_started_ms)
     return result
 
 
 class HorizontalTroughTracker:
     """管理横向凹槽掩膜、低频更新和短时中轴缓存。"""
 
-    def __init__(self, settings=None, clock_ms=None):
+    def __init__(self, settings=None, clock_ms=None, clock_diff_ms=None):
         self.settings = _settings(settings)
         self.clock_ms = clock_ms
+        self.clock_diff_ms = clock_diff_ms
+        self._fallback_timestamp_ms = 0
         self.last_axis = None
         self.cache_age = 0
         self.frame_index = 0
@@ -967,6 +1383,8 @@ class HorizontalTroughTracker:
         self._filtered_curve_residuals = None
         self._endpoint_occlusion_side = "NONE"
         self._endpoint_clear_frames = 0
+        self._left_endpoint_ab = self._new_endpoint_filter()
+        self._right_endpoint_ab = self._new_endpoint_filter()
 
     def reset(self):
         self.last_axis = None
@@ -980,6 +1398,55 @@ class HorizontalTroughTracker:
         self._filtered_curve_residuals = None
         self._endpoint_occlusion_side = "NONE"
         self._endpoint_clear_frames = 0
+        self._fallback_timestamp_ms = 0
+        self._left_endpoint_ab.reset()
+        self._right_endpoint_ab.reset()
+
+    def _new_endpoint_filter(self):
+        return AlphaBetaFilter1D(
+            alpha=self.settings.get("endpoint_ab_alpha", 0.70),
+            beta=self.settings.get("endpoint_ab_beta", 0.15),
+            max_velocity=self.settings.get(
+                "endpoint_ab_max_velocity_px_s", 240.0),
+            max_predict=self.settings.get("endpoint_ab_max_predict_px", 12.0),
+            max_innovation=self.settings.get(
+                "endpoint_ab_max_innovation_px", 48.0),
+            reset_gap_ms=self.settings.get("endpoint_ab_reset_gap_ms", 600),
+            clock_diff_ms=self.clock_diff_ms,
+        )
+
+    def _timestamp_ms(self):
+        """读取板端时钟；PC纯逻辑调用没有时钟时使用固定步长。"""
+        if self.clock_ms is not None:
+            return int(self.clock_ms())
+        current = int(self._fallback_timestamp_ms)
+        self._fallback_timestamp_ms = (
+            current + max(1, int(self.settings.get(
+                "endpoint_ab_nominal_dt_ms", 100)))) & 0xFFFFFFFF
+        return current
+
+    def _sync_endpoint_positions(self, left_x, right_x, timestamp_ms,
+                                 bounds=None, zero_velocity=False):
+        """约束端点在ROI内且不交叉，并同步alpha-beta内部位置。"""
+        left_x = float(left_x)
+        right_x = float(right_x)
+        if bounds is not None:
+            left_x = max(float(bounds[0]), min(float(bounds[1]), left_x))
+            right_x = max(float(bounds[0]), min(float(bounds[1]), right_x))
+        if right_x <= left_x:
+            midpoint = 0.5 * (left_x + right_x)
+            left_x = midpoint - 0.5
+            right_x = midpoint + 0.5
+            if bounds is not None:
+                left_x = max(float(bounds[0]), left_x)
+                right_x = min(float(bounds[1]), right_x)
+        self._left_endpoint_ab.set_position(
+            left_x, timestamp_ms, zero_velocity=zero_velocity)
+        self._right_endpoint_ab.set_position(
+            right_x, timestamp_ms, zero_velocity=zero_velocity)
+        self._filtered_left_x = left_x
+        self._filtered_right_x = right_x
+        return left_x, right_x
 
     @staticmethod
     def _raw_line(axis):
@@ -1202,28 +1669,33 @@ class HorizontalTroughTracker:
             self._endpoint_clear_frames = 0
         return "NONE", "CLEAR"
 
-    def _filter_valid_axis(self, raw_axis, exclusion_box=None):
-        """对当前有效中轴做质量门控和参数EMA，返回(结果, 是否采纳)。
+    def _filter_valid_axis(self, raw_axis, exclusion_box=None,
+                           timestamp_ms=None):
+        """对当前有效中轴做质量门控、整体EMA和端点alpha-beta。
 
-        只滤波斜率、截距、横向覆盖范围和宽度，不对端点分别平均，
-        避免端点抖动直接转化为钢球物理位置抖动。突变超过门限时
-        认为是相机/结构确实发生了变化，立即吸收新测量，避免滞后。
+        斜率、截距和宽度保留原轻量EMA；左右横向端点分别维护位置与
+        速度。几何门控和遮挡状态机始终先执行，不能用预测替代候选筛选。
         """
+        if timestamp_ms is None:
+            timestamp_ms = self._timestamp_ms()
         raw_line = self._raw_line(raw_axis)
         if raw_line is None:
             return None, False
 
         raw_slope, raw_intercept, raw_left_x, raw_right_x = raw_line
+        measured_left_x = raw_left_x
+        measured_right_x = raw_right_x
         raw_width = max(0.0, float(raw_axis.get("median_width_px", 0.0)))
         enabled = bool(self.settings.get("axis_filter_enabled", True))
         endpoint_filter = "INIT"
         history_ready = self._filtered_slope is not None and \
             self._filtered_left_x is not None and \
-            self._filtered_right_x is not None
+            self._filtered_right_x is not None and \
+            self._left_endpoint_ab.initialized and \
+            self._right_endpoint_ab.initialized
         if not enabled or not history_ready:
             mode = "DISABLED" if not enabled else "INIT"
             alpha = 1.0
-            span_alpha = 1.0
             shift_px = 0.0
             slope_delta = 0.0
         else:
@@ -1247,13 +1719,10 @@ class HorizontalTroughTracker:
                 "axis_filter_snap_slope_delta", 0.06))
             if shift_px >= snap_shift or slope_delta >= snap_slope:
                 alpha = 1.0
-                span_alpha = 1.0
                 mode = "SNAP"
             else:
                 alpha = max(0.0, min(1.0, float(self.settings.get(
                     "axis_filter_alpha", 0.25))))
-                span_alpha = max(0.0, min(1.0, float(self.settings.get(
-                    "axis_filter_span_alpha", alpha))))
                 mode = "EMA"
 
 
@@ -1320,19 +1789,65 @@ class HorizontalTroughTracker:
             (self._filtered_intercept
              if self._filtered_intercept is not None else raw_intercept)
         )
-        self._filtered_left_x = (
-            span_alpha * raw_left_x + (1.0 - span_alpha) *
-            (self._filtered_left_x
-             if self._filtered_left_x is not None else raw_left_x)
-        )
-        self._filtered_right_x = (
-            span_alpha * raw_right_x + (1.0 - span_alpha) *
-            (self._filtered_right_x
-             if self._filtered_right_x is not None else raw_right_x)
+
+        endpoint_ab_enabled = enabled and bool(self.settings.get(
+            "endpoint_ab_enabled", True))
+        if not endpoint_ab_enabled:
+            left_ab = self._left_endpoint_ab.reset(
+                raw_left_x, timestamp_ms)
+            right_ab = self._right_endpoint_ab.reset(
+                raw_right_x, timestamp_ms)
+            endpoint_ab_mode = "DISABLED"
+        elif not history_ready:
+            left_ab = self._left_endpoint_ab.reset(
+                raw_left_x, timestamp_ms)
+            right_ab = self._right_endpoint_ab.reset(
+                raw_right_x, timestamp_ms)
+            endpoint_ab_mode = "INIT"
+        elif endpoint_filter == "HOLD_SHRINK":
+            left_ab = self._left_endpoint_ab.hold(
+                timestamp_ms, zero_velocity=True, mode="HOLD_SHRINK")
+            right_ab = self._right_endpoint_ab.hold(
+                timestamp_ms, zero_velocity=True, mode="HOLD_SHRINK")
+            endpoint_ab_mode = "HOLD_SHRINK"
+        elif occlusion_side == "LEFT":
+            left_ab = self._left_endpoint_ab.hold(
+                timestamp_ms, zero_velocity=True, mode="HOLD_OCCLUDED")
+            right_ab = self._right_endpoint_ab.correct(
+                raw_right_x, timestamp_ms)
+            endpoint_ab_mode = "HOLD_LEFT_CORRECT_RIGHT"
+        elif occlusion_side == "RIGHT":
+            left_ab = self._left_endpoint_ab.correct(
+                raw_left_x, timestamp_ms)
+            right_ab = self._right_endpoint_ab.hold(
+                timestamp_ms, zero_velocity=True, mode="HOLD_OCCLUDED")
+            endpoint_ab_mode = "CORRECT_LEFT_HOLD_RIGHT"
+        elif mode == "SNAP":
+            left_ab = self._left_endpoint_ab.reset(
+                raw_left_x, timestamp_ms)
+            right_ab = self._right_endpoint_ab.reset(
+                raw_right_x, timestamp_ms)
+            endpoint_ab_mode = "SNAP"
+        else:
+            left_ab = self._left_endpoint_ab.correct(
+                raw_left_x, timestamp_ms)
+            right_ab = self._right_endpoint_ab.correct(
+                raw_right_x, timestamp_ms)
+            left_mode = left_ab.get("mode", "CORRECT")
+            right_mode = right_ab.get("mode", "CORRECT")
+            endpoint_ab_mode = (
+                left_mode if left_mode == right_mode else
+                left_mode + "_" + right_mode
+            )
+
+        self._sync_endpoint_positions(
+            left_ab["position"], right_ab["position"], timestamp_ms,
+            bounds=bounds,
+            zero_velocity=not endpoint_ab_enabled,
         )
         if raw_width > 0.0:
             self._filtered_width = (
-                span_alpha * raw_width + (1.0 - span_alpha) *
+                alpha * raw_width + (1.0 - alpha) *
                 (self._filtered_width
                  if self._filtered_width is not None else raw_width)
             )
@@ -1387,19 +1902,117 @@ class HorizontalTroughTracker:
             "axis_filter_shift_px": shift_px,
             "endpoint_filter": endpoint_filter,
             "endpoint_mode": endpoint_mode,
+            "endpoint_ab": endpoint_ab_mode,
+            "endpoint_raw_left_x": measured_left_x,
+            "endpoint_raw_right_x": measured_right_x,
+            "endpoint_v_left": self._left_endpoint_ab.velocity,
+            "endpoint_v_right": self._right_endpoint_ab.velocity,
+            "endpoint_predict_px_left": left_ab.get("prediction_px", 0.0),
+            "endpoint_predict_px_right": right_ab.get("prediction_px", 0.0),
         })
         return filtered, True
 
+    def _predict_held_axis(self, axis, timestamp_ms):
+        """在不重做颜色扫描的HELD帧，用端点速度生成一次有界预测。"""
+        output = dict(axis)
+        enabled = bool(self.settings.get("axis_filter_enabled", True)) and \
+            bool(self.settings.get("endpoint_ab_enabled", True))
+        if not enabled or not self._left_endpoint_ab.initialized or \
+                not self._right_endpoint_ab.initialized:
+            output.update({
+                "endpoint_ab": "HOLD_DISABLED",
+                "endpoint_raw_left_x": None,
+                "endpoint_raw_right_x": None,
+                "endpoint_predict_px_left": 0.0,
+                "endpoint_predict_px_right": 0.0,
+            })
+            return output
+
+        old_line = self._raw_line(output)
+        if old_line is None:
+            return output
+        old_slope, old_intercept, old_left_x, old_right_x = old_line
+        occlusion_side = self._endpoint_occlusion_side
+        if occlusion_side == "LEFT":
+            left_ab = self._left_endpoint_ab.hold(
+                timestamp_ms, zero_velocity=True, mode="HOLD_OCCLUDED")
+            right_ab = self._right_endpoint_ab.predict(timestamp_ms)
+            endpoint_ab_mode = "HOLD_LEFT_PREDICT_RIGHT"
+        elif occlusion_side == "RIGHT":
+            left_ab = self._left_endpoint_ab.predict(timestamp_ms)
+            right_ab = self._right_endpoint_ab.hold(
+                timestamp_ms, zero_velocity=True, mode="HOLD_OCCLUDED")
+            endpoint_ab_mode = "PREDICT_LEFT_HOLD_RIGHT"
+        else:
+            left_ab = self._left_endpoint_ab.predict(timestamp_ms)
+            right_ab = self._right_endpoint_ab.predict(timestamp_ms)
+            endpoint_ab_mode = "PREDICT"
+
+        new_left_x, new_right_x = self._sync_endpoint_positions(
+            left_ab["position"], right_ab["position"], timestamp_ms,
+            bounds=self._roi_x_bounds(output),
+        )
+        centerline = _remap_centerline(
+            output.get("centerline"),
+            old_slope,
+            old_intercept,
+            old_left_x,
+            old_right_x,
+            old_slope,
+            old_intercept,
+            new_left_x,
+            new_right_x,
+            self.settings.get("positive_at_right", True),
+        )
+        output.update({
+            "p0": centerline[0],
+            "p1": centerline[-1],
+            "centerline": centerline,
+            "length_px": _polyline_length(centerline),
+            "endpoint_filter": "AB_PREDICT",
+            "endpoint_ab": endpoint_ab_mode,
+            "endpoint_raw_left_x": None,
+            "endpoint_raw_right_x": None,
+            "endpoint_v_left": self._left_endpoint_ab.velocity,
+            "endpoint_v_right": self._right_endpoint_ab.velocity,
+            "endpoint_predict_px_left": left_ab.get("prediction_px", 0.0),
+            "endpoint_predict_px_right": right_ab.get("prediction_px", 0.0),
+        })
+        return output
+
     def _reuse(self, source, fallback_reason=None,
                mask_ms=0, scan_ms=0, mask_scope=None,
-               crop_error=None):
+               crop_error=None, stage_times=None, timestamp_ms=None):
         if self.last_axis is None:
             return None
         output = dict(self.last_axis)
+        if timestamp_ms is None:
+            timestamp_ms = self._timestamp_ms()
+        if source == "HELD":
+            output = self._predict_held_axis(output, timestamp_ms)
+            self.last_axis = dict(output)
+        elif source == "CACHED":
+            # 提取失败时不能沿旧速度继续开放预测，否则错误趋势会越走越远。
+            self._left_endpoint_ab.hold(
+                timestamp_ms, zero_velocity=True, mode="HOLD_CACHED")
+            self._right_endpoint_ab.hold(
+                timestamp_ms, zero_velocity=True, mode="HOLD_CACHED")
+            output.update({
+                "endpoint_ab": "HOLD_CACHED",
+                "endpoint_raw_left_x": None,
+                "endpoint_raw_right_x": None,
+                "endpoint_v_left": self._left_endpoint_ab.velocity,
+                "endpoint_v_right": self._right_endpoint_ab.velocity,
+                "endpoint_predict_px_left": 0.0,
+                "endpoint_predict_px_right": 0.0,
+            })
         output["source"] = source
         output["cache_age"] = self.cache_age
         output["mask_ms"] = int(mask_ms)
         output["scan_ms"] = int(scan_ms)
+        stage_times = stage_times or {}
+        for field in ("seed_ms", "fit_ms", "refine_ms", "inner_ms"):
+            output[field] = int(stage_times.get(field, 0))
         if mask_scope is not None:
             output["mask_scope"] = str(mask_scope)
         if crop_error:
@@ -1414,13 +2027,15 @@ class HorizontalTroughTracker:
 
     def update(self, frame, exclusion_box=None):
         self.frame_index += 1
+        frame_timestamp_ms = self._timestamp_ms()
         interval = max(
             1, int(self.settings["update_interval_frames"]))
         if self.last_axis is not None and \
                 (self.frame_index - 1) % interval != 0:
             return self._reuse(
                 "HELD", mask_ms=0, scan_ms=0,
-                mask_scope="HELD"), None
+                mask_scope="HELD",
+                timestamp_ms=frame_timestamp_ms), None
 
         mask = None
         mask_ms = 0
@@ -1484,6 +2099,7 @@ class HorizontalTroughTracker:
                 axis_settings,
                 exclusion_box=axis_exclusion_box,
                 previous_axis=axis_previous,
+                clock_ms=self.clock_ms,
             )
             if mask_scope == "ROI" and global_roi is not None:
                 axis = _globalized_axis(
@@ -1500,13 +2116,16 @@ class HorizontalTroughTracker:
             }
         axis["mask_ms"] = int(mask_ms)
         axis["scan_ms"] = int(scan_ms)
+        for field in ("seed_ms", "fit_ms", "refine_ms", "inner_ms"):
+            axis[field] = int(axis.get(field, 0))
         axis["mask_scope"] = mask_scope
         if crop_error:
             axis["crop_error"] = crop_error
 
         if axis.get("valid"):
             filtered_axis, accepted = self._filter_valid_axis(
-                axis, exclusion_box=exclusion_box)
+                axis, exclusion_box=exclusion_box,
+                timestamp_ms=frame_timestamp_ms)
             if accepted:
                 self.last_axis = dict(filtered_axis)
                 self.cache_age = 0
@@ -1522,5 +2141,7 @@ class HorizontalTroughTracker:
                 "CACHED", axis.get("reason", "UNKNOWN"),
                 mask_ms=mask_ms, scan_ms=scan_ms,
                 mask_scope=mask_scope,
-                crop_error=crop_error), mask
+                crop_error=crop_error,
+                stage_times=axis,
+                timestamp_ms=frame_timestamp_ms), mask
         return axis, mask

@@ -33,7 +33,8 @@ def format_firewater_sample(position_mm=0.0, valid=False,
                             predicted=False, axis_source=0,
                             score_pct=-1.0, dt_ms=0.0, sequence=0,
                             measurement_age_ms=0.0,
-                            frame_timestamp_ms=0, frame_index=0):
+                            frame_timestamp_ms=0, frame_index=0,
+                            f4_status=None):
     """生成一行不带中文标签的FireWater数据。"""
     if not bool(valid):
         position_mm = 0.0
@@ -43,10 +44,11 @@ def format_firewater_sample(position_mm=0.0, valid=False,
         score_pct = -1.0
     else:
         score_pct = max(0.0, min(100.0, score_pct))
-    # 字段顺序固定：位置、有效位、预测位、中轴来源、置信度、
-    # UDP发包间隔、UDP序号、测量年龄、帧时间戳、RGB帧号。
+    f4 = f4_status or {}
+    # 前10个字段保持原顺序；后12个字段追加F407球状态、杆角、电机、故障和mode。
     return (
-        "%+.3f,%d,%d,%d,%.1f,%.3f,%d,%.3f,%d,%d\n" % (
+        "%+.3f,%d,%d,%d,%.1f,%.3f,%d,%.3f,%d,%d,"
+        "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n" % (
             position_mm,
             1 if valid else 0,
             1 if predicted else 0,
@@ -57,6 +59,18 @@ def format_firewater_sample(position_mm=0.0, valid=False,
             max(0.0, float(measurement_age_ms)),
             int(frame_timestamp_ms) & 0xFFFFFFFF,
             int(frame_index) & 0xFFFFFFFF,
+            int(f4.get("estimate_mm", 0)),
+            int(f4.get("velocity_mm_s", 0)),
+            int(f4.get("target_mm", 0)),
+            int(f4.get("theta_cmd_mdeg", 0)),
+            int(f4.get("motor_target_raw", 0)),
+            int(f4.get("motor_feedback_raw", 0)),
+            int(f4.get("motor_command_ma", 0)),
+            int(f4.get("motor_speed_centi_rpm", 0)),
+            int(f4.get("stiction_kick_mdeg", 0)),
+            int(f4.get("status_flags", 0)),
+            int(f4.get("fault_bits", 0)),
+            int(f4.get("competition_mode", 0)),
         )
     ).encode("ascii")
 
@@ -130,7 +144,8 @@ class VofaUdpTelemetry:
     def send_sample(self, position_mm=0.0, valid=False,
                     predicted=False, axis_source=0, score_pct=-1.0,
                     now_ms=None, measurement_age_ms=0.0,
-                    frame_timestamp_ms=0, frame_index=0):
+                    frame_timestamp_ms=0, frame_index=0,
+                    f4_status=None):
         """按发送间隔发送一帧FireWater数字，成功发送返回True。"""
         if not self.enabled or not self.available or self.sock is None:
             return False
@@ -152,6 +167,7 @@ class VofaUdpTelemetry:
             measurement_age_ms=measurement_age_ms,
             frame_timestamp_ms=frame_timestamp_ms,
             frame_index=frame_index,
+            f4_status=f4_status,
         )
         try:
             written = self.sock.sendto(payload, (self.host, self.port))
@@ -172,7 +188,8 @@ class VofaUdpTelemetry:
     def send_position(self, position, tracked_ball=None,
                       trough_axis=None, now_ms=None,
                       measurement_age_ms=0.0,
-                      frame_timestamp_ms=0, frame_index=0):
+                      frame_timestamp_ms=0, frame_index=0,
+                      f4_status=None):
         """把横向位置结果转换为VOFA通道并发送。"""
         position = position or {}
         tracked_ball = tracked_ball or {}
@@ -199,6 +216,7 @@ class VofaUdpTelemetry:
             measurement_age_ms=measurement_age_ms,
             frame_timestamp_ms=frame_timestamp_ms,
             frame_index=frame_index,
+            f4_status=f4_status,
         )
 
     def close(self):

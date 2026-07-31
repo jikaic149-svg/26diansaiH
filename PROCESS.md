@@ -39,3 +39,31 @@
 - MaixCAM实测目标`-59 mm`时，小球由`+34 mm`长时间静止后冲至`-72 mm`并多次往返；据此将运行时VTP更新为`Kp/Ki/Kd=1.00/0.030/1.00`。
 - 本地12项Python测试PASS；完整工程经项目部署脚本同步到`/root/steelball_horizontal_trough_pro`并从`maixpy_run.py`重启。
 - F407回传`F4_VPA accepted=1`，连续VST的视觉位置有效且`fault=0x0000`；电机保持失能，动态效果待用户按KEY验证。
+
+## 2026-07-31 F407赛题mode只读显示与遥测同步
+
+- 修改原因：用户要求视觉程序同步显示G3519经F407转发的当前赛题mode。
+- 最终决策：解析VST第15字段`competition_mode`；只接受`0`或`2..6`，其中`0`表示F407
+  当前没有新鲜mode。日志追加`mode`，画面显示`M2..M6`，未知时显示`M-`；VOFA UDP在现有
+  FireWater字段尾部追加mode。视觉侧只解析、显示和上报，不允许反向修改mode，也不改变
+  检测、滚球控制或启动行为。
+- 涉及文件：`f4_vision_link.py`、`main.py`、`vofa_udp_telemetry.py`、
+  `tests/test_f4_vision_link.py`、README和本记录。
+- 验证方式和结果：本地12项Python测试PASS；`git diff --check`通过。
+- 已知限制与待确认：本轮未向Maix部署或启动视觉程序；15字段VST的UART实收、画面mode
+  刷新和UDP接收端新增尾字段兼容性仍需联机实物验证。
+
+## 2026-07-31 F407赛题mode实物分段验证
+
+- 修改原因：用户要求立即验证G3519经F407同步到Maix的mode实物链路。
+- 部署状态：停止占用摄像头的旧`/root/steelball_horizontal_trough_pro/maixpy_run.py`后，
+  当前13个Python文件已上传至`/tmp/steelball_closed_loop`，新`main.py`持续运行；相机、显示、
+  VIS发送、VPA接收和15字段VST解析均在线。启动命令的SSH等待虽超时，但远端PID和持续日志
+  证明应用没有退出。
+- 分段验证结果：F407通过SWD向只读PeerLink缓存临时注入新鲜`mode=2`后，Maix实际UART日志
+  连续出现3条`mode=2`；1500 ms后自动恢复`mode=0`。最终VST为命令`0 mA`、速度`0`、
+  `mode=0`，临时注入已在F407侧清除。该结果证明Maix解析/日志链路和F407超时回退，不证明
+  G3519发送链路。
+- 已知限制与待确认：指定G3519 DAPLink未枚举且F407的heartbeat/CAR接收计数均为0，因此
+  完整G3519→F407→Maix链路未通过。重新连接G3519目标板和UART后，须在无SWD注入条件下
+  观察稳定`mode=2..6`并核对屏幕`M2..M6`与UDP尾字段。
