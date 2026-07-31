@@ -6,6 +6,7 @@
 #define VISION_LINK_FIELD_COUNT 4U
 #define VISION_LINK_TUNING_FIELD_COUNT 3U
 #define VISION_LINK_POSITION_ABS_MAX_MM INT32_C(125)
+#define VISION_LINK_TARGET_ABS_MAX_0P1MM INT32_C(1250)
 #define VISION_LINK_THETA_ABS_MAX_MDEG INT32_C(85000)
 
 #define VISION_FLAG_BALL_SOURCE_MASK UINT8_C(0x03)
@@ -86,6 +87,12 @@ static bool is_vtp(const Algorithm_Packet_View *packet)
 {
     return (packet->type_length == 3U) &&
         (memcmp(packet->type, "VTP", 3U) == 0);
+}
+
+static bool is_vbt(const Algorithm_Packet_View *packet)
+{
+    return (packet->type_length == 3U) &&
+        (memcmp(packet->type, "VBT", 3U) == 0);
 }
 
 static bool sequence_is_new(uint16_t next, uint16_t previous)
@@ -261,6 +268,53 @@ static void consume_vtp(
     increment_saturating(&link->status.vtp_rx_count);
 }
 
+static void consume_vbt(
+    Device_VisionLink *link,
+    const Algorithm_Packet_View *packet,
+    uint32_t now_ms)
+{
+    int32_t target_0p1mm;
+
+    if (!parse_i32_canonical(
+            packet->payload, packet->payload_length, &target_0p1mm) ||
+        (target_0p1mm < -VISION_LINK_TARGET_ABS_MAX_0P1MM) ||
+        (target_0p1mm > VISION_LINK_TARGET_ABS_MAX_0P1MM)) {
+        increment_saturating(&link->status.vbt_payload_error_count);
+        return;
+    }
+
+    if (link->vbt_sequence_seen &&
+        ((uint32_t)(now_ms - link->status.last_vbt_rx_ms) >=
+            link->config.session_timeout_ms)) {
+        link->vbt_sequence_seen = false;
+        link->ball_target_pending = false;
+    }
+    if (link->vbt_sequence_seen) {
+        const uint16_t difference =
+            (uint16_t)(packet->sequence - link->last_vbt_sequence);
+
+        if (difference == 0U) {
+            increment_saturating(
+                &link->status.vbt_duplicate_sequence_count);
+            return;
+        }
+        if (!sequence_is_new(packet->sequence, link->last_vbt_sequence)) {
+            increment_saturating(&link->status.vbt_old_sequence_count);
+            return;
+        }
+    }
+
+    link->last_vbt_sequence = packet->sequence;
+    link->vbt_sequence_seen = true;
+    link->status.last_vbt_rx_ms = now_ms;
+    link->pending_ball_target = (Device_VisionLink_BallTargetCommand){
+        .sequence = packet->sequence,
+        .target_0p1mm = (int16_t)target_0p1mm,
+    };
+    link->ball_target_pending = true;
+    increment_saturating(&link->status.vbt_rx_count);
+}
+
 static bool append_byte(
     uint8_t *payload, size_t capacity, size_t *length, uint8_t byte)
 {
@@ -408,6 +462,9 @@ bool Device_VisionLink_Step(Device_VisionLink *link, uint32_t now_ms)
             else if (is_vtp(&packet)) {
                 consume_vtp(link, &packet, now_ms);
             }
+            else if (is_vbt(&packet)) {
+                consume_vbt(link, &packet, now_ms);
+            }
         }
     }
     link->status.packet_parser_error_count =
@@ -431,6 +488,19 @@ bool Device_VisionLink_TakePidTuningCommand(
     }
     *command = link->pending_pid_tuning;
     link->pid_tuning_pending = false;
+    return true;
+}
+
+bool Device_VisionLink_TakeBallTargetCommand(
+    Device_VisionLink *link,
+    Device_VisionLink_BallTargetCommand *command)
+{
+    if ((link == NULL) || !link->initialized || (command == NULL) ||
+        !link->ball_target_pending) {
+        return false;
+    }
+    *command = link->pending_ball_target;
+    link->ball_target_pending = false;
     return true;
 }
 

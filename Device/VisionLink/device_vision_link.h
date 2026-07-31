@@ -72,6 +72,12 @@ typedef struct {
     uint16_t kd_milli_per_s;
 } Device_VisionLink_PidTuningCommand;
 
+/* Maix -> F407 ball-position target. The signed value uses 0.1 mm units. */
+typedef struct {
+    uint16_t sequence;
+    int16_t target_0p1mm;
+} Device_VisionLink_BallTargetCommand;
+
 /* F407 -> Maix VST snapshot. Integer domains exactly match COOPERATION 11.3. */
 typedef struct {
     uint16_t last_rx_vis_sequence;
@@ -96,6 +102,10 @@ typedef struct {
     uint32_t vtp_payload_error_count;
     uint32_t vtp_duplicate_sequence_count;
     uint32_t vtp_old_sequence_count;
+    uint32_t vbt_rx_count;
+    uint32_t vbt_payload_error_count;
+    uint32_t vbt_duplicate_sequence_count;
+    uint32_t vbt_old_sequence_count;
     uint32_t vst_tx_count;
     uint32_t vst_tx_drop_count;
     uint32_t vst_tx_error_count;
@@ -105,6 +115,7 @@ typedef struct {
     uint32_t step_error_count;
     uint32_t last_vis_rx_ms;
     uint32_t last_vtp_rx_ms;
+    uint32_t last_vbt_rx_ms;
     BSP_UART_RxStatus uart_rx;
 } Device_VisionLink_Status;
 
@@ -119,13 +130,17 @@ typedef struct {
     uint8_t tx_frame[ALGORITHM_PACKET_MAX_FRAME_SIZE];
     Device_VisionLink_Measurement measurement;
     Device_VisionLink_PidTuningCommand pending_pid_tuning;
+    Device_VisionLink_BallTargetCommand pending_ball_target;
     uint16_t last_vis_sequence;
     uint16_t last_vtp_sequence;
+    uint16_t last_vbt_sequence;
     uint16_t vst_tx_sequence;
     uint16_t vpa_tx_sequence;
     bool vis_sequence_seen;
     bool vtp_sequence_seen;
+    bool vbt_sequence_seen;
     bool pid_tuning_pending;
+    bool ball_target_pending;
     bool initialized;
 } Device_VisionLink;
 
@@ -149,6 +164,11 @@ bool Device_VisionLink_GetMeasurement(
 bool Device_VisionLink_TakePidTuningCommand(
     Device_VisionLink *link,
     Device_VisionLink_PidTuningCommand *command);
+
+/* Consume at most one Latest Value VBT target command. */
+bool Device_VisionLink_TakeBallTargetCommand(
+    Device_VisionLink *link,
+    Device_VisionLink_BallTargetCommand *command);
 
 /* Both calls atomically enqueue one complete frame into the BSP TX ring.
  * BUSY drops the complete status frame and increments diagnostics; it is not

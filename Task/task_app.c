@@ -230,6 +230,22 @@ static void Task_TakeVisionPidTuning(void)
     }
 }
 
+static void Task_TakeVisionBallTarget(void)
+{
+    Device_VisionLink_BallTargetCommand command;
+
+    if (!s_vision_link_ready ||
+        !Device_VisionLink_TakeBallTargetCommand(
+            &s_vision_link, &command)) {
+        return;
+    }
+    if (!APP_Gateway_SetBallTargetMm(
+            (float)command.target_0p1mm * 0.1F) &&
+        (g_TASK_BallTargetCommandErrors < UINT32_MAX)) {
+        ++g_TASK_BallTargetCommandErrors;
+    }
+}
+
 static void Task_BMI088DmaCompleteFromISR(void *context)
 {
     BaseType_t higher_priority_task_woken = pdFALSE;
@@ -727,6 +743,7 @@ static void Task_Gateway(void *argument)
             s_vision_link_fault = TASK_VISION_LINK_FAULT_STEP;
         }
         Task_TakeVisionPidTuning();
+        Task_TakeVisionBallTarget();
         control_input = Task_MakeControlInput(g_TASK_NowMs);
         APP_Gateway_Step(
             g_TASK_NowMs, &control_input, &gateway_telemetry);

@@ -166,6 +166,28 @@ static void test_runtime_target_control_direction(void)
     assert(angle > 0.0F);
 }
 
+static void test_nonzero_target_equilibrium_and_direction(void)
+{
+    Algorithm_BallPositionControl controller;
+    const Algorithm_BallPositionControl_Config config = default_config();
+    float angle;
+
+    assert(Algorithm_BallPositionControl_Init(&controller, &config));
+    assert(Algorithm_BallPositionControl_ResetTargetPositionMm(
+        &controller, 40.0F));
+    assert(Algorithm_BallPositionControl_SetEstimatedState(
+        &controller, 40.0F, 0.0F));
+    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
+        &controller, &angle));
+    assert(close_enough(angle, 0.0F, 0.0001F));
+
+    assert(Algorithm_BallPositionControl_SetEstimatedState(
+        &controller, 20.0F, 0.0F));
+    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
+        &controller, &angle));
+    assert(angle < 0.0F); /* Accelerate from +20 mm toward +40 mm. */
+}
+
 static void test_runtime_target_rejects_invalid_values(void)
 {
     Algorithm_BallPositionControl controller;
@@ -353,6 +375,30 @@ static void test_stiction_kick_stops_on_motion_and_near_target(void)
     assert(controller.stiction_state == ALGORITHM_BALL_STICTION_IDLE);
 }
 
+static void test_stiction_direction_uses_nonzero_target_error(void)
+{
+    Algorithm_BallPositionControl controller;
+    const Algorithm_BallPositionControl_Config config = stiction_config();
+    float angle;
+
+    assert(Algorithm_BallPositionControl_Init(&controller, &config));
+    assert(Algorithm_BallPositionControl_ResetTargetPositionMm(
+        &controller, 40.0F));
+    /* Position is positive, but target-position is also positive.  A
+     * zero-origin implementation would choose the opposite kick direction. */
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 0U, 20.0F));
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 20U, 20.0F));
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 120U, 20.0F));
+    assert(controller.stiction_state == ALGORITHM_BALL_STICTION_ACTIVE);
+    assert(controller.stiction_error_direction == 1);
+    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
+        &controller, &angle));
+    assert(close_enough(angle, -0.10F, 0.001F));
+}
+
 static void test_invalid_stiction_configuration(void)
 {
     Algorithm_BallPositionControl controller;
@@ -384,10 +430,12 @@ int main(void)
     test_external_state_estimate_bypasses_camera_polarity();
     test_runtime_target_slew_and_state_preservation();
     test_runtime_target_control_direction();
+    test_nonzero_target_equilibrium_and_direction();
     test_runtime_target_rejects_invalid_values();
     test_integral_accumulates_clamps_and_resets();
     test_stiction_kick_gate_direction_and_timeout();
     test_stiction_kick_stops_on_motion_and_near_target();
+    test_stiction_direction_uses_nonzero_target_error();
     test_invalid_stiction_configuration();
     puts("ball position control tests: PASS");
     return 0;

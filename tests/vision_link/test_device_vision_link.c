@@ -240,6 +240,66 @@ static void test_pid_tuning_latest_value_and_ack(void)
     assert(strcmp(payload, "7,1,1200,150,1800") == 0);
 }
 
+static void test_ball_target_latest_value_sequence_and_payload(void)
+{
+    Device_VisionLink link;
+    Device_VisionLink_BallTargetCommand command;
+    const Device_VisionLink_Config config = default_config();
+
+    s_rx_length = 0U;
+    assert(Device_VisionLink_Init(&link, &config));
+
+    queue_packet("VBT", 10U, "370");
+    assert(Device_VisionLink_Step(&link, 10U));
+    assert(Device_VisionLink_TakeBallTargetCommand(&link, &command));
+    assert(command.sequence == 10U);
+    assert(command.target_0p1mm == 370);
+
+    queue_packet("VBT", 11U, "-1200");
+    assert(Device_VisionLink_Step(&link, 20U));
+    queue_packet("VBT", 12U, "400");
+    assert(Device_VisionLink_Step(&link, 30U));
+    assert(Device_VisionLink_TakeBallTargetCommand(&link, &command));
+    assert(command.sequence == 12U);
+    assert(command.target_0p1mm == 400);
+    assert(link.status.vbt_rx_count == 3U);
+
+    queue_packet("VBT", 12U, "500");
+    assert(Device_VisionLink_Step(&link, 40U));
+    assert(link.status.vbt_duplicate_sequence_count == 1U);
+    queue_packet("VBT", 11U, "500");
+    assert(Device_VisionLink_Step(&link, 50U));
+    assert(link.status.vbt_old_sequence_count == 1U);
+    assert(!Device_VisionLink_TakeBallTargetCommand(&link, &command));
+
+    queue_packet("VBT", 13U, "+1");
+    assert(Device_VisionLink_Step(&link, 60U));
+    queue_packet("VBT", 13U, "01");
+    assert(Device_VisionLink_Step(&link, 61U));
+    queue_packet("VBT", 13U, "-0");
+    assert(Device_VisionLink_Step(&link, 62U));
+    queue_packet("VBT", 13U, "1251");
+    assert(Device_VisionLink_Step(&link, 63U));
+    queue_packet("VBT", 13U, "-1251");
+    assert(Device_VisionLink_Step(&link, 64U));
+    assert(link.status.vbt_payload_error_count == 5U);
+    assert(!Device_VisionLink_TakeBallTargetCommand(&link, &command));
+
+    /* Rejected payloads do not consume sequence 13. */
+    queue_packet("VBT", 13U, "-1200");
+    assert(Device_VisionLink_Step(&link, 70U));
+    assert(Device_VisionLink_TakeBallTargetCommand(&link, &command));
+    assert(command.sequence == 13U);
+    assert(command.target_0p1mm == -1200);
+
+    /* A new Maix session may restart its independent VBT sequence at zero. */
+    queue_packet("VBT", 0U, "0");
+    assert(Device_VisionLink_Step(&link, 170U));
+    assert(Device_VisionLink_TakeBallTargetCommand(&link, &command));
+    assert(command.sequence == 0U);
+    assert(command.target_0p1mm == 0);
+}
+
 static void test_vst_encoding_and_busy_drop(void)
 {
     Device_VisionLink link;
@@ -285,6 +345,7 @@ int main(void)
     test_duplicate_old_and_unusable_do_not_drive();
     test_session_timeout_accepts_camera_restart();
     test_pid_tuning_latest_value_and_ack();
+    test_ball_target_latest_value_sequence_and_payload();
     test_vst_encoding_and_busy_drop();
     puts("vision link tests: PASS");
     return 0;

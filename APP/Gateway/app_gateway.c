@@ -480,8 +480,6 @@ static bool stop_primary_level_control(void)
     s_level_enable_requested_ms = 0U;
     s_chassis_compensation_angle_deg = 0.0F;
     s_motor_command_current_a = 0.0F;
-    (void)Algorithm_BallPositionControl_ResetTargetPositionMm(
-        &s_ball_controller, GATEWAY_BALL_TARGET_MM);
     if (motor->initialized) {
         if (motor->command_enabled) {
             zero_sent = Device_QD4310_SetCurrent(motor, 0.0F);
@@ -722,11 +720,6 @@ static void run_primary_level_control(uint32_t now_ms)
             GATEWAY_LEVEL_ZERO_ENTRY_SETTLE_MS) {
             s_level_phase =
                 GATEWAY_LEVEL_PHASE_ACCELERATION_COMPENSATION;
-            if (!APP_Gateway_SetBallTargetMm(GATEWAY_BALL_TARGET_MM)) {
-                ++s_level_control_fault_count;
-                (void)stop_primary_level_control();
-                return;
-            }
         }
     }
     else {
@@ -1462,8 +1455,6 @@ bool APP_Gateway_TogglePrimaryMotor(uint32_t now_ms)
         !isfinite(feedback.speed_rpm) ||
         (fabsf(feedback.speed_rpm) >
             GATEWAY_LEVEL_START_MAX_SPEED_RPM) ||
-        !Algorithm_BallPositionControl_ResetTargetPositionMm(
-            &s_ball_controller, GATEWAY_BALL_TARGET_MM) ||
         !apply_rod_target_deg(0.0F) ||
         !Algorithm_LevelCurrentControl_Start(&s_level_controller)) {
         return false;
@@ -1489,12 +1480,6 @@ bool APP_Gateway_StopPrimaryMotor(void)
 
 bool APP_Gateway_SetBallTargetMm(float target_mm)
 {
-    if ((s_level_phase !=
-            GATEWAY_LEVEL_PHASE_ACCELERATION_COMPENSATION) ||
-        !Algorithm_LevelCurrentControl_IsActive(&s_level_controller) ||
-        !s_ball_measurement_valid) {
-        return false;
-    }
     return Algorithm_BallPositionControl_SetTargetPositionMm(
         &s_ball_controller, target_mm);
 }
@@ -1551,9 +1536,7 @@ bool APP_Gateway_AdvancePrimaryMotorCalibration(uint32_t now_ms)
             GATEWAY_LEVEL_FEEDBACK_TIMEOUT_MS) ||
         !isfinite(feedback.speed_rpm) ||
         (fabsf(feedback.speed_rpm) >
-            GATEWAY_LEVEL_CALIBRATION_START_MAX_SPEED_RPM) ||
-        !Algorithm_BallPositionControl_ResetTargetPositionMm(
-            &s_ball_controller, GATEWAY_BALL_TARGET_MM)) {
+            GATEWAY_LEVEL_CALIBRATION_START_MAX_SPEED_RPM)) {
         return false;
     }
     Algorithm_BallPositionControl_ResetMeasurement(&s_ball_controller);

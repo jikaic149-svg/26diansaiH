@@ -43,6 +43,23 @@ Payload=<request_seq>,<accepted>,<kp_milli>,<ki_milli>,<kd_milli>
 因此拒绝后可确认旧值未变。VTP、VPA和VIS/VST各自使用独立16位序号。BUSY时VPA整帧
 丢弃且不推进VPA序号，不做ACK重发；`vpa_tx_drop/error`保留诊断。
 
+## 球位置目标
+
+Maix端可发送独立序号的`VBT` Latest Value：
+
+```text
+TYPE=VBT
+Payload=<target_0p1mm>
+```
+
+Payload是规范十进制有符号整数，协议域为`-1250..+1250`，单位`0.1 mm`；Gateway产品域
+继续限制为`-1200..+1200`。VBT拥有独立序号、重复/旧帧抑制和100 ms会话重开，Task每个
+1 ms周期最多消费一个最新值。命令只修改小球目标，可在停机或回零phase 1预设并跨启停
+保留，不启动电机、不绕过视觉有效门、杆角/raw/电流保护，也不替代F407内的杆球模型和
+底盘加速度前馈。协议不新增逐命令ACK；Maix用周期VST中的整数`target_mm`确认整数毫米目标。
+VBT和VST目标字段都使用F407杆球物理坐标；当前Maix画面左负右正，而该物理坐标左正右负，
+所以触屏层以`-1`做双向转换，协议接收层不重复应用VIS测量极性。
+
 ## VST 控制状态
 
 F407每20 ms最多发送一帧异步Latest Value，不逐帧确认VIS：

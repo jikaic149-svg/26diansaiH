@@ -1778,3 +1778,30 @@
   未做verify/readback，未代用户按KEY。
 - 已知限制与待确认：阶梯脉冲尚未做本轮烧录后的运动验证；首次运行须观察实际触发幅度、
   起滚速度和是否越过视觉零点，任何进一步调参仍需用户同意。
+
+## 2026-07-31：MaixCAM触屏任意毫米球目标（离线）
+
+- 修改原因：用户要求直接在MaixCAM2触屏指定小球在水管中的任意位置，同时明确必须继续
+  使用F407本地杆球模型和底盘加速度前馈，不能转成QD4310内部位置指令。
+- 最终决策：VisionLink新增独立`VBT` Latest Value，Payload为有符号`target_0p1mm`，协议域
+  `±1250`、产品域`±1200`；独立16位序号、100 ms会话重开、重复/旧帧抑制。Task在现有
+  1 ms Gateway周期消费最新目标。目标可在停机或phase 1预设并跨停机/再次启动保留，命令
+  本身不启动电机；进入phase 2且视觉有效后仍执行
+  `a_cmd=Kp*(target-position)+I-Kd*velocity`和实心球逆模型，并保持
+  `requested_offset_deg=ball_angle_deg+chassis_angle_deg`。Maix滑条范围`-120..+120 mm`、
+  1 mm步进，松手发送，按VST目标确认，未确认时250 ms重发且最多20次；首次VST先同步
+  现有目标。触屏沿用画面左负右正，并以`-1`转换成F407物理坐标左正右负；VBT/VST协议
+  本身保持F407物理坐标，不在接收端重复应用测量极性。
+- 涉及文件：`Device/VisionLink/device_vision_link.[ch]`、`Task/task_app.c`、
+  `APP/Gateway/app_gateway.c`、两组Host测试、根/算法/VisionLink README，以及Maix视觉仓库的
+  `ball_target_touch.py`、`f4_vision_link.py`、`main.py`、配置、应用清单和PC测试。
+- 验证方式和结果：Maix Python共12项测试PASS；MSYS2 GCC 16.1以
+  `-Wall -Wextra -Wpedantic -Werror`构建并实际运行VisionLink、BallPositionControl和
+  control polarity chain三组Host测试，均PASS。ARM Debug clean-first完整链接通过，
+  FLASH/RAM为`44932/20648 B`；`git diff --check`通过。
+- 已知限制：VST只以整数毫米回报目标，因此当前触屏也限定整数毫米；双端UART实收、触摸坐标、
+  显示刷新、重发确认和非零目标带球收敛仍需真机验证。目标设置期间的活动参考继续按现有
+  `50 mm/s`推进，但只有phase 2才执行杆角输出。
+- 待确认事项：本轮未烧录、未启动MaixPy、未按KEY、未发送Enable/电流命令。部署F407前
+  必须再次确认电机已失能；按用户要求烧录后不做verify/readback，视觉应用必须由设备完整
+  工程的`maixpy_run.py`入口启动，且不得代用户按KEY。
