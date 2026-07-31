@@ -227,6 +227,155 @@ static void test_integral_accumulates_clamps_and_resets(void)
         controller.integral_acceleration_mm_s2, 0.0F, 0.001F));
 }
 
+static Algorithm_BallPositionControl_Config stiction_config(void)
+{
+    Algorithm_BallPositionControl_Config config = default_config();
+
+    config.position_gain_per_s2 = 0.0F;
+    config.velocity_gain_per_s = 0.0F;
+    config.stiction_kick_angle_deg = 0.10F;
+    config.stiction_kick_step_angle_deg = 0.05F;
+    config.stiction_kick_maximum_angle_deg = 0.20F;
+    config.stiction_kick_minimum_error_mm = 8.0F;
+    config.stiction_kick_maximum_velocity_mm_s = 8.0F;
+    config.stiction_kick_stationary_ms = 100U;
+    config.stiction_kick_duration_ms = 120U;
+    config.stiction_kick_cooldown_ms = 200U;
+    return config;
+}
+
+static void test_stiction_kick_gate_direction_and_timeout(void)
+{
+    Algorithm_BallPositionControl controller;
+    const Algorithm_BallPositionControl_Config config = stiction_config();
+    float angle;
+
+    assert(Algorithm_BallPositionControl_Init(&controller, &config));
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 0U, 20.0F));
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 20U, 20.0F));
+    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
+        &controller, &angle));
+    assert(close_enough(angle, 0.0F, 0.001F));
+
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 120U, 20.0F));
+    assert(controller.stiction_state == ALGORITHM_BALL_STICTION_ACTIVE);
+    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
+        &controller, &angle));
+    assert(close_enough(angle, 0.10F, 0.001F));
+
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 220U, 20.0F));
+    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
+        &controller, &angle));
+    assert(close_enough(angle, 0.10F, 0.001F));
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 240U, 20.0F));
+    assert(controller.stiction_state == ALGORITHM_BALL_STICTION_COOLDOWN);
+    assert(close_enough(
+        controller.stiction_next_kick_angle_deg, 0.15F, 0.001F));
+    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
+        &controller, &angle));
+    assert(close_enough(angle, 0.0F, 0.001F));
+
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 340U, 20.0F));
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 440U, 20.0F));
+    assert(controller.stiction_state == ALGORITHM_BALL_STICTION_WAITING);
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 540U, 20.0F));
+    assert(controller.stiction_state == ALGORITHM_BALL_STICTION_ACTIVE);
+    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
+        &controller, &angle));
+    assert(close_enough(angle, 0.15F, 0.001F));
+
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 640U, 20.0F));
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 660U, 20.0F));
+    assert(close_enough(
+        controller.stiction_next_kick_angle_deg, 0.20F, 0.001F));
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 760U, 20.0F));
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 860U, 20.0F));
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 960U, 20.0F));
+    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
+        &controller, &angle));
+    assert(close_enough(angle, 0.20F, 0.001F));
+
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 1060U, 20.0F));
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 1080U, 20.0F));
+    assert(close_enough(
+        controller.stiction_next_kick_angle_deg, 0.20F, 0.001F));
+}
+
+static void test_stiction_kick_stops_on_motion_and_near_target(void)
+{
+    Algorithm_BallPositionControl controller;
+    const Algorithm_BallPositionControl_Config config = stiction_config();
+    float angle;
+
+    assert(Algorithm_BallPositionControl_Init(&controller, &config));
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 0U, -20.0F));
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 20U, -20.0F));
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 120U, -20.0F));
+    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
+        &controller, &angle));
+    assert(close_enough(angle, -0.10F, 0.001F));
+
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 140U, -19.0F));
+    assert(controller.stiction_state == ALGORITHM_BALL_STICTION_COOLDOWN);
+    assert(close_enough(
+        controller.stiction_next_kick_angle_deg, 0.10F, 0.001F));
+    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
+        &controller, &angle));
+    assert(close_enough(angle, 0.0F, 0.001F));
+
+    Algorithm_BallPositionControl_ResetMeasurement(&controller);
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 1000U, 8.0F));
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 1100U, 8.0F));
+    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
+        &controller, &angle));
+    assert(close_enough(angle, 0.0F, 0.001F));
+    assert(controller.stiction_state == ALGORITHM_BALL_STICTION_IDLE);
+}
+
+static void test_invalid_stiction_configuration(void)
+{
+    Algorithm_BallPositionControl controller;
+    Algorithm_BallPositionControl_Config config = stiction_config();
+
+    config.stiction_kick_angle_deg = config.rod_angle_limit_deg + 0.01F;
+    assert(!Algorithm_BallPositionControl_Init(&controller, &config));
+    config = stiction_config();
+    config.stiction_kick_minimum_error_mm = 0.0F;
+    assert(!Algorithm_BallPositionControl_Init(&controller, &config));
+    config = stiction_config();
+    config.stiction_kick_duration_ms = 0U;
+    assert(!Algorithm_BallPositionControl_Init(&controller, &config));
+    config = stiction_config();
+    config.stiction_kick_maximum_angle_deg =
+        config.stiction_kick_angle_deg - 0.01F;
+    assert(!Algorithm_BallPositionControl_Init(&controller, &config));
+    config = stiction_config();
+    config.stiction_kick_maximum_angle_deg =
+        config.rod_angle_limit_deg + 0.01F;
+    assert(!Algorithm_BallPositionControl_Init(&controller, &config));
+}
+
 int main(void)
 {
     test_position_and_velocity_sign();
@@ -237,6 +386,9 @@ int main(void)
     test_runtime_target_control_direction();
     test_runtime_target_rejects_invalid_values();
     test_integral_accumulates_clamps_and_resets();
+    test_stiction_kick_gate_direction_and_timeout();
+    test_stiction_kick_stops_on_motion_and_near_target();
+    test_invalid_stiction_configuration();
     puts("ball position control tests: PASS");
     return 0;
 }

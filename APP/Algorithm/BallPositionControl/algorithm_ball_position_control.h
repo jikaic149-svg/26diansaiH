@@ -25,7 +25,25 @@ typedef struct {
     float inertia_ratio;
     float rod_angle_limit_deg;
     uint32_t maximum_velocity_dt_ms;
+    /* Optional bounded rod-angle pulse that breaks ball stiction. The first
+     * pulse uses kick_angle, then each unsuccessful pulse adds step_angle up
+     * to maximum_angle. Zero kick_angle disables the sequence. */
+    float stiction_kick_angle_deg;
+    float stiction_kick_step_angle_deg;
+    float stiction_kick_maximum_angle_deg;
+    float stiction_kick_minimum_error_mm;
+    float stiction_kick_maximum_velocity_mm_s;
+    uint32_t stiction_kick_stationary_ms;
+    uint32_t stiction_kick_duration_ms;
+    uint32_t stiction_kick_cooldown_ms;
 } Algorithm_BallPositionControl_Config;
+
+typedef enum {
+    ALGORITHM_BALL_STICTION_IDLE = 0,
+    ALGORITHM_BALL_STICTION_WAITING,
+    ALGORITHM_BALL_STICTION_ACTIVE,
+    ALGORITHM_BALL_STICTION_COOLDOWN,
+} Algorithm_BallPositionControl_StictionState;
 
 typedef struct {
     Algorithm_BallPositionControl_Config config;
@@ -35,7 +53,12 @@ typedef struct {
     float velocity_mm_s;
     float integral_acceleration_mm_s2;
     float desired_acceleration_mm_s2;
+    float stiction_kick_angle_deg;
+    float stiction_next_kick_angle_deg;
     uint32_t last_sample_ms;
+    uint32_t stiction_state_started_ms;
+    int8_t stiction_error_direction;
+    Algorithm_BallPositionControl_StictionState stiction_state;
     bool measurement_seen;
     bool velocity_valid;
     bool initialized;

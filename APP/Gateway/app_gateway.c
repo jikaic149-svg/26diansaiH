@@ -1142,6 +1142,22 @@ bool APP_Gateway_Init(uint32_t now_ms)
         .inertia_ratio = GATEWAY_BALL_INERTIA_RATIO,
         .rod_angle_limit_deg = GATEWAY_BALL_ROD_ANGLE_LIMIT_DEG,
         .maximum_velocity_dt_ms = GATEWAY_BALL_MAX_VELOCITY_DT_MS,
+        .stiction_kick_angle_deg =
+            GATEWAY_BALL_STICTION_KICK_ANGLE_DEG,
+        .stiction_kick_step_angle_deg =
+            GATEWAY_BALL_STICTION_KICK_STEP_ANGLE_DEG,
+        .stiction_kick_maximum_angle_deg =
+            GATEWAY_BALL_STICTION_KICK_MAX_ANGLE_DEG,
+        .stiction_kick_minimum_error_mm =
+            GATEWAY_BALL_STICTION_MIN_ERROR_MM,
+        .stiction_kick_maximum_velocity_mm_s =
+            GATEWAY_BALL_STICTION_MAX_VELOCITY_MM_S,
+        .stiction_kick_stationary_ms =
+            GATEWAY_BALL_STICTION_STATIONARY_MS,
+        .stiction_kick_duration_ms =
+            GATEWAY_BALL_STICTION_DURATION_MS,
+        .stiction_kick_cooldown_ms =
+            GATEWAY_BALL_STICTION_COOLDOWN_MS,
     };
     const Algorithm_BallStateEstimator_Config estimator_config = {
         .measurement_polarity = GATEWAY_BALL_MEASUREMENT_POLARITY,

@@ -127,7 +127,7 @@
 /* KEY启动后先回到固定机械零点。位置/转速连续满足条件达到settle时间后，
  * 才允许使用F407本地BMI088纵向加速度补偿。单位依次为电机deg、rpm、ms。 */
 #define GATEWAY_LEVEL_ZERO_ENTRY_TOL_DEG       1.50F
-#define GATEWAY_LEVEL_ZERO_ENTRY_MAX_RPM       1.00F
+#define GATEWAY_LEVEL_ZERO_ENTRY_MAX_RPM      15.00F
 #define GATEWAY_LEVEL_ZERO_ENTRY_SETTLE_MS UINT32_C(300)
 
 /* 2026-07-31手动往返的JY61 Pitch中值表：raw减小、杆执行端抬升、Pitch增大。
@@ -191,12 +191,25 @@
 
 /* a_cmd=Kp*(target-x)+I-Kd*v。Kp/Ki/Kd单位分别为1/s^2、1/s^3、1/s；
  * I直接保存为加速度贡献并做对称抗饱和。首版为低动态台架初值，需由真实VIS日志整定。 */
-#define GATEWAY_BALL_POSITION_KP_PER_S2      0.6F
+#define GATEWAY_BALL_POSITION_KP_PER_S2      0.75F
 #define GATEWAY_BALL_POSITION_KI_PER_S3      0.045F
 #define GATEWAY_BALL_VELOCITY_KD_PER_S       0.55F
 #define GATEWAY_BALL_INTEGRAL_ACCEL_LIMIT_MM_S2 10.0F
 #define GATEWAY_BALL_VELOCITY_FILTER_TAU_S   0.180F
 #define GATEWAY_BALL_MAX_VELOCITY_DT_MS      UINT32_C(100)
+
+/* 钢球破静摩擦阶梯脉冲。仅在位置误差超过5 mm且滤波球速不超过8 mm/s
+ * 持续250 ms后，沿回零方向从0.30 deg开始额外倾斜；未推动时每次增加
+ * 0.05 deg，最高0.40 deg。最长120 ms，检测到球开始移动或进入误差
+ * 禁用区时立即撤销并重置阶梯。脉冲间至少冷却400 ms。 */
+#define GATEWAY_BALL_STICTION_KICK_ANGLE_DEG          0.30F
+#define GATEWAY_BALL_STICTION_KICK_STEP_ANGLE_DEG     0.05F
+#define GATEWAY_BALL_STICTION_KICK_MAX_ANGLE_DEG      0.40F
+#define GATEWAY_BALL_STICTION_MIN_ERROR_MM             5.0F
+#define GATEWAY_BALL_STICTION_MAX_VELOCITY_MM_S        8.0F
+#define GATEWAY_BALL_STICTION_STATIONARY_MS        UINT32_C(250)
+#define GATEWAY_BALL_STICTION_DURATION_MS          UINT32_C(120)
+#define GATEWAY_BALL_STICTION_COOLDOWN_MS          UINT32_C(400)
 
 /* 视觉串口实时调参的产品边界。协议值只有通过这些边界后才能进入控制器；
  * 角度、电流和raw保护仍在更下游独立生效。 */

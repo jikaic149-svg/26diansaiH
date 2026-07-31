@@ -17,6 +17,147 @@ static float limit_symmetric(float value, float limit)
     return value;
 }
 
+static void reset_stiction_kick(
+    Algorithm_BallPositionControl *controller)
+{
+    controller->stiction_kick_angle_deg = 0.0F;
+    controller->stiction_next_kick_angle_deg =
+        controller->config.stiction_kick_angle_deg;
+    controller->stiction_state_started_ms = 0U;
+    controller->stiction_error_direction = 0;
+    controller->stiction_state = ALGORITHM_BALL_STICTION_IDLE;
+}
+
+static void increase_next_stiction_kick(
+    Algorithm_BallPositionControl *controller)
+{
+    const float increased_angle_deg =
+        controller->stiction_next_kick_angle_deg +
+        controller->config.stiction_kick_step_angle_deg;
+
+    controller->stiction_next_kick_angle_deg =
+        (increased_angle_deg >
+            controller->config.stiction_kick_maximum_angle_deg) ?
+        controller->config.stiction_kick_maximum_angle_deg :
+        increased_angle_deg;
+}
+
+static int8_t error_direction(float error_mm)
+{
+    if (error_mm > 0.0F) {
+        return 1;
+    }
+    if (error_mm < 0.0F) {
+        return -1;
+    }
+    return 0;
+}
+
+static void begin_stiction_wait(
+    Algorithm_BallPositionControl *controller,
+    uint32_t sample_ms,
+    int8_t direction)
+{
+    controller->stiction_state = ALGORITHM_BALL_STICTION_WAITING;
+    controller->stiction_state_started_ms = sample_ms;
+    controller->stiction_error_direction = direction;
+    controller->stiction_kick_angle_deg = 0.0F;
+}
+
+static void update_stiction_kick(
+    Algorithm_BallPositionControl *controller,
+    uint32_t sample_ms)
+{
+    const float error_mm = controller->target_position_mm -
+        controller->position_mm;
+    const float absolute_error_mm = fabsf(error_mm);
+    const float absolute_velocity_mm_s = fabsf(controller->velocity_mm_s);
+    const int8_t direction = error_direction(error_mm);
+    const bool enabled = controller->config.stiction_kick_angle_deg > 0.0F;
+    const bool position_qualifies = absolute_error_mm >
+        controller->config.stiction_kick_minimum_error_mm;
+    const bool stationary = controller->velocity_valid &&
+        (absolute_velocity_mm_s <=
+            controller->config.stiction_kick_maximum_velocity_mm_s);
+    const uint32_t elapsed_ms =
+        sample_ms - controller->stiction_state_started_ms;
+
+    if (!enabled || !controller->velocity_valid || !position_qualifies ||
+        (direction == 0)) {
+        reset_stiction_kick(controller);
+        return;
+    }
+
+    switch (controller->stiction_state) {
+    case ALGORITHM_BALL_STICTION_IDLE:
+        if (stationary) {
+            begin_stiction_wait(controller, sample_ms, direction);
+        }
+        break;
+
+    case ALGORITHM_BALL_STICTION_WAITING:
+        if (!stationary ||
+            (direction != controller->stiction_error_direction)) {
+            reset_stiction_kick(controller);
+            if (stationary) {
+                begin_stiction_wait(controller, sample_ms, direction);
+            }
+        }
+        else if (elapsed_ms >=
+            controller->config.stiction_kick_stationary_ms) {
+            controller->stiction_state = ALGORITHM_BALL_STICTION_ACTIVE;
+            controller->stiction_state_started_ms = sample_ms;
+            /* The inverse model maps positive acceleration error to negative
+             * rod angle, so the kick uses the opposite error sign. */
+            controller->stiction_kick_angle_deg =
+                -(float)direction *
+                controller->stiction_next_kick_angle_deg;
+        }
+        break;
+
+    case ALGORITHM_BALL_STICTION_ACTIVE:
+        if (!stationary ||
+            (direction != controller->stiction_error_direction)) {
+            controller->stiction_state =
+                ALGORITHM_BALL_STICTION_COOLDOWN;
+            controller->stiction_state_started_ms = sample_ms;
+            controller->stiction_kick_angle_deg = 0.0F;
+            controller->stiction_next_kick_angle_deg =
+                controller->config.stiction_kick_angle_deg;
+        }
+        else if (elapsed_ms >=
+            controller->config.stiction_kick_duration_ms) {
+            increase_next_stiction_kick(controller);
+            controller->stiction_state =
+                ALGORITHM_BALL_STICTION_COOLDOWN;
+            controller->stiction_state_started_ms = sample_ms;
+            controller->stiction_kick_angle_deg = 0.0F;
+        }
+        break;
+
+    case ALGORITHM_BALL_STICTION_COOLDOWN:
+        controller->stiction_kick_angle_deg = 0.0F;
+        if (!stationary ||
+            (direction != controller->stiction_error_direction)) {
+            controller->stiction_next_kick_angle_deg =
+                controller->config.stiction_kick_angle_deg;
+        }
+        if (elapsed_ms >= controller->config.stiction_kick_cooldown_ms) {
+            controller->stiction_state = ALGORITHM_BALL_STICTION_IDLE;
+            controller->stiction_state_started_ms = 0U;
+            controller->stiction_error_direction = 0;
+            if (stationary) {
+                begin_stiction_wait(controller, sample_ms, direction);
+            }
+        }
+        break;
+
+    default:
+        reset_stiction_kick(controller);
+        break;
+    }
+}
+
 static bool valid_config(
     const Algorithm_BallPositionControl_Config *config)
 {
@@ -51,7 +192,29 @@ static bool valid_config(
         (config->rod_angle_limit_deg > 0.0F) &&
         (config->rod_angle_limit_deg < 90.0F) &&
         (config->maximum_velocity_dt_ms > 0U) &&
-        (config->maximum_velocity_dt_ms <= UINT32_C(1000));
+        (config->maximum_velocity_dt_ms <= UINT32_C(1000)) &&
+        isfinite(config->stiction_kick_angle_deg) &&
+        (config->stiction_kick_angle_deg >= 0.0F) &&
+        (config->stiction_kick_angle_deg <= config->rod_angle_limit_deg) &&
+        isfinite(config->stiction_kick_step_angle_deg) &&
+        (config->stiction_kick_step_angle_deg >= 0.0F) &&
+        isfinite(config->stiction_kick_maximum_angle_deg) &&
+        (config->stiction_kick_maximum_angle_deg >=
+            config->stiction_kick_angle_deg) &&
+        (config->stiction_kick_maximum_angle_deg <=
+            config->rod_angle_limit_deg) &&
+        isfinite(config->stiction_kick_minimum_error_mm) &&
+        (config->stiction_kick_minimum_error_mm >= 0.0F) &&
+        isfinite(config->stiction_kick_maximum_velocity_mm_s) &&
+        (config->stiction_kick_maximum_velocity_mm_s >= 0.0F) &&
+        (((config->stiction_kick_angle_deg == 0.0F) &&
+          (config->stiction_kick_step_angle_deg == 0.0F) &&
+          (config->stiction_kick_maximum_angle_deg == 0.0F)) ||
+         ((config->stiction_kick_minimum_error_mm > 0.0F) &&
+          (config->stiction_kick_maximum_velocity_mm_s > 0.0F) &&
+          (config->stiction_kick_stationary_ms > 0U) &&
+          (config->stiction_kick_duration_ms > 0U) &&
+          (config->stiction_kick_cooldown_ms > 0U)));
 }
 
 bool Algorithm_BallPositionControl_Init(
@@ -67,6 +230,7 @@ bool Algorithm_BallPositionControl_Init(
     controller->config = *config;
     controller->target_position_mm = config->target_position_mm;
     controller->target_command_mm = config->target_position_mm;
+    reset_stiction_kick(controller);
     controller->initialized = true;
     return true;
 }
@@ -208,6 +372,7 @@ bool Algorithm_BallPositionControl_UpdateMeasurement(
     }
 
     controller->position_mm = position_mm;
+    update_stiction_kick(controller, sample_ms);
     controller->last_sample_ms = sample_ms;
     controller->measurement_seen = true;
     return true;
@@ -240,6 +405,7 @@ void Algorithm_BallPositionControl_ResetMeasurement(
     controller->integral_acceleration_mm_s2 = 0.0F;
     controller->desired_acceleration_mm_s2 = 0.0F;
     controller->last_sample_ms = 0U;
+    reset_stiction_kick(controller);
     controller->measurement_seen = false;
     controller->velocity_valid = false;
 }
@@ -281,6 +447,7 @@ bool Algorithm_BallPositionControl_ComputeRodAngleDeg(
     if (!isfinite(angle)) {
         return false;
     }
+    angle += controller->stiction_kick_angle_deg;
     *rod_angle_deg = limit_symmetric(
         angle, controller->config.rod_angle_limit_deg);
     return true;
