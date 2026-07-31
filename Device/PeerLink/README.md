@@ -49,3 +49,7 @@ G3519→F407新增Packet V1控制类型：`BTG=2,<target_0p1mm>`（协议域±12
 16位序号、单槽Latest Value）和`BST=2`（独立序号、单槽停止事件）。Task在PeerLink
 Step后消费，BST优先并丢弃同周期BTG，执行原有`0 A -> Disable`；BTG只在phase 2且
 上一周期视觉测量有效时SetTarget，不隐式启动。产品目标安全域为±1200（0.1 mm）。
+
+## 13 字段轮速加速度扩展
+
+当前完整 CAR 为“原 11 字段 + `filtered_wheel_acceleration_x_mm_s2,wheel_accel_valid`”。解析器兼容 8/9/10/11/13 字段；13 字段中的轮速加速度范围为 `±5000 mm/s²`，无效时值必须为 0，且有效轮速加速度必须伴随有效规划。Gateway 按 CAR 序号和远端采样时间独立去重，并把它作为不含 IMU 零偏的加速度观测送入融合器。

@@ -94,6 +94,12 @@ static float visual_rod_target(float camera_position_mm)
             GATEWAY_BALL_HOLD_MAX_VELOCITY_MM_S,
         .hold_stable_duration_ms =
             GATEWAY_BALL_HOLD_STABLE_DURATION_MS,
+        .hold_exit_position_error_mm =
+            GATEWAY_BALL_HOLD_EXIT_POSITION_ERROR_MM,
+        .hold_exit_maximum_velocity_mm_s =
+            GATEWAY_BALL_HOLD_EXIT_MAX_VELOCITY_MM_S,
+        .hold_exit_sample_count =
+            GATEWAY_BALL_HOLD_EXIT_SAMPLE_COUNT,
         .near_target_error_mm =
             GATEWAY_BALL_NEAR_TARGET_ERROR_MM,
         .near_target_velocity_gain_multiplier =
