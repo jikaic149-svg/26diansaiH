@@ -64,9 +64,9 @@ F4_UART_CALIBRATION_VALID = True
 # 运行时通过同一全双工视觉串口发送VTP，不需要重新编译F407。F407会再次按
 # 产品边界校验，并以VPA回报实际生效值；该命令不启动电机、不改变球目标。
 F4_PID_TUNING_ENABLED = True
-F4_PID_KP_PER_S2 = 0.75
+F4_PID_KP_PER_S2 = 1.00
 F4_PID_KI_PER_S3 = 0.03
-F4_PID_KD_PER_S = 0.55
+F4_PID_KD_PER_S = 1.00
 
 # 触屏只发送小球在水管中的目标位置（毫米）。F407继续计算杆球模型，
 # 并把其输出杆角与底盘加速度前馈杆角相加；触屏不会直接控制电机位置。
