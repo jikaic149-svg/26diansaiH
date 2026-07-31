@@ -74,6 +74,9 @@ static uint32_t s_last_chassis_imu_sample_ms;
 static bool s_last_chassis_wheel_sequence_seen;
 static uint16_t s_last_chassis_wheel_sequence;
 static uint32_t s_last_chassis_wheel_sample_ms;
+static bool s_last_chassis_wheel_acceleration_sequence_seen;
+static uint16_t s_last_chassis_wheel_acceleration_sequence;
+static uint32_t s_last_chassis_wheel_acceleration_sample_ms;
 static bool s_chassis_fusion_trusted;
 static bool s_last_ball_sequence_seen;
 static uint16_t s_last_ball_sequence;
@@ -268,6 +271,7 @@ static void update_chassis_acceleration(
         Algorithm_ChassisAccelerationFusion_Reset(&s_chassis_fusion, now_ms);
         s_last_chassis_imu_sequence_seen = false;
         s_last_chassis_wheel_sequence_seen = false;
+        s_last_chassis_wheel_acceleration_sequence_seen = false;
         return;
     }
     if (!Algorithm_ChassisAccelerationFusion_Predict(
@@ -276,6 +280,7 @@ static void update_chassis_acceleration(
             (float)s_planned_chassis_acceleration_mm_s2)) {
         s_last_chassis_imu_sequence_seen = false;
         s_last_chassis_wheel_sequence_seen = false;
+        s_last_chassis_wheel_acceleration_sequence_seen = false;
         return;
     }
     if ((input != NULL) && input->chassis_motion_measurement_valid &&
@@ -312,6 +317,23 @@ static void update_chassis_acceleration(
         s_last_chassis_wheel_sequence = input->chassis_wheel_sequence;
         s_last_chassis_wheel_sample_ms = input->chassis_wheel_sample_ms;
         s_last_chassis_wheel_sequence_seen = true;
+    }
+    if ((input != NULL) &&
+        input->chassis_wheel_acceleration_measurement_valid &&
+        (!s_last_chassis_wheel_acceleration_sequence_seen ||
+         (input->chassis_wheel_acceleration_sequence !=
+            s_last_chassis_wheel_acceleration_sequence) ||
+         (input->chassis_wheel_acceleration_sample_ms !=
+            s_last_chassis_wheel_acceleration_sample_ms))) {
+        (void)Algorithm_ChassisAccelerationFusion_CorrectWheelAcceleration(
+            &s_chassis_fusion,
+            now_ms,
+            (float)input->measured_chassis_wheel_acceleration_mm_s2);
+        s_last_chassis_wheel_acceleration_sequence =
+            input->chassis_wheel_acceleration_sequence;
+        s_last_chassis_wheel_acceleration_sample_ms =
+            input->chassis_wheel_acceleration_sample_ms;
+        s_last_chassis_wheel_acceleration_sequence_seen = true;
     }
     if (Algorithm_ChassisAccelerationFusion_IsTrusted(
             &s_chassis_fusion, now_ms) &&
@@ -409,6 +431,9 @@ static bool update_primary_tracking_target(
 {
     float ball_angle_deg = 0.0F;
     float chassis_angle_deg = 0.0F;
+    float limited_ball_angle_deg;
+    float available_chassis_min_deg;
+    float available_chassis_max_deg;
     float requested_offset_deg;
     float limited_offset_deg;
     bool total_angle_saturated;
@@ -504,13 +529,28 @@ static bool update_primary_tracking_target(
             -GATEWAY_CHASSIS_FF_ANGLE_LIMIT_DEG,
             GATEWAY_CHASSIS_FF_ANGLE_LIMIT_DEG);
     }
-    s_chassis_compensation_angle_deg = chassis_angle_deg;
-    requested_offset_deg = ball_angle_deg + chassis_angle_deg;
-    limited_offset_deg = clamp_float(
-        requested_offset_deg,
+    /* Translation feedforward is physically position-independent. For M6,
+     * preserve the arbitrary-target ball loop first and let chassis damping
+     * use only the rod-angle authority that remains. This avoids an unscaled
+     * acceleration term taking control away near either end of the rod. */
+    limited_ball_angle_deg = clamp_float(
+        ball_angle_deg,
         GATEWAY_TOTAL_ROD_COMMAND_MIN_DEG,
         GATEWAY_TOTAL_ROD_COMMAND_MAX_DEG);
-    total_angle_saturated = limited_offset_deg != requested_offset_deg;
+    available_chassis_min_deg =
+        GATEWAY_TOTAL_ROD_COMMAND_MIN_DEG - limited_ball_angle_deg;
+    available_chassis_max_deg =
+        GATEWAY_TOTAL_ROD_COMMAND_MAX_DEG - limited_ball_angle_deg;
+    s_chassis_compensation_angle_deg = clamp_float(
+        chassis_angle_deg,
+        available_chassis_min_deg,
+        available_chassis_max_deg);
+    requested_offset_deg = limited_ball_angle_deg +
+        s_chassis_compensation_angle_deg;
+    limited_offset_deg = requested_offset_deg;
+    total_angle_saturated =
+        (limited_ball_angle_deg != ball_angle_deg) ||
+        (s_chassis_compensation_angle_deg != chassis_angle_deg);
     target_applied = apply_rod_target_deg(
         s_rod_trim_angle_deg + limited_offset_deg);
     s_rod_angle_saturated =
@@ -1062,6 +1102,7 @@ static void make_primary_telemetry(
             s_ball_estimator.innovation_reject_count,
         .chassis_fusion_innovation_reject_count =
             s_chassis_fusion.wheel_innovation_reject_count +
+            s_chassis_fusion.wheel_acceleration_innovation_reject_count +
             s_chassis_fusion.imu_innovation_reject_count,
         .level_control_fault_count = s_level_control_fault_count,
     };
@@ -1207,6 +1248,12 @@ bool APP_Gateway_Init(uint32_t now_ms)
             GATEWAY_BALL_HOLD_MAX_VELOCITY_MM_S,
         .hold_stable_duration_ms =
             GATEWAY_BALL_HOLD_STABLE_DURATION_MS,
+        .hold_exit_position_error_mm =
+            GATEWAY_BALL_HOLD_EXIT_POSITION_ERROR_MM,
+        .hold_exit_maximum_velocity_mm_s =
+            GATEWAY_BALL_HOLD_EXIT_MAX_VELOCITY_MM_S,
+        .hold_exit_sample_count =
+            GATEWAY_BALL_HOLD_EXIT_SAMPLE_COUNT,
         .near_target_error_mm =
             GATEWAY_BALL_NEAR_TARGET_ERROR_MM,
         .near_target_velocity_gain_multiplier =
@@ -1278,6 +1325,8 @@ bool APP_Gateway_Init(uint32_t now_ms)
         .plan_delay_ms = GATEWAY_CHASSIS_FUSION_PLAN_DELAY_MS,
         .wheel_speed_measurement_variance_mm2_s2 =
             GATEWAY_CHASSIS_FUSION_WHEEL_R_MM2_S2,
+        .wheel_acceleration_measurement_variance_mm2_s4 =
+            GATEWAY_CHASSIS_FUSION_WHEEL_ACCEL_R_MM2_S4,
         .imu_acceleration_measurement_variance_mm2_s4 =
             GATEWAY_CHASSIS_FUSION_IMU_R_MM2_S4,
         .velocity_noise_density_mm2_s3 =
@@ -1439,6 +1488,9 @@ bool APP_Gateway_Init(uint32_t now_ms)
     s_last_chassis_wheel_sequence_seen = false;
     s_last_chassis_wheel_sequence = 0U;
     s_last_chassis_wheel_sample_ms = 0U;
+    s_last_chassis_wheel_acceleration_sequence_seen = false;
+    s_last_chassis_wheel_acceleration_sequence = 0U;
+    s_last_chassis_wheel_acceleration_sample_ms = 0U;
     s_chassis_fusion_trusted = false;
     s_last_ball_sequence_seen = false;
     s_ball_measurement_valid = false;

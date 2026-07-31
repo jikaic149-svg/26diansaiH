@@ -31,6 +31,7 @@ typedef struct {
     uint32_t plan_delay_ms;
 
     float wheel_speed_measurement_variance_mm2_s2;
+    float wheel_acceleration_measurement_variance_mm2_s4;
     float imu_acceleration_measurement_variance_mm2_s4;
     float velocity_noise_density_mm2_s3;
     float acceleration_noise_density_mm2_s5;
@@ -68,10 +69,13 @@ typedef struct {
     size_t plan_history_count;
     uint32_t last_prediction_ms;
     uint32_t last_accepted_wheel_ms;
+    uint32_t last_accepted_wheel_acceleration_ms;
     uint32_t last_accepted_imu_ms;
     uint32_t accepted_wheel_measurement_count;
+    uint32_t accepted_wheel_acceleration_measurement_count;
     uint32_t accepted_imu_measurement_count;
     uint32_t wheel_innovation_reject_count;
+    uint32_t wheel_acceleration_innovation_reject_count;
     uint32_t imu_innovation_reject_count;
     uint32_t prediction_count;
     uint32_t reset_count;
@@ -103,6 +107,14 @@ bool Algorithm_ChassisAccelerationFusion_Correct(
     float wheel_speed_mm_s,
     bool imu_acceleration_valid,
     float imu_acceleration_mm_s2);
+
+/* Correct with the G3519 filtered wheel-speed derivative. Unlike the local
+ * accelerometer observation H=[0,1,1], this measurement has H=[0,1,0] and
+ * therefore separates real chassis acceleration from BMI088 zero bias. */
+bool Algorithm_ChassisAccelerationFusion_CorrectWheelAcceleration(
+    Algorithm_ChassisAccelerationFusion *fusion,
+    uint32_t now_ms,
+    float wheel_acceleration_mm_s2);
 
 bool Algorithm_ChassisAccelerationFusion_GetState(
     const Algorithm_ChassisAccelerationFusion *fusion,

@@ -420,6 +420,9 @@ static void test_quiet_hold_stays_until_target_changes(void)
     config.hold_position_error_mm = 2.0F;
     config.hold_maximum_velocity_mm_s = 5.0F;
     config.hold_stable_duration_ms = 300U;
+    config.hold_exit_position_error_mm = 5.0F;
+    config.hold_exit_maximum_velocity_mm_s = 12.0F;
+    config.hold_exit_sample_count = 3U;
     assert(Algorithm_BallPositionControl_Init(&controller, &config));
     assert(Algorithm_BallPositionControl_SetEstimatedState(
         &controller, 0U, -1.5F, 0.0F));
@@ -494,6 +497,41 @@ static void test_quiet_hold_stays_until_target_changes(void)
     assert(!controller.hold_active);
 }
 
+static void test_quiet_hold_exits_at_nonzero_target_after_hysteresis(void)
+{
+    Algorithm_BallPositionControl controller;
+    Algorithm_BallPositionControl_Config config = default_config();
+    float angle;
+
+    config.target_position_mm = 40.0F;
+    config.hold_position_error_mm = 2.0F;
+    config.hold_maximum_velocity_mm_s = 5.0F;
+    config.hold_stable_duration_ms = 100U;
+    config.hold_exit_position_error_mm = 5.0F;
+    config.hold_exit_maximum_velocity_mm_s = 12.0F;
+    config.hold_exit_sample_count = 3U;
+    assert(Algorithm_BallPositionControl_Init(&controller, &config));
+    assert(Algorithm_BallPositionControl_SetEstimatedState(
+        &controller, 0U, 40.0F, 0.0F));
+    assert(Algorithm_BallPositionControl_SetEstimatedState(
+        &controller, 100U, 40.0F, 0.0F));
+    assert(Algorithm_BallPositionControl_SetEstimatedState(
+        &controller, 200U, 40.0F, 0.0F));
+    assert(controller.hold_active);
+
+    assert(Algorithm_BallPositionControl_SetEstimatedState(
+        &controller, 300U, 32.0F, 0.0F));
+    assert(Algorithm_BallPositionControl_SetEstimatedState(
+        &controller, 400U, 32.0F, 0.0F));
+    assert(controller.hold_active);
+    assert(Algorithm_BallPositionControl_SetEstimatedState(
+        &controller, 500U, 32.0F, 0.0F));
+    assert(!controller.hold_active);
+    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
+        &controller, &angle));
+    assert(angle < 0.0F);
+}
+
 static void test_invalid_quiet_hold_configuration(void)
 {
     Algorithm_BallPositionControl controller;
@@ -504,6 +542,14 @@ static void test_invalid_quiet_hold_configuration(void)
     assert(!Algorithm_BallPositionControl_Init(&controller, &config));
     config = default_config();
     config.hold_position_error_mm = -0.1F;
+    assert(!Algorithm_BallPositionControl_Init(&controller, &config));
+    config = default_config();
+    config.hold_position_error_mm = 2.0F;
+    config.hold_maximum_velocity_mm_s = 5.0F;
+    config.hold_stable_duration_ms = 100U;
+    config.hold_exit_position_error_mm = 2.0F;
+    config.hold_exit_maximum_velocity_mm_s = 10.0F;
+    config.hold_exit_sample_count = 2U;
     assert(!Algorithm_BallPositionControl_Init(&controller, &config));
 }
 
@@ -726,6 +772,7 @@ int main(void)
     test_position_pid_rejects_invalid_configuration();
     test_stiction_kick_disabled_configuration();
     test_quiet_hold_stays_until_target_changes();
+    test_quiet_hold_exits_at_nonzero_target_after_hysteresis();
     test_invalid_quiet_hold_configuration();
     test_near_target_velocity_damping_gain_schedule();
     test_invalid_near_target_gain_schedule();

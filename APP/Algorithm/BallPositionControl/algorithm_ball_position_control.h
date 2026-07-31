@@ -32,12 +32,16 @@ typedef struct {
      * Several frames are retained so velocity is not derived from one noisy
      * inter-frame position step. */
     uint32_t velocity_estimation_window_ms;
-    /* Optional sticky quiet hold: enter when both position error and estimated
-     * speed are within their limits, then keep the ball-loop output at zero
-     * until the target command changes or the measurement state is reset. */
+    /* Optional quiet hold with hysteretic disturbance exit. Entry requires
+     * the tight position/speed limits for the stable duration. While held,
+     * either wider exit limit must be exceeded for hold_exit_sample_count
+     * consecutive measurements before the position loop is restored. */
     float hold_position_error_mm;
     float hold_maximum_velocity_mm_s;
     uint32_t hold_stable_duration_ms;
+    float hold_exit_position_error_mm;
+    float hold_exit_maximum_velocity_mm_s;
+    uint32_t hold_exit_sample_count;
     /* Optional near-target damping schedule; zero values disable it. */
     float near_target_error_mm;
     float near_target_velocity_gain_multiplier;
@@ -89,6 +93,7 @@ typedef struct {
         ALGORITHM_BALL_POSITION_CONTROL_VELOCITY_HISTORY_CAPACITY];
     uint32_t last_sample_ms;
     uint32_t hold_candidate_started_ms;
+    uint32_t hold_exit_consecutive_count;
     uint32_t stiction_state_started_ms;
     int8_t stiction_error_direction;
     Algorithm_BallPositionControl_StictionState stiction_state;

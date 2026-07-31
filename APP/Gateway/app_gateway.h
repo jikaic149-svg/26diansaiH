@@ -79,6 +79,11 @@ typedef struct {
     uint16_t chassis_wheel_sequence;
     uint32_t chassis_wheel_sample_ms;
     int32_t measured_chassis_wheel_speed_mm_s;
+
+    bool chassis_wheel_acceleration_measurement_valid;
+    uint16_t chassis_wheel_acceleration_sequence;
+    uint32_t chassis_wheel_acceleration_sample_ms;
+    int32_t measured_chassis_wheel_acceleration_mm_s2;
 } APP_Gateway_ControlInput;
 
 /* TCP<->CAN 双向网关。

@@ -484,6 +484,13 @@ static APP_Gateway_ControlInput Task_MakeControlInput(uint32_t now_ms)
             input.measured_chassis_wheel_speed_mm_s =
                 car_state.speed_x_mm_per_second;
         }
+        if (car_state.filtered_wheel_acceleration_valid) {
+            input.chassis_wheel_acceleration_measurement_valid = true;
+            input.chassis_wheel_acceleration_sequence = car_state.sequence;
+            input.chassis_wheel_acceleration_sample_ms = car_state.sample_ms;
+            input.measured_chassis_wheel_acceleration_mm_s2 =
+                car_state.filtered_wheel_acceleration_x_mm_per_second2;
+        }
     }
 
     if (s_vision_link_ready &&

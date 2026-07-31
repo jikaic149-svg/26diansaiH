@@ -16,6 +16,7 @@ static Algorithm_ChassisAccelerationFusion_Config default_config(void)
         .response_time_constant_s = 0.12F,
         .plan_delay_ms = 30U,
         .wheel_speed_measurement_variance_mm2_s2 = 225.0F,
+        .wheel_acceleration_measurement_variance_mm2_s4 = 6400.0F,
         .imu_acceleration_measurement_variance_mm2_s4 = 14400.0F,
         .velocity_noise_density_mm2_s3 = 400.0F,
         .acceleration_noise_density_mm2_s5 = 160000.0F,
@@ -129,11 +130,38 @@ static void test_innovation_rejection_and_gap_reset(void)
     assert(close_enough(after.velocity_mm_s, 0.0F, 0.001F));
 }
 
+static void test_wheel_acceleration_observes_acceleration_without_imu_bias(void)
+{
+    Algorithm_ChassisAccelerationFusion fusion;
+    Algorithm_ChassisAccelerationFusion_State before;
+    Algorithm_ChassisAccelerationFusion_State after;
+    Algorithm_ChassisAccelerationFusion_Config config = default_config();
+
+    config.innovation_gate_sigma = 20.0F;
+    assert(Algorithm_ChassisAccelerationFusion_Init(&fusion, &config, 0U));
+    assert(Algorithm_ChassisAccelerationFusion_Predict(
+        &fusion, 2U, 0.0F));
+    assert(Algorithm_ChassisAccelerationFusion_GetState(
+        &fusion, &before, NULL));
+    assert(Algorithm_ChassisAccelerationFusion_CorrectWheelAcceleration(
+        &fusion, 2U, 100.0F));
+    assert(Algorithm_ChassisAccelerationFusion_GetState(
+        &fusion, &after, NULL));
+    assert(after.acceleration_mm_s2 > before.acceleration_mm_s2);
+    assert(close_enough(after.imu_bias_mm_s2, before.imu_bias_mm_s2, 0.001F));
+    assert(fusion.accepted_wheel_acceleration_measurement_count == 1U);
+
+    assert(Algorithm_ChassisAccelerationFusion_CorrectWheelAcceleration(
+        &fusion, 2U, 3000.0F));
+    assert(fusion.wheel_acceleration_innovation_reject_count == 1U);
+}
+
 int main(void)
 {
     test_plan_delay_and_first_order_response();
     test_sensor_fusion_and_trust_gate();
     test_innovation_rejection_and_gap_reset();
+    test_wheel_acceleration_observes_acceleration_without_imu_bias();
     puts("chassis acceleration fusion tests: PASS");
     return 0;
 }

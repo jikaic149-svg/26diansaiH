@@ -30,6 +30,8 @@ static bool valid_config(
         (config->plan_delay_ms < UINT32_C(0x80000000)) &&
         finite_positive(config->wheel_speed_measurement_variance_mm2_s2) &&
         finite_positive(
+            config->wheel_acceleration_measurement_variance_mm2_s4) &&
+        finite_positive(
             config->imu_acceleration_measurement_variance_mm2_s4) &&
         finite_nonnegative(config->velocity_noise_density_mm2_s3) &&
         finite_nonnegative(config->acceleration_noise_density_mm2_s5) &&
@@ -149,10 +151,13 @@ static void reset_runtime(
     plan_history_push(fusion, now_ms, 0.0F);
     fusion->last_prediction_ms = now_ms;
     fusion->last_accepted_wheel_ms = now_ms;
+    fusion->last_accepted_wheel_acceleration_ms = now_ms;
     fusion->last_accepted_imu_ms = now_ms;
     fusion->accepted_wheel_measurement_count = 0U;
+    fusion->accepted_wheel_acceleration_measurement_count = 0U;
     fusion->accepted_imu_measurement_count = 0U;
     fusion->wheel_innovation_reject_count = 0U;
+    fusion->wheel_acceleration_innovation_reject_count = 0U;
     fusion->imu_innovation_reject_count = 0U;
     fusion->prediction_count = 0U;
     if (count_reset && (fusion->reset_count < UINT32_MAX)) {
@@ -387,6 +392,40 @@ bool Algorithm_ChassisAccelerationFusion_GetState(
         *covariance = fusion->covariance;
     }
     return true;
+}
+
+bool Algorithm_ChassisAccelerationFusion_CorrectWheelAcceleration(
+    Algorithm_ChassisAccelerationFusion *fusion,
+    uint32_t now_ms,
+    float wheel_acceleration_mm_s2)
+{
+    const float h[3] = { 0.0F, 1.0F, 0.0F };
+    enum CorrectionResult result;
+
+    if ((fusion == NULL) || !fusion->initialized ||
+        !isfinite(wheel_acceleration_mm_s2)) {
+        return false;
+    }
+    result = correct_scalar(
+        fusion,
+        h,
+        wheel_acceleration_mm_s2 - fusion->state.acceleration_mm_s2,
+        fusion->config.wheel_acceleration_measurement_variance_mm2_s4);
+    if (result == CORRECTION_RESULT_ERROR) {
+        reset_runtime(fusion, now_ms, true);
+        return false;
+    }
+    if (result == CORRECTION_RESULT_ACCEPTED) {
+        fusion->last_accepted_wheel_acceleration_ms = now_ms;
+        if (fusion->accepted_wheel_acceleration_measurement_count <
+            UINT32_MAX) {
+            ++fusion->accepted_wheel_acceleration_measurement_count;
+        }
+    }
+    else if (fusion->wheel_acceleration_innovation_reject_count < UINT32_MAX) {
+        ++fusion->wheel_acceleration_innovation_reject_count;
+    }
+    return valid_state(fusion);
 }
 
 bool Algorithm_ChassisAccelerationFusion_IsTrusted(

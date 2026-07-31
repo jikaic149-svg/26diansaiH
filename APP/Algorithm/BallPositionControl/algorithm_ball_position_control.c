@@ -24,6 +24,11 @@ static void reset_hold_candidate(
     controller->hold_candidate_active = false;
 }
 
+static void reset_hold_exit(Algorithm_BallPositionControl *controller)
+{
+    controller->hold_exit_consecutive_count = 0U;
+}
+
 static void reset_speed_loop(
     Algorithm_BallPositionControl *controller)
 {
@@ -274,11 +279,23 @@ static bool valid_config(
         (config->hold_position_error_mm >= 0.0F) &&
         isfinite(config->hold_maximum_velocity_mm_s) &&
         (config->hold_maximum_velocity_mm_s >= 0.0F) &&
+        isfinite(config->hold_exit_position_error_mm) &&
+        (config->hold_exit_position_error_mm >= 0.0F) &&
+        isfinite(config->hold_exit_maximum_velocity_mm_s) &&
+        (config->hold_exit_maximum_velocity_mm_s >= 0.0F) &&
         (((config->hold_position_error_mm == 0.0F) &&
-          (config->hold_maximum_velocity_mm_s == 0.0F)) ||
+          (config->hold_maximum_velocity_mm_s == 0.0F) &&
+          (config->hold_exit_position_error_mm == 0.0F) &&
+          (config->hold_exit_maximum_velocity_mm_s == 0.0F) &&
+          (config->hold_exit_sample_count == 0U)) ||
          ((config->hold_position_error_mm > 0.0F) &&
           (config->hold_maximum_velocity_mm_s > 0.0F) &&
-          (config->hold_stable_duration_ms > 0U))) &&
+          (config->hold_stable_duration_ms > 0U) &&
+          (config->hold_exit_position_error_mm >
+            config->hold_position_error_mm) &&
+          (config->hold_exit_maximum_velocity_mm_s >
+            config->hold_maximum_velocity_mm_s) &&
+          (config->hold_exit_sample_count > 0U))) &&
         isfinite(config->near_target_error_mm) &&
         (config->near_target_error_mm >= 0.0F) &&
         isfinite(config->near_target_velocity_gain_multiplier) &&
@@ -354,6 +371,7 @@ bool Algorithm_BallPositionControl_SetTargetPositionMm(
     }
     if (target_position_mm != controller->target_command_mm) {
         controller->hold_active = false;
+        reset_hold_exit(controller);
         controller->integral_acceleration_mm_s2 = 0.0F;
         reset_hold_candidate(controller);
         reset_speed_handoff_trip(controller);
@@ -378,8 +396,30 @@ static void update_position_loop_state(
         return;
     }
     if (controller->hold_active) {
-        reset_speed_loop(controller);
-        return;
+        const bool exit_exceeded =
+            (fabsf(controller->target_command_mm - controller->position_mm) >=
+                controller->config.hold_exit_position_error_mm) ||
+            (fabsf(controller->velocity_mm_s) >=
+                controller->config.hold_exit_maximum_velocity_mm_s);
+
+        if (exit_exceeded) {
+            if (controller->hold_exit_consecutive_count < UINT32_MAX) {
+                ++controller->hold_exit_consecutive_count;
+            }
+        }
+        else {
+            reset_hold_exit(controller);
+        }
+        if (controller->hold_exit_consecutive_count <
+            controller->config.hold_exit_sample_count) {
+            reset_speed_loop(controller);
+            return;
+        }
+        controller->hold_active = false;
+        controller->integral_acceleration_mm_s2 = 0.0F;
+        reset_hold_exit(controller);
+        reset_hold_candidate(controller);
+        latch_position_loop(controller);
     }
     if (controller->stiction_state == ALGORITHM_BALL_STICTION_ACTIVE) {
         controller->integral_acceleration_mm_s2 = 0.0F;
@@ -418,6 +458,7 @@ static void update_position_loop_state(
             controller->hold_candidate_started_ms) >=
             controller->config.hold_stable_duration_ms) {
         controller->hold_active = true;
+        reset_hold_exit(controller);
         reset_speed_loop(controller);
     }
 }
@@ -639,6 +680,7 @@ void Algorithm_BallPositionControl_ResetMeasurement(
     controller->measurement_seen = false;
     controller->velocity_valid = false;
     controller->hold_active = false;
+    reset_hold_exit(controller);
 }
 
 bool Algorithm_BallPositionControl_ComputeRodAngleDeg(
