@@ -1,5 +1,50 @@
 # PROCESS
 
+## 2026-08-01 Task3改由G3519 KEY直接启停
+
+- 修改原因：用户否决“选择M3后还要F407失能并重新按本地KEY”的`WAIT_REARM`设计，明确第一次G3519短按启动、第二次短按结束。
+- 最终决策：Maix读取F407 VST `status_flags.bit14`作为明确Task3活动状态；活动位为1且真实滚球环在线时启动现有Q3序列，活动位清零立即取消并回到`WAIT_START`。不再根据F407预先使能状态猜测按键事件。
+- 涉及文件：`competition_task_manager.py`、对应Python测试及本记录。
+- 验证与部署：5项任务管理器单测通过；完整Python工程已同步至`/root/steelball_horizontal_trough_pro`并从`maixpy_run.py`重启，进程持续运行，VIS/VST在线。部署后VST为phase 0、`0 mA`、速度0、驱动失能。
+- 待确认：实机执行一次完整的G3519 KEY启动、A→B→A、再次KEY停止。
+
+## 2026-08-01 第三题视觉目标冻结为绝对±5 cm
+
+- 修改原因：实机第二段未到`-50 mm`，8 s硬超时后旧逻辑把目标覆盖为最后视觉位置
+  `-25 mm`，上位机因此显示第二目标只有`-2.5 cm`；用户明确要求绝对`±5 cm`。
+- 最终决策：第三题只发送视觉目标`+50 mm`和`-50 mm`，取消此前用于破静摩擦的
+  `+70/-70 mm`超调命令。硬超时仍标记`FAILED`，但目标保持`-50 mm`，不再改为任意实测位置。
+- 涉及文件：`ball_target_touch.py`、`vision_config.py`、`main.py`、对应测试和运行辅助脚本。
+- 验证方式和结果：PC端26项Python单元测试全部通过，关键模块`py_compile`和
+  `git diff --check`通过。完整项目已同步到`/root/steelball_horizontal_trough_pro`并重启；
+  板端回读配置为`RIGHT/LEFT/FINAL=50/-50/-50 mm`且存在`Q3_TIMEOUT_FINAL`，三份关键文件
+  SHA-256与本地一致。新进程PID 85090持续运行，启动、UART、VIS和VST均在线，stderr为空；
+  VST确认F407命令0 mA、速度0 rpm、fault=0，部署过程未启动电机。
+- 已知限制：目标严格等于`±50 mm`不代表当前机械闭环一定能在5 s内到达；反向段收敛能力仍需实测。
+
+## 2026-07-31 G3519赛题驱动的视觉任务调度
+
+- 修改原因：用户明确task指题目2～6的业务任务，MaixCAM应消费F407转发的G3519 mode并
+  完成对应视觉任务，而不是只显示mode。
+- 最终决策：新增独立纯Python任务管理器。M2只监测；M3预置中心并等待F407滚球外环、
+  电机使能和无故障状态后执行现有本地序列；M4/M5锁中心；M6保留并开放触屏任意目标。
+  mode=0或VST过期时保留当前任务状态、停止推进并锁定触屏，但不启动或停止电机。
+- 涉及文件：`competition_task_manager.py`、`ball_target_touch.py`、`main.py`、
+  `vision_config.py`、`app.yaml`、README与对应PC测试。
+- 验证结果：20项Python单元测试通过，关键模块`compileall`和`git diff --check`通过。
+- 待实物确认：G3519实际切换M2～M6时屏幕状态、VBT目标及M3使能边沿行为。
+
+## 2026-07-31 MaixCAM2 UI尺寸标定与冻结
+
+- 实测尺寸：面板驱动日志`480×640`，MaixPy display/touch逻辑坐标`640×480`，
+  YOLO/视觉画布`416×320`；FIT_CONTAIN内容区为`(8,0,624,480)`，底部滑条触摸区
+  映射为`(26,393,588,87)`。
+- 最终决策：新增纯Python尺寸计算与严格校验；将四个实际尺寸写入`vision_config.py`。
+  尺寸不一致时启动失败，避免屏幕旋转、模型输入变化或换屏导致触摸坐标错位。
+- 验证状态：23项Python测试、关键模块py_compile和`git diff --check`通过；冻结版已部署，
+  板端输出`UI_SIZE_FROZEN|frame=416x320|display=640x480|content=8,0,624,480|`
+  `slider_touch=26,393,588,87`，视觉进程持续运行且stderr为空。
+
 ## 2026-07-31 临时无标定直接控制
 
 - 修改原因：用户要求启动后直接回传球坐标并允许F407控制，暂时跳过交互标定。

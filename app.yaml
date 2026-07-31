@@ -6,6 +6,7 @@ icon: app.png
 desc: 横向水管凹槽钢球位置测试
 files:
   - ball_target_touch.py
+  - competition_task_manager.py
   - ball_axis_position.py
   - f4_vision_link.py
   - horizontal_trough_tracker.py
@@ -14,5 +15,6 @@ files:
   - quick_position_calibration.py
   - rtsp_debug_stream.py
   - threshold_tuning_menu.py
+  - ui_size_calibration.py
   - vofa_udp_telemetry.py
   - vision_config.py

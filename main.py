@@ -17,6 +17,7 @@ from maix import app, camera, display, image, nn, time
 
 import vision_config as config
 from ball_target_touch import BallTargetTouchController
+from competition_task_manager import CompetitionTaskManager
 from ball_axis_position import (
     filter_detections_on_trough,
     highest_score_detection,
@@ -28,11 +29,13 @@ from kalman_tracker import PrimaryBallTracker
 from horizontal_trough_tracker import HorizontalTroughTracker
 from quick_position_calibration import (
     apply_calibrated_position,
+    get_fixed_position_calibration,
     run_quick_position_calibration,
     transform_calibrated_axis,
 )
 from rtsp_debug_stream import RtspDebugStream
 from threshold_tuning_menu import run_threshold_tuning_menu
+from ui_size_calibration import calibrate_frozen_ui
 from vofa_udp_telemetry import VofaUdpTelemetry
 from yolo_roi import prepare_yolo_input, map_detections_to_frame
 
@@ -51,6 +54,8 @@ WHITE = image.Color.from_rgb(255, 255, 255)
 DEBUG_IMAGES = os.environ.get("MAIXPY_DEBUG_IMAGES") == "1"
 DEBUG_IMAGE_INTERVAL_FRAMES = 100
 DEBUG_MAX_FRAMES = 300
+LIVE_CAPTURE_TRIGGER = "/tmp/steelball_live_capture.trigger"
+LIVE_CAPTURE_PATH = "/tmp/steelball_live_capture.jpg"
 
 
 def _save_debug_image(img, name):
@@ -64,6 +69,22 @@ def _save_debug_image(img, name):
     path = "%s/%s" % (artifact_dir, name)
     img.save(path)
     print("MAIXPY_SKILL_IMAGE %s" % path)
+
+
+def _save_requested_live_frame(img, frame_index):
+    """Save one annotated frame only when the observer requests it."""
+    if img is None or not os.path.exists(LIVE_CAPTURE_TRIGGER):
+        return False
+    try:
+        img.save(LIVE_CAPTURE_PATH)
+        print("STEELBALL_LIVE_CAPTURE|frame=%d|path=%s" % (
+            int(frame_index), LIVE_CAPTURE_PATH))
+        return True
+    finally:
+        try:
+            os.remove(LIVE_CAPTURE_TRIGGER)
+        except Exception:
+            pass
 
 
 class PerformanceMeter:
@@ -218,6 +239,10 @@ def _trough_settings():
                 config, "TROUGH_AXIS_FILTER_ENDPOINT_MIN_SPAN_RATIO", 0.75),
         "endpoint_ab_enabled": getattr(
             config, "TROUGH_ENDPOINT_AB_ENABLED", True),
+        "endpoint_ab_fixed_right_enabled": getattr(
+            config, "TROUGH_ENDPOINT_AB_FIXED_RIGHT_ENABLED", False),
+        "endpoint_ab_fixed_right_x": getattr(
+            config, "TROUGH_ENDPOINT_AB_FIXED_RIGHT_X", 0.0),
         "endpoint_ab_alpha": getattr(
             config, "TROUGH_ENDPOINT_AB_ALPHA", 0.70),
         "endpoint_ab_beta": getattr(
@@ -395,7 +420,8 @@ def _draw_position(frame, position):
 
 
 def _draw_status(frame, perf, detections, trough_axis,
-                 tracked_ball, position, f4_status=None):
+                 tracked_ball, position, f4_status=None,
+                 competition_task=None):
     # 不再铺设实心黑色状态栏，让文字直接叠加在实时画面上。
     valid = bool(position.get("valid"))
     status_color = GREEN if valid else RED
@@ -475,7 +501,9 @@ def _log_result(frame_index, detections, candidates, tracked_ball,
         "trough_valid=%d|trough_source=%s|trough_reason=%s|"
         "trough_fallback=%s|"
         "axis_filter=%s|axis_conf=%s|axis_filter_shift_px=%s|"
-        "endpoint_filter=%s|endpoint_mode=%s|endpoint_support=%s|"
+        "endpoint_filter=%s|endpoint_mode=%s|endpoint_ab=%s|"
+        "endpoint_raw_left_x=%s|endpoint_v_left=%s|"
+        "endpoint_predict_px_left=%s|endpoint_support=%s|"
         "endpoint_left_support=%s|endpoint_right_support=%s|"
         "endpoint_quality=%s|endpoint_refine=%s|"
         "endpoint_refine_left_px=%s|endpoint_refine_right_px=%s|"
@@ -520,6 +548,17 @@ def _log_result(frame_index, detections, candidates, tracked_ball,
             if trough_axis else "NONE",
             trough_axis.get("endpoint_mode", "NONE")
             if trough_axis else "NONE",
+            trough_axis.get("endpoint_ab", "NONE")
+            if trough_axis else "NONE",
+            _format_number(
+                trough_axis.get("endpoint_raw_left_x")
+                if trough_axis else None, 2),
+            _format_number(
+                trough_axis.get("endpoint_v_left")
+                if trough_axis else None, 2),
+            _format_number(
+                trough_axis.get("endpoint_predict_px_left")
+                if trough_axis else None, 2),
             _format_number(
                 trough_axis.get("endpoint_support")
                 if trough_axis else None, 3),
@@ -604,6 +643,7 @@ def main():
     f4_link = None
     f4_active = False
     ball_target_touch = None
+    competition_task = None
     try:
         # 位置计算要求框与横向凹槽来自当前帧，因此保持dual_buff=False。
         detector = nn.YOLO11(model=config.MODEL_PATH, dual_buff=False)
@@ -662,6 +702,29 @@ def main():
         if display_every_frame:
             display_interval = 1
         disp = display.Display() if display_enabled else None
+        if disp is not None and bool(getattr(
+                config, "UI_SIZE_FROZEN", False)):
+            frozen_ui = calibrate_frozen_ui(
+                detector.input_width(), detector.input_height(),
+                disp.width(), disp.height(),
+                int(getattr(config, "UI_FROZEN_FRAME_WIDTH", 416)),
+                int(getattr(config, "UI_FROZEN_FRAME_HEIGHT", 320)),
+                int(getattr(config, "UI_FROZEN_DISPLAY_WIDTH", 480)),
+                int(getattr(config, "UI_FROZEN_DISPLAY_HEIGHT", 640)),
+            )
+            content = frozen_ui["content"]
+            slider_touch = frozen_ui["slider_touch"]
+            print(
+                "UI_SIZE_FROZEN|frame=%dx%d|display=%dx%d|"
+                "content=%d,%d,%d,%d|slider_touch=%d,%d,%d,%d" % (
+                    frozen_ui["frame_width"], frozen_ui["frame_height"],
+                    frozen_ui["display_width"],
+                    frozen_ui["display_height"],
+                    content["x"], content["y"],
+                    content["width"], content["height"],
+                    slider_touch["x"], slider_touch["y"],
+                    slider_touch["width"], slider_touch["height"],
+                ))
         # 交互式阈值菜单可独立关闭；关闭时直接使用vision_config中的固定值。
         threshold_tuning_enabled = bool(getattr(
             config, "STARTUP_THRESHOLD_TUNING_ENABLED", True))
@@ -687,7 +750,23 @@ def main():
             clock_diff_ms=_elapsed_ms)
         quick_calibration_enabled = bool(getattr(
             config, "QUICK_POSITION_CALIBRATION_ENABLED", True))
-        if quick_calibration_enabled:
+        fixed_calibration_enabled = bool(getattr(
+            config, "FIXED_POSITION_CALIBRATION_ENABLED", False))
+        if fixed_calibration_enabled:
+            try:
+                position_calibration = get_fixed_position_calibration()
+            except Exception as error:
+                print("FIXED_CAL_INVALID|error=%s" % error)
+                return
+            print(
+                "FIXED_CAL_LOADED|version=%d|pairs=%d|virtual_right=%d"
+                % (
+                    int(position_calibration.get("version", 0)),
+                    len(position_calibration.get("pairs") or []),
+                    1 if position_calibration.get("virtual_right") else 0,
+                )
+            )
+        elif quick_calibration_enabled:
             position_calibration = run_quick_position_calibration(
                 cam, disp, detector, trough_tracker, config)
             if position_calibration is None:
@@ -757,9 +836,11 @@ def main():
 
         touch_target_enabled = bool(getattr(
             config, "F4_TOUCH_TARGET_ENABLED", False))
-        if touch_target_enabled and disp is not None:
+        competition_task_enabled = bool(getattr(
+            config, "F4_COMPETITION_TASK_ENABLED", True))
+        if touch_target_enabled or competition_task_enabled:
             ball_target_touch = BallTargetTouchController(
-                enabled=True,
+                enabled=touch_target_enabled,
                 minimum_mm=float(getattr(
                     config, "F4_TOUCH_TARGET_MIN_MM", -120.0)),
                 maximum_mm=float(getattr(
@@ -776,16 +857,18 @@ def main():
                     config, "F4_TOUCH_TARGET_TO_F407_POLARITY", -1.0)),
                 question3_enabled=bool(getattr(
                     config, "F4_TOUCH_QUESTION3_ENABLED", True)),
+                question3_button_enabled=bool(getattr(
+                    config, "F4_TOUCH_QUESTION3_BUTTON_ENABLED", False)),
                 question3_center_mm=float(getattr(
                     config, "F4_TOUCH_QUESTION3_CENTER_MM", 0.0)),
                 question3_center_tolerance_mm=float(getattr(
                     config, "F4_TOUCH_QUESTION3_CENTER_TOLERANCE_MM", 10.0)),
                 question3_right_command_mm=float(getattr(
-                    config, "F4_TOUCH_QUESTION3_RIGHT_COMMAND_MM", 70.0)),
+                    config, "F4_TOUCH_QUESTION3_RIGHT_COMMAND_MM", 50.0)),
                 question3_right_reached_mm=float(getattr(
-                    config, "F4_TOUCH_QUESTION3_RIGHT_REACHED_MM", 55.0)),
+                    config, "F4_TOUCH_QUESTION3_RIGHT_REACHED_MM", 50.0)),
                 question3_left_command_mm=float(getattr(
-                    config, "F4_TOUCH_QUESTION3_LEFT_COMMAND_MM", -70.0)),
+                    config, "F4_TOUCH_QUESTION3_LEFT_COMMAND_MM", -50.0)),
                 question3_left_reached_mm=float(getattr(
                     config, "F4_TOUCH_QUESTION3_LEFT_REACHED_MM", -50.0)),
                 question3_final_target_mm=float(getattr(
@@ -795,9 +878,18 @@ def main():
                 question3_hard_timeout_ms=int(getattr(
                     config, "F4_TOUCH_QUESTION3_HARD_TIMEOUT_MS", 8000)),
             )
-            ball_target_touch.start()
-        elif touch_target_enabled:
-            print("BALL_TARGET_TOUCH_UNAVAILABLE|error=DISPLAY_DISABLED")
+            if touch_target_enabled and disp is not None:
+                ball_target_touch.start()
+            elif touch_target_enabled:
+                print("BALL_TARGET_TOUCH_UNAVAILABLE|error=DISPLAY_DISABLED")
+            if competition_task_enabled:
+                competition_task = CompetitionTaskManager(
+                    ball_target_touch,
+                    offline_ms=int(getattr(
+                        config, "F4_TOUCH_TARGET_OFFLINE_MS", 500)),
+                    center_target_mm=float(getattr(
+                        config, "F4_TOUCH_QUESTION3_CENTER_MM", 0.0)),
+                )
 
         frame_index = 0
         # SHOW_TROUGH_BINARY开启时，隔帧复用中轴也要复用最近一次二值图，
@@ -975,8 +1067,8 @@ def main():
                 "frame_index": int(frame_index),
             })
 
-            if ball_target_touch is not None:
-                ball_target_touch.update_question3(
+            if competition_task is not None:
+                competition_task.update(
                     position,
                     f4_link.last_vst if f4_link is not None else None,
                     send_timestamp_ms)
@@ -1038,10 +1130,21 @@ def main():
                 _draw_status(
                     display_frame, perf, detections,
                     trough_axis, tracked_ball, position,
-                    f4_link.last_vst if f4_link is not None else None)
+                    f4_link.last_vst if f4_link is not None else None,
+                    competition_task)
+                if competition_task is not None:
+                    display_frame.draw_string(
+                        3, 89, competition_task.status_text(),
+                        color=YELLOW, scale=0.55)
                 if ball_target_touch is not None:
                     ball_target_touch.draw(
-                        display_frame, time.ticks_ms())
+                        display_frame, time.ticks_ms(),
+                        trough_axis=trough_axis,
+                        calibration_pairs=(
+                            position_calibration.get("pairs")
+                            if position_calibration else None),
+                    )
+                _save_requested_live_frame(display_frame, frame_index)
                 perf.record("draw", time.ticks_ms() - draw_started_ms)
 
                 if DEBUG_IMAGES and (
@@ -1081,6 +1184,7 @@ def main():
         if ball_target_touch is not None:
             ball_target_touch.close()
         ball_target_touch = None
+        competition_task = None
         if f4_link is not None:
             f4_link.close()
         f4_link = None

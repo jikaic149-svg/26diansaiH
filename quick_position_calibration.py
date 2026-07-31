@@ -38,6 +38,49 @@ VIRTUAL_RIGHT_ANCHOR_FRACTION = (
     (TROUGH_RIGHT_EDGE_CM - TROUGH_LEFT_EDGE_CM)
 )
 
+# 2026-07-31按当前视角重新完成五点与两端验证后冻结。右端由+10 cm
+# 锚点外推，并与固定右端配置共同使用；整套参考轴和分段映射不可拆开。
+FIXED_POSITION_CALIBRATION = {
+    "enabled": True,
+    "version": 4,
+    "pairs": (
+        (0.0090883, -12.0),
+        (0.0957335, -10.0),
+        (0.2573106, -5.0),
+        (0.4671104, 0.0),
+        (0.6884930, 5.0),
+        (0.8998569, 10.0),
+    ),
+    "reference_axis": {
+        "valid": True,
+        "reason": "OK",
+        "source": "CAL_REFERENCE",
+        "p0": (9.25, 260.18),
+        "p1": (410.77, 205.95),
+        "centerline": (
+            (9.25, 260.18),
+            (76.17, 252.0),
+            (143.09, 244.0),
+            (210.01, 236.0),
+            (276.93, 227.0),
+            (343.85, 215.0),
+            (410.77, 205.95),
+        ),
+        "length_px": 405.25,
+        "median_width_px": 32.0,
+        "roi": (0, 198, 416, 122),
+        "virtual_right": 1,
+        "virtual_right_x": 410.77,
+        "virtual_right_y": 205.95,
+        "virtual_right_anchor_cm": 10.0,
+        "virtual_right_anchor_fraction": 0.9,
+    },
+    "middle_points": 5,
+    "point_count": 6,
+    "virtual_right": True,
+    "right_validation_skipped": False,
+}
+
 WHITE = image.Color.from_rgb(255, 255, 255)
 BLACK = image.Color.from_rgb(0, 0, 0)
 RED = image.Color.from_rgb(255, 0, 0)
@@ -45,6 +88,20 @@ GREEN = image.Color.from_rgb(0, 255, 0)
 CYAN = image.Color.from_rgb(0, 230, 230)
 YELLOW = image.Color.from_rgb(255, 220, 0)
 MAGENTA = image.Color.from_rgb(255, 0, 255)
+
+
+def get_fixed_position_calibration():
+    calibration = FIXED_POSITION_CALIBRATION
+    if not isinstance(calibration, dict) or not calibration.get("enabled"):
+        raise ValueError("fixed calibration must be an enabled dict")
+    pairs = calibration.get("pairs") or []
+    reference = calibration.get("reference_axis") or {}
+    if len(pairs) < 5:
+        raise ValueError("fixed calibration needs at least five t-cm pairs")
+    if not reference.get("valid") or len(
+            reference.get("centerline") or []) < 2:
+        raise ValueError("fixed calibration reference axis is invalid")
+    return calibration
 
 
 def _median(values):

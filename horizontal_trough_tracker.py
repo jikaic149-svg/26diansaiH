@@ -74,6 +74,8 @@ DEFAULT_SETTINGS = {
     "axis_filter_endpoint_max_shift_px": 24.0,
     "axis_filter_endpoint_min_span_ratio": 0.75,
     "endpoint_ab_enabled": True,
+    "endpoint_ab_fixed_right_enabled": False,
+    "endpoint_ab_fixed_right_x": 0.0,
     "endpoint_ab_alpha": 0.70,
     "endpoint_ab_beta": 0.15,
     "endpoint_ab_max_innovation_px": 48.0,
@@ -1685,6 +1687,16 @@ class HorizontalTroughTracker:
         raw_slope, raw_intercept, raw_left_x, raw_right_x = raw_line
         measured_left_x = raw_left_x
         measured_right_x = raw_right_x
+        fixed_right_enabled = bool(self.settings.get(
+            "endpoint_ab_fixed_right_enabled", False))
+        if fixed_right_enabled:
+            raw_right_x = float(self.settings.get(
+                "endpoint_ab_fixed_right_x", raw_right_x))
+            bounds = self._roi_x_bounds(raw_axis)
+            if bounds is not None:
+                raw_right_x = max(
+                    float(bounds[0]), min(float(bounds[1]), raw_right_x))
+            raw_right_x = max(raw_left_x + 1.0, raw_right_x)
         raw_width = max(0.0, float(raw_axis.get("median_width_px", 0.0)))
         enabled = bool(self.settings.get("axis_filter_enabled", True))
         endpoint_filter = "INIT"
@@ -1727,7 +1739,7 @@ class HorizontalTroughTracker:
 
 
         occlusion_side, endpoint_mode = self._resolve_endpoint_occlusion(
-            raw_axis, raw_left_x, raw_right_x,
+            raw_axis, measured_left_x, measured_right_x,
             exclusion_box, history_ready)
         bounds = self._roi_x_bounds(raw_axis)
         if not history_ready and occlusion_side != "NONE" and \
@@ -1840,6 +1852,12 @@ class HorizontalTroughTracker:
                 left_mode + "_" + right_mode
             )
 
+        if fixed_right_enabled:
+            right_ab = self._right_endpoint_ab.reset(
+                raw_right_x, timestamp_ms)
+            endpoint_ab_mode = "%s_RIGHT_FIXED" % left_ab.get(
+                "mode", "LEFT")
+
         self._sync_endpoint_positions(
             left_ab["position"], right_ab["position"], timestamp_ms,
             bounds=bounds,
@@ -1933,6 +1951,8 @@ class HorizontalTroughTracker:
             return output
         old_slope, old_intercept, old_left_x, old_right_x = old_line
         occlusion_side = self._endpoint_occlusion_side
+        fixed_right_enabled = bool(self.settings.get(
+            "endpoint_ab_fixed_right_enabled", False))
         if occlusion_side == "LEFT":
             left_ab = self._left_endpoint_ab.hold(
                 timestamp_ms, zero_velocity=True, mode="HOLD_OCCLUDED")
@@ -1947,6 +1967,18 @@ class HorizontalTroughTracker:
             left_ab = self._left_endpoint_ab.predict(timestamp_ms)
             right_ab = self._right_endpoint_ab.predict(timestamp_ms)
             endpoint_ab_mode = "PREDICT"
+
+        if fixed_right_enabled:
+            fixed_right_x = float(self.settings.get(
+                "endpoint_ab_fixed_right_x", old_right_x))
+            bounds = self._roi_x_bounds(output)
+            if bounds is not None:
+                fixed_right_x = max(
+                    float(bounds[0]), min(float(bounds[1]), fixed_right_x))
+            right_ab = self._right_endpoint_ab.reset(
+                fixed_right_x, timestamp_ms)
+            endpoint_ab_mode = "%s_RIGHT_FIXED" % left_ab.get(
+                "mode", "LEFT")
 
         new_left_x, new_right_x = self._sync_endpoint_positions(
             left_ab["position"], right_ab["position"], timestamp_ms,

@@ -4,11 +4,13 @@ import unittest
 
 from ball_target_touch import (
     BallTargetTouchController,
+    axis_point_from_t,
     quantize_target_mm,
     question3_button_geometry,
     slider_geometry,
     slider_target_from_x,
     slider_x_from_target,
+    target_axis_t_from_mm,
 )
 
 
@@ -51,6 +53,27 @@ class BallTargetTouchTest(unittest.TestCase):
         self.assertEqual(quantize_target_mm(200, -120, 120, 1), 120)
         self.assertEqual(quantize_target_mm(12.4, -120, 120, 5), 10)
         self.assertEqual(quantize_target_mm(12.6, -120, 120, 5), 15)
+
+    def test_target_uses_inverse_visual_calibration(self):
+        pairs = (
+            (0.08, -10.0),
+            (0.28, -5.0),
+            (0.49, 0.0),
+            (0.72, 5.0),
+            (0.90, 10.0),
+        )
+        self.assertAlmostEqual(
+            target_axis_t_from_mm(0.0, -120, 120, pairs), 0.49)
+        self.assertAlmostEqual(
+            target_axis_t_from_mm(50.0, -120, 120, pairs), 0.72)
+
+    def test_target_point_follows_trough_polyline(self):
+        axis = {
+            "valid": True,
+            "centerline": [(10.0, 20.0), (60.0, 20.0), (60.0, 70.0)],
+        }
+        self.assertEqual(axis_point_from_t(axis, 0.25), (35.0, 20.0))
+        self.assertEqual(axis_point_from_t(axis, 0.75), (60.0, 45.0))
 
     def test_initial_vst_sync_retry_and_confirmation(self):
         class FakeLink:
@@ -151,22 +174,22 @@ class BallTargetTouchTest(unittest.TestCase):
         self.assertTrue(controller.update_question3(
             self._position(5), self._vst(120), 120))
         self.assertEqual(controller.question3_state, "RIGHT")
-        self.assertEqual(controller.selected_target_mm, 70)
+        self.assertEqual(controller.selected_target_mm, 50)
         self.assertEqual(controller.question3_start_ms, 120)
 
         self.assertTrue(controller.update_question3(
-            self._position(56), self._vst(1500), 1500))
+            self._position(50), self._vst(1500), 1500))
         self.assertEqual(controller.question3_state, "LEFT")
-        self.assertEqual(controller.selected_target_mm, -70)
+        self.assertEqual(controller.selected_target_mm, -50)
 
         self.assertTrue(controller.update_question3(
-            self._position(-52), self._vst(4100), 4100))
+            self._position(-50), self._vst(4100), 4100))
         self.assertEqual(controller.question3_state, "DONE")
         self.assertEqual(controller.selected_target_mm, -50)
         self.assertEqual(controller.question3_elapsed_ms, 3980)
         self.assertTrue(controller.question3_passed)
 
-    def test_question3_timeout_parks_at_last_real_position(self):
+    def test_question3_timeout_keeps_exact_negative_five_cm_target(self):
         controller = BallTargetTouchController(
             question3_hard_timeout_ms=8000)
         controller.start_question3()
@@ -177,7 +200,7 @@ class BallTargetTouchTest(unittest.TestCase):
         self.assertTrue(controller.update_question3(
             self._position(33, valid=False), self._vst(8011), 8011))
         self.assertEqual(controller.question3_state, "FAILED")
-        self.assertEqual(controller.selected_target_mm, 32)
+        self.assertEqual(controller.selected_target_mm, -50)
 
 
 if __name__ == "__main__":

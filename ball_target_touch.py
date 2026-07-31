@@ -89,6 +89,72 @@ def slider_x_from_target(target_mm, left, right, minimum_mm, maximum_mm):
     return int(round(left + ratio * (right - left)))
 
 
+def target_axis_t_from_mm(target_mm, minimum_mm, maximum_mm,
+                          calibration_pairs=None):
+    """Map a physical target to the same axis coordinate used by vision."""
+    pairs = calibration_pairs or ()
+    if len(pairs) >= 2:
+        ordered = sorted(
+            (float(item[1]) * 10.0, float(item[0])) for item in pairs)
+        target = float(target_mm)
+        if target <= ordered[0][0]:
+            left, right = ordered[0], ordered[1]
+        elif target >= ordered[-1][0]:
+            left, right = ordered[-2], ordered[-1]
+        else:
+            left, right = ordered[0], ordered[1]
+            for candidate_left, candidate_right in zip(
+                    ordered, ordered[1:]):
+                if candidate_left[0] <= target <= candidate_right[0]:
+                    left, right = candidate_left, candidate_right
+                    break
+        span = right[0] - left[0]
+        if abs(span) > 1e-9:
+            ratio = (target - left[0]) / span
+            return _clamp(
+                left[1] + ratio * (right[1] - left[1]), 0.0, 1.0)
+
+    minimum_mm = float(minimum_mm)
+    maximum_mm = float(maximum_mm)
+    if maximum_mm <= minimum_mm:
+        return None
+    return (
+        _clamp(float(target_mm), minimum_mm, maximum_mm) - minimum_mm
+    ) / (maximum_mm - minimum_mm)
+
+
+def axis_point_from_t(trough_axis, target_t):
+    """Return the arc-length point on the displayed trough centerline."""
+    if not trough_axis or not trough_axis.get("valid") or target_t is None:
+        return None
+    points = trough_axis.get("centerline") or []
+    if len(points) < 2:
+        p0 = trough_axis.get("p0")
+        p1 = trough_axis.get("p1")
+        points = [p0, p1] if p0 is not None and p1 is not None else []
+    segments = []
+    total_length = 0.0
+    for start, end in zip(points, points[1:]):
+        dx = float(end[0]) - float(start[0])
+        dy = float(end[1]) - float(start[1])
+        length = (dx * dx + dy * dy) ** 0.5
+        if length <= 1e-9:
+            continue
+        segments.append((start, dx, dy, length, total_length))
+        total_length += length
+    if not segments or total_length <= 1e-9:
+        return None
+    distance = _clamp(float(target_t), 0.0, 1.0) * total_length
+    for index, (start, dx, dy, length, cumulative) in enumerate(segments):
+        if distance <= cumulative + length or index == len(segments) - 1:
+            ratio = _clamp((distance - cumulative) / length, 0.0, 1.0)
+            return (
+                float(start[0]) + ratio * dx,
+                float(start[1]) + ratio * dy,
+            )
+    return None
+
+
 def _elapsed_ms(now_ms, previous_ms):
     return (int(now_ms) - int(previous_ms)) & 0xFFFFFFFF
 
@@ -100,11 +166,12 @@ class BallTargetTouchController:
                  maximum_mm=120.0, step_mm=1.0, retry_ms=250,
                  max_attempts=20, offline_ms=500,
                  target_to_f4_polarity=1.0, touch_factory=None,
-                 question3_enabled=True, question3_center_mm=0.0,
+                 question3_enabled=True, question3_button_enabled=True,
+                 question3_center_mm=0.0,
                  question3_center_tolerance_mm=10.0,
-                 question3_right_command_mm=70.0,
-                 question3_right_reached_mm=55.0,
-                 question3_left_command_mm=-70.0,
+                 question3_right_command_mm=50.0,
+                 question3_right_reached_mm=50.0,
+                 question3_left_command_mm=-50.0,
                  question3_left_reached_mm=-50.0,
                  question3_final_target_mm=-50.0,
                  question3_limit_ms=5000,
@@ -138,6 +205,8 @@ class BallTargetTouchController:
         self.tx_count = 0
         self.last_error = ""
         self.question3_enabled = bool(question3_enabled)
+        self.question3_button_enabled = bool(question3_button_enabled)
+        self.target_edit_enabled = True
         self.question3_center_mm = float(question3_center_mm)
         self.question3_center_tolerance_mm = max(
             0.0, float(question3_center_tolerance_mm))
@@ -239,6 +308,28 @@ class BallTargetTouchController:
         print("BALL_TARGET_SELECTED|target_mm=%.0f|source=%s" % (
             self.selected_target_mm, str(source)))
 
+    def select_target_mm(self, target_mm, source="TASK"):
+        """Public task-owned target selection using the normal VBT path."""
+        self._select_target_mm(target_mm, source)
+        return True
+
+    def set_target_edit_enabled(self, enabled):
+        self.target_edit_enabled = bool(enabled)
+        if not self.target_edit_enabled:
+            self.dragging = False
+
+    def cancel_question3(self, reason="CANCELLED"):
+        """Stop local Q3 progression without starting or stopping F407."""
+        was_active = self._question3_active()
+        self.question3_state = "IDLE"
+        self.question3_button_armed = False
+        self.question3_start_ms = None
+        self.question3_elapsed_ms = None
+        self.question3_passed = None
+        if was_active:
+            print("Q3_CANCELLED|reason=%s" % str(reason))
+        return was_active
+
     def _question3_active(self):
         return self.question3_state in ("CENTERING", "RIGHT", "LEFT")
 
@@ -303,16 +394,19 @@ class BallTargetTouchController:
         if self.question3_start_ms is not None and _elapsed_ms(
                 now_ms, self.question3_start_ms) > \
                 self.question3_hard_timeout_ms:
-            park_mm = self.question3_last_position_mm
-            if park_mm is None:
-                park_mm = self.question3_center_mm
+            timeout_position_mm = self.question3_last_position_mm
+            if timeout_position_mm is None:
+                timeout_position_mm = self.question3_center_mm
             self.question3_elapsed_ms = _elapsed_ms(
                 now_ms, self.question3_start_ms)
             self.question3_state = "FAILED"
             self.question3_passed = False
-            self._select_target_mm(park_mm, "Q3_TIMEOUT_PARK")
+            # Question 3 owns exact visual targets. A timeout reports failure
+            # but must not replace -50 mm with an arbitrary measured position.
+            self._select_target_mm(
+                self.question3_final_target_mm, "Q3_TIMEOUT_FINAL")
             self._question3_log(
-                "Q3_UI_RESULT", now_ms, park_mm, vst)
+                "Q3_UI_RESULT", now_ms, timeout_position_mm, vst)
             return True
 
         if not visual_valid or not vst_fresh or not fault_free:
@@ -379,10 +473,12 @@ class BallTargetTouchController:
         if pressed and not self.was_pressed:
             self.question3_button_armed = (
                 self.question3_enabled and
+                self.question3_button_enabled and
                 _point_in_rect(touch_x, touch_y, button))
             self.dragging = (
                 not self.question3_button_armed and
                 not self._question3_active() and
+                self.target_edit_enabled and
                 geometry["touch_top"] <= touch_y <
                 geometry["touch_bottom"])
         if pressed and self.dragging:
@@ -441,7 +537,8 @@ class BallTargetTouchController:
             return "OFFLINE"
         return "PENDING" if self.pending else "OK"
 
-    def draw(self, frame, now_ms):
+    def draw(self, frame, now_ms, trough_axis=None,
+             calibration_pairs=None):
         if not self.enabled or frame is None:
             return
         try:
@@ -480,12 +577,26 @@ class BallTargetTouchController:
             center_x, geometry["track_y"] - 5,
             center_x, geometry["track_y"] + 5,
             color=white, thickness=1)
-        frame.draw_line(
-            marker_x, geometry["track_y"] - 9,
-            marker_x, geometry["track_y"] + 9,
+        # The slider knob is a point, not a vertical line: a vertical marker
+        # looked like a second coordinate axis and hid the real mapping.
+        frame.draw_circle(
+            marker_x, geometry["track_y"], 5,
             color=cyan, thickness=3)
 
-        if self.question3_enabled:
+        # Draw the commanded millimetre target on the calibrated trough axis.
+        # This uses the inverse of the same piecewise t->cm table used by the
+        # visual measurement, so the overlay and the sent target correspond.
+        target_t = target_axis_t_from_mm(
+            self.selected_target_mm,
+            self.minimum_mm, self.maximum_mm,
+            calibration_pairs=calibration_pairs)
+        target_point = axis_point_from_t(trough_axis, target_t)
+        if target_point is not None:
+            frame.draw_circle(
+                int(round(target_point[0])), int(round(target_point[1])), 7,
+                color=cyan, thickness=3)
+
+        if self.question3_enabled and self.question3_button_enabled:
             button = question3_button_geometry(
                 frame.width(), frame.height())
             active = self._question3_active()
