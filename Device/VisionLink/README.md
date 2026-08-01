@@ -15,8 +15,9 @@ VisionLink由现有1 ms Gateway Task单一拥有，通过候选USART2（PA2 TX�
 - `position_mm`范围`-125..125`；
 - flags仅接受YOLO真实测量、杆轴已测/保持、位置有效、标定有效且未clamp的组合。
 
-重复/旧序号不覆盖Latest Value。100 ms无新帧后允许相机从新序号会话恢复。保守年龄为
-本地接收年龄、`proc_age_ms`、相机固定流水线校准值和UART传输上界之和；达到100 ms即
+重复/旧序号不覆盖Latest Value；合法但flags不可用的新帧只更新链路序号和诊断，也不覆盖或
+刷新最后可用测量。100 ms无新帧后允许相机从新序号会话恢复。保守年龄始终按最后可用帧的
+本地接收年龄、`proc_age_ms`、相机固定流水线校准值和UART传输上界之和计算；达到100 ms即
 不可用于控制。当前固定流水线校准仍为0 ms，47 B在115200 8N1的串行上界暂取5 ms，
 所以尚不能声称端到端年龄指标通过。
 
@@ -89,7 +90,7 @@ Payload=<last_rx_vis_seq>,<last_used_vis_seq>,<measurement_age_ms>,
 |---|---|---|
 | b0 | `VIS_RX_SEEN` | 启动后至少收到过一个合法且序号新的VIS |
 | b1 | `MEASUREMENT_USED_SEEN` | 至少一个VIS真正进入过球状态更新，粘滞到本机重启 |
-| b2 | `LAST_VIS_USABLE` | 最后合法VIS的flags组合可用于控制 |
+| b2 | `LAST_VIS_USABLE` | 当前仍保留一个未过期、flags可用的真实VIS测量 |
 | b3/b4 | `ESTIMATE_VALID/FRESH` | 当前有小于100 ms的可用球反馈 |
 | b5 | `TARGET_VALID` | Gateway已持有有界球目标 |
 | b6/b8 | `CONTROL_ARMED/LEVEL_LOOP_ACTIVE` | 主杆环处于ZEROING或phase 2 |

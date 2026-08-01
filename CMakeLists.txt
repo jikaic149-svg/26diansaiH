@@ -47,6 +47,7 @@ add_executable(${PROJECT_NAME}
     Device/PeerLink/device_peer_link.c
     Device/QD4310/device_qd4310.c
     Device/VisionLink/device_vision_link.c
+    APP/Algorithm/BallModelInterpolator/algorithm_ball_model_interpolator.c
     APP/Algorithm/BallPositionControl/algorithm_ball_position_control.c
     APP/Algorithm/BallStateEstimator/algorithm_ball_state_estimator.c
     APP/Algorithm/ChassisAccelerationFusion/algorithm_chassis_acceleration_fusion.c
@@ -74,6 +75,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     Device/PeerLink
     Device/QD4310
     Device/VisionLink
+    APP/Algorithm/BallModelInterpolator
     APP/Algorithm/BallPositionControl
     APP/Algorithm/BallStateEstimator
     APP/Algorithm/ChassisAccelerationFusion

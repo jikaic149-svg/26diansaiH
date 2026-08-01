@@ -185,11 +185,19 @@
 
 /* 25 cm水管和直径1 cm球对应球心几何域[-120,+120] mm。该值仅是软件
  * 安全边界，扩大实机目标仍须从小范围逐级验证。目标参考按120 mm/s线性推进。
- * 静摩擦速度环目标限30 mm/s，PI加速度最高180 mm/s2。 */
+ * Task2/4/5/6沿用30 mm/s和180 mm/s2；Task3单独提高到45 mm/s和300 mm/s2。 */
 #define GATEWAY_BALL_TARGET_LIMIT_MM        120.0F
 #define GATEWAY_BALL_TARGET_SLEW_MM_S       120.0F
 #define GATEWAY_BALL_MAX_TARGET_VELOCITY_MM_S 30.0F
 #define GATEWAY_BALL_MAX_TARGET_ACCELERATION_MM_S2 180.0F
+#define GATEWAY_TASK3_BALL_MAX_TARGET_VELOCITY_MM_S 45.0F
+#define GATEWAY_TASK3_BALL_MAX_TARGET_ACCELERATION_MM_S2 300.0F
+#define GATEWAY_TASK3_BALL_HANDOFF_ERROR_MM          1.5F
+#define GATEWAY_TASK3_BALL_HOLD_ERROR_MM             1.5F
+/* M6 arbitrary-position hold must fit the weaker +0.75 deg rod authority.
+ * 80 mm/s2 maps to about 0.65 deg for a solid ball, leaving real actuator
+ * margin instead of winding the speed PI against the downstream clamp. */
+#define GATEWAY_TASK6_BALL_MAX_TARGET_ACCELERATION_MM_S2 80.0F
 
 /* 正常位置环生成目标球加速度：Kp*位置误差+Ki积分-Kd*视觉球速。
  * 位置参数恢复Git基线；远距离旅程由速度PI独占，近目标低速后一次性切入位置环。 */
@@ -197,8 +205,9 @@
 #define GATEWAY_BALL_POSITION_KI_PER_S3      0.000F
 #define GATEWAY_BALL_VELOCITY_KD_PER_S       0.55F
 #define GATEWAY_BALL_INTEGRAL_ACCEL_LIMIT_MM_S2 10.0F
-/* 球速只由真实视觉位置计算：120 ms多帧差分适配当前约33 Hz有效视觉帧，
- * 再做60 ms一阶低通，避免两帧差分尖峰把杆角反复推向限幅。 */
+/* Task3球速只由真实视觉位置计算：120 ms多帧差分适配当前约33 Hz有效视觉帧，
+ * 再做60 ms一阶低通，避免两帧差分尖峰把杆角反复推向限幅。其他赛题继续使用
+ * 下方轻量杆球模型插值。 */
 #define GATEWAY_BALL_VELOCITY_ESTIMATION_WINDOW_MS UINT32_C(120)
 #define GATEWAY_BALL_VELOCITY_FILTER_TAU_S   0.060F
 #define GATEWAY_BALL_MAX_VELOCITY_DT_MS      UINT32_C(100)
@@ -217,15 +226,15 @@
 #define GATEWAY_BALL_NEAR_TARGET_ERROR_MM        0.0F
 #define GATEWAY_BALL_NEAR_TARGET_KD_MULTIPLIER   0.0F
 
-/* 离散角度脉冲保持禁用。新目标最终误差超过11 mm时立即开始连续速度PI；目标球速按
- * sqrt(2*a_max*(|e|-3 mm))限于30 mm/s，避免旧3..11 mm混环造成早刹。进入3 mm且
- * 球速不超过8 mm/s（或越过目标）后锁存位置环，直到目标改变/测量复位；Task3禁用此路径。 */
+/* 离散角度脉冲保持禁用。速度PI只用于启动静止球：新目标误差超过8 mm时立即启动并
+ * 至少保持250 ms；之后球速超过8 mm/s才清速度积分并交给位置PD追踪。若提前到达/越过
+ * 目标仍立即退出。后续只有低速大误差持续250 ms才再次助启动，不在目标两侧连续追速。 */
 #define GATEWAY_BALL_STICTION_KICK_ANGLE_DEG          0.00F
 #define GATEWAY_BALL_STICTION_KICK_STEP_ANGLE_DEG     0.00F
 #define GATEWAY_BALL_STICTION_KICK_MAX_ANGLE_DEG      0.00F
 #define GATEWAY_BALL_STICTION_ASSIST_VELOCITY_KP_PER_S 1.00F
 #define GATEWAY_BALL_STICTION_ASSIST_VELOCITY_KI_PER_S2 10.0F
-#define GATEWAY_BALL_STICTION_ASSIST_EXIT_DISTANCE_MM   8.0F
+#define GATEWAY_BALL_STICTION_ASSIST_EXIT_DISTANCE_MM   5.0F
 #define GATEWAY_BALL_STICTION_MIN_ERROR_MM              3.0F
 #define GATEWAY_BALL_STICTION_MAX_VELOCITY_MM_S         8.0F
 #define GATEWAY_BALL_STICTION_DURATION_MS          UINT32_C(250)
@@ -245,8 +254,25 @@
 #define GATEWAY_TOTAL_ROD_COMMAND_MIN_DEG      (-2.00F)
 #define GATEWAY_TOTAL_ROD_COMMAND_MAX_DEG        0.75F
 
-/* 三状态[x,v,模型残差加速度]固定滞后Kalman保留用于离线对照，当前关闭。
- * 正常控制只使用真实视觉多帧差分球速，底盘加速度独立做杆角前馈。 */
+/* 轻量杆球模型插值在F407以1 ms实际杆角和底盘加速度传播[x,v]，约30 Hz的
+ * 真实YOLO位置只做带时间戳alpha-beta校正。它不估计加速度偏置，不替代独立的
+ * 底盘杆角前馈；12 mm硬创新门拒绝单帧视觉跳点，超过100 ms无新实测即停止采用。
+ * 两帧实测后才向位置/速度环提交状态，避免第一帧的零速度假设直接进入控制。 */
+#ifndef GATEWAY_BALL_MODEL_INTERPOLATION_ENABLE
+#define GATEWAY_BALL_MODEL_INTERPOLATION_ENABLE             1U
+#endif
+#define GATEWAY_BALL_MODEL_POSITION_ALPHA                  0.65F
+#define GATEWAY_BALL_MODEL_VELOCITY_BETA                   0.08F
+#define GATEWAY_BALL_MODEL_MAX_INNOVATION_MM              12.0F
+#define GATEWAY_BALL_MODEL_MAX_POSITION_MM                150.0F
+#define GATEWAY_BALL_MODEL_MAX_VELOCITY_MM_S              500.0F
+#define GATEWAY_BALL_MODEL_MAX_PREDICT_STEP_MS       UINT32_C(10)
+#define GATEWAY_BALL_MODEL_MAX_MEASUREMENT_AGE_MS    UINT32_C(100)
+#define GATEWAY_BALL_MODEL_MAX_COAST_MS              UINT32_C(100)
+#define GATEWAY_BALL_MODEL_MIN_ACCEPTED_VIS           UINT32_C(2)
+
+/* 三状态[x,v,模型残差加速度]固定滞后Kalman保留用于离线对照，当前关闭；
+ * 不允许与上述轻量插值同时启用。 */
 #ifndef GATEWAY_BALL_KALMAN_ENABLE
 #define GATEWAY_BALL_KALMAN_ENABLE                     0U
 #endif
@@ -321,14 +347,17 @@
 
 /* 底盘加速度补偿：theta=b*polarity*atan2(a_forward,g)。KEY启动并完成零点稳定后，
  * 默认使用F407本地BMI088；M3明确禁止全部底盘加速度前馈。心跳在线且50 ms内收到
- * M4/M5/M6有效规划量时，使用G3519统一规划作为模型输入并融合BMI088与轮速。G3519
- * 实测加速度始终不参与控制，M2不采用规划。正值经极性-1映射为theta<0、raw增大并降低
- * 车头执行端。新VOFA中0.50增益仍有70.57%时间撞限幅，因此BMI/融合主增益保持0.20。
+ * M4/M5/M6有效规划量时，使用G3519统一规划作为模型输入。M5/M6不再采用易受弯道
+ * 横向扰动影响的BMI088/Kalman融合，而是让大规划加速度直接主导；规划接近0时仅叠加
+ * 经过100 ms低通的轮速加速度0.50倍，给直线扰动保留小幅补偿。正值经极性-1映射为
+ * theta<0、raw增大并降低车头执行端。
  * M4/M5/M6新鲜负规划另以0.25固定系数提供平滑停车基准；正加速和规划失鲜不叠加该项，剩余误差
  * 继续由BMI088/轮速融合与视觉闭环修正。两项相加后仍统一限于0.60deg，加上水平trim后的
  * 最终命令继续受杆角表和绝对raw边界约束。 */
-#define GATEWAY_CHASSIS_FF_GAIN                0.20F
+#define GATEWAY_CHASSIS_FF_GAIN                0.25F
 #define GATEWAY_CHASSIS_STOP_PLAN_FF_GAIN      0.25F
+#define GATEWAY_CHASSIS_WHEEL_ACCEL_CRUISE_GAIN 0.50F
+#define GATEWAY_CHASSIS_PLAN_DOMINANT_ACCEL_MM_S2 50.0F
 #define GATEWAY_CHASSIS_FF_POLARITY           (-1.0F)
 #define GATEWAY_CHASSIS_FF_ANGLE_LIMIT_DEG      0.60F
 #define GATEWAY_ACC_PREVIEW_LEAD_MS            UINT32_C(0)
@@ -432,6 +461,15 @@
 #error "Ball Kalman enable must be 0 or 1"
 #endif
 
+#if GATEWAY_BALL_MODEL_INTERPOLATION_ENABLE > 1U
+#error "Ball model interpolation enable must be 0 or 1"
+#endif
+
+#if (GATEWAY_BALL_MODEL_INTERPOLATION_ENABLE != 0U) && \
+    (GATEWAY_BALL_KALMAN_ENABLE != 0U)
+#error "Ball model interpolation and Kalman cannot both be enabled"
+#endif
+
 #if GATEWAY_CHASSIS_ACCEL_FUSION_ENABLE > 1U
 #error "Chassis acceleration fusion enable must be 0 or 1"
 #endif
@@ -461,6 +499,8 @@
  * anchor fusion with a fresh, explicitly valid G3519 plan. Measured G3519
  * acceleration remains excluded; M2 keeps the local BMI088 path. */
 #define GATEWAY_TASK3_COMPETITION_MODE UINT8_C(3)
+#define GATEWAY_LAP_COMPENSATION_COMPETITION_MODE_MIN UINT8_C(5)
+#define GATEWAY_TASK6_COMPETITION_MODE UINT8_C(6)
 #define GATEWAY_ACCELERATION_FF_DISABLED_COMPETITION_MODE \
     GATEWAY_TASK3_COMPETITION_MODE
 #define GATEWAY_PLANNED_ACCELERATION_COMPETITION_MODE_MIN UINT8_C(4)

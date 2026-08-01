@@ -49,7 +49,6 @@ typedef struct {
     /* Fresh G3519 competition mode forwarded by the Task. Zero means the
      * mode is unavailable/offline for this control cycle. */
     uint8_t competition_mode;
-
     bool ball_measurement_valid;
     uint16_t ball_sequence;
     uint32_t ball_sample_ms;

@@ -151,6 +151,7 @@ static void consume_vis(
     uint32_t processing_age_ms;
     int32_t position_mm;
     uint32_t flags;
+    bool usable;
 
     if (!split_fields(
             packet, start, length, VISION_LINK_FIELD_COUNT) ||
@@ -193,6 +194,11 @@ static void consume_vis(
     link->last_vis_sequence = packet->sequence;
     link->vis_sequence_seen = true;
     link->status.last_vis_rx_ms = now_ms;
+    usable = flags_are_usable((uint8_t)flags);
+    increment_saturating(&link->status.vis_rx_count);
+    if (!usable) {
+        return;
+    }
     link->measurement = (Device_VisionLink_Measurement){
         .sequence = packet->sequence,
         .sampled_at_ms = sampled_at_ms,
@@ -200,13 +206,10 @@ static void consume_vis(
         .position_mm = (int16_t)position_mm,
         .flags = (uint8_t)flags,
         .received_at_ms = now_ms,
-        .usable = flags_are_usable((uint8_t)flags),
+        .usable = true,
         .valid = true,
     };
-    increment_saturating(&link->status.vis_rx_count);
-    if (link->measurement.usable) {
-        increment_saturating(&link->status.vis_usable_count);
-    }
+    increment_saturating(&link->status.vis_usable_count);
 }
 
 static void consume_vtp(

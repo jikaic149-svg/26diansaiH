@@ -163,8 +163,10 @@ bool Device_VisionLink_Init(
     const Device_VisionLink_Config *config);
 bool Device_VisionLink_Step(Device_VisionLink *link, uint32_t now_ms);
 
-/* Returns only a real, calibrated, unclamped measurement whose conservative
- * age is strictly below maximum_measurement_age_ms. */
+/* Returns the latest real, calibrated, unclamped measurement whose
+ * conservative age is strictly below maximum_measurement_age_ms. A newer
+ * unusable VIS frame updates link diagnostics but does not replace or refresh
+ * this measurement. */
 bool Device_VisionLink_GetMeasurement(
     const Device_VisionLink *link,
     uint32_t now_ms,

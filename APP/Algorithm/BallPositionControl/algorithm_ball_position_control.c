@@ -157,7 +157,8 @@ static void begin_speed_handoff(
 
 static void update_speed_handoff(
     Algorithm_BallPositionControl *controller,
-    uint32_t sample_ms)
+    uint32_t sample_ms,
+    uint32_t delta_ms)
 {
     const float error_mm = controller->target_command_mm -
         controller->position_mm;
@@ -173,8 +174,9 @@ static void update_speed_handoff(
     const bool handoff_velocity_qualifies = controller->velocity_valid &&
         (absolute_velocity_mm_s <=
             controller->config.stiction_kick_maximum_velocity_mm_s);
-    const uint32_t delta_ms = controller->measurement_seen ?
-        sample_ms - controller->last_sample_ms : 0U;
+    const bool minimum_assist_time_elapsed =
+        (uint32_t)(sample_ms - controller->stiction_state_started_ms) >=
+            controller->config.stiction_kick_duration_ms;
 
     if (!configured) {
         reset_speed_handoff_trip(controller);
@@ -186,18 +188,44 @@ static void update_speed_handoff(
     }
     if (!controller->velocity_valid) {
         clear_speed_handoff_output(controller);
+        if (controller->stiction_state ==
+                ALGORITHM_BALL_STICTION_POSITION_LATCHED) {
+            controller->stiction_state_started_ms = 0U;
+            controller->stiction_error_direction = 0;
+        }
         return;
     }
     if (controller->stiction_state ==
             ALGORITHM_BALL_STICTION_POSITION_LATCHED) {
         clear_speed_handoff_output(controller);
-        return;
+        if ((controller->target_position_mm !=
+                controller->target_command_mm) ||
+            (absolute_error_mm <= entry_error_mm) ||
+            !handoff_velocity_qualifies || (direction == 0)) {
+            controller->stiction_state_started_ms = 0U;
+            controller->stiction_error_direction = 0;
+            return;
+        }
+        if (controller->stiction_error_direction != direction) {
+            controller->stiction_state_started_ms = sample_ms;
+            controller->stiction_error_direction = direction;
+            return;
+        }
+        if ((uint32_t)(sample_ms -
+                controller->stiction_state_started_ms) <
+            controller->config.stiction_kick_duration_ms) {
+            return;
+        }
+        begin_speed_handoff(controller, sample_ms, direction);
     }
     if (controller->stiction_state == ALGORITHM_BALL_STICTION_ACTIVE) {
-        if ((direction == 0) ||
+        /* Speed PI is launch assistance only, but keep it long enough to
+         * produce useful motion. After the minimum assist time, real motion
+         * above the stiction threshold hands tracking to position PD. */
+        if ((!handoff_velocity_qualifies && minimum_assist_time_elapsed) ||
+            (direction == 0) ||
             (direction != controller->stiction_error_direction) ||
-            ((absolute_error_mm <= exit_error_mm) &&
-             handoff_velocity_qualifies)) {
+            (absolute_error_mm <= exit_error_mm)) {
             latch_position_loop(controller);
             return;
         }
@@ -206,8 +234,9 @@ static void update_speed_handoff(
         begin_speed_handoff(controller, sample_ms, direction);
     }
     else {
-        /* This command started inside the entry band, so it is a position-loop
-         * trip. Later measurement noise cannot arm the speed loop. */
+        /* This command starts inside the stiction entry band, so position PD
+         * owns tracking unless a later sustained low-speed stall rearms the
+         * one-shot launch assistance above. */
         latch_position_loop(controller);
         return;
     }
@@ -215,6 +244,7 @@ static void update_speed_handoff(
     if (controller->stiction_state == ALGORITHM_BALL_STICTION_ACTIVE) {
         const float braking_distance_mm = fmaxf(
             0.0F, absolute_error_mm - exit_error_mm);
+        float planned_target_velocity_mm_s;
         float target_speed_magnitude_mm_s = sqrtf(
             2.0F * controller->config.maximum_target_acceleration_mm_s2 *
             braking_distance_mm);
@@ -224,10 +254,29 @@ static void update_speed_handoff(
             target_speed_magnitude_mm_s =
                 controller->config.maximum_target_velocity_mm_s;
         }
-        controller->target_velocity_mm_s = (float)direction *
+        planned_target_velocity_mm_s = (float)direction *
             target_speed_magnitude_mm_s;
         if ((delta_ms > 0U) &&
             (delta_ms <= controller->config.maximum_velocity_dt_ms)) {
+            const float maximum_velocity_step_mm_s =
+                controller->config.maximum_target_acceleration_mm_s2 *
+                ((float)delta_ms / 1000.0F);
+            const float velocity_step_mm_s =
+                planned_target_velocity_mm_s -
+                controller->target_velocity_mm_s;
+
+            if (velocity_step_mm_s > maximum_velocity_step_mm_s) {
+                controller->target_velocity_mm_s +=
+                    maximum_velocity_step_mm_s;
+            }
+            else if (velocity_step_mm_s < -maximum_velocity_step_mm_s) {
+                controller->target_velocity_mm_s -=
+                    maximum_velocity_step_mm_s;
+            }
+            else {
+                controller->target_velocity_mm_s =
+                    planned_target_velocity_mm_s;
+            }
             controller->stiction_assist_velocity_integral_acceleration_mm_s2 +=
                 controller->config.
                     stiction_assist_velocity_integral_gain_per_s2 *
@@ -526,6 +575,66 @@ bool Algorithm_BallPositionControl_SetSpeedHandoffEnabled(
     return true;
 }
 
+bool Algorithm_BallPositionControl_SetMotionLimits(
+    Algorithm_BallPositionControl *controller,
+    float maximum_target_velocity_mm_s,
+    float maximum_target_acceleration_mm_s2)
+{
+    if ((controller == NULL) || !controller->initialized ||
+        !isfinite(maximum_target_velocity_mm_s) ||
+        (maximum_target_velocity_mm_s <= 0.0F) ||
+        !isfinite(maximum_target_acceleration_mm_s2) ||
+        (maximum_target_acceleration_mm_s2 <= 0.0F)) {
+        return false;
+    }
+    if ((controller->config.maximum_target_velocity_mm_s ==
+            maximum_target_velocity_mm_s) &&
+        (controller->config.maximum_target_acceleration_mm_s2 ==
+            maximum_target_acceleration_mm_s2)) {
+        return true;
+    }
+    controller->config.maximum_target_velocity_mm_s =
+        maximum_target_velocity_mm_s;
+    controller->config.maximum_target_acceleration_mm_s2 =
+        maximum_target_acceleration_mm_s2;
+    controller->hold_active = false;
+    reset_hold_exit(controller);
+    reset_speed_loop(controller);
+    reset_speed_handoff_trip(controller);
+    return true;
+}
+
+bool Algorithm_BallPositionControl_SetFinalPositionBands(
+    Algorithm_BallPositionControl *controller,
+    float speed_handoff_error_mm,
+    float hold_position_error_mm)
+{
+    if ((controller == NULL) || !controller->initialized ||
+        !isfinite(speed_handoff_error_mm) ||
+        !isfinite(hold_position_error_mm) ||
+        (speed_handoff_error_mm <= 0.0F) ||
+        (hold_position_error_mm <= 0.0F) ||
+        (hold_position_error_mm >=
+            controller->config.hold_exit_position_error_mm)) {
+        return false;
+    }
+    if ((controller->config.stiction_kick_minimum_error_mm ==
+            speed_handoff_error_mm) &&
+        (controller->config.hold_position_error_mm ==
+            hold_position_error_mm)) {
+        return true;
+    }
+    controller->config.stiction_kick_minimum_error_mm =
+        speed_handoff_error_mm;
+    controller->config.hold_position_error_mm =
+        hold_position_error_mm;
+    controller->hold_active = false;
+    reset_hold_exit(controller);
+    reset_speed_loop(controller);
+    reset_speed_handoff_trip(controller);
+    return true;
+}
+
 bool Algorithm_BallPositionControl_SetGains(
     Algorithm_BallPositionControl *controller,
     float position_gain_per_s2,
@@ -615,7 +724,7 @@ bool Algorithm_BallPositionControl_UpdateMeasurement(
     }
     controller->position_mm = position_mm;
     update_position_loop_state(controller, sample_ms, delta_ms);
-    update_speed_handoff(controller, sample_ms);
+    update_speed_handoff(controller, sample_ms, delta_ms);
     controller->last_sample_ms = sample_ms;
     controller->measurement_seen = true;
     return true;
@@ -660,7 +769,7 @@ bool Algorithm_BallPositionControl_SetEstimatedState(
     controller->measurement_seen = true;
     controller->velocity_valid = true;
     update_position_loop_state(controller, sample_ms, delta_ms);
-    update_speed_handoff(controller, sample_ms);
+    update_speed_handoff(controller, sample_ms, delta_ms);
     controller->last_sample_ms = sample_ms;
     return true;
 }

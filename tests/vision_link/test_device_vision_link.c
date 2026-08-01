@@ -161,7 +161,7 @@ static void test_valid_flags_and_age_boundary(void)
     assert(!Device_VisionLink_GetMeasurement(&link, 185U, &measurement));
 }
 
-static void test_duplicate_old_and_unusable_do_not_drive(void)
+static void test_duplicate_and_old_do_not_replace_measurement(void)
 {
     Device_VisionLink link;
     Device_VisionLink_Measurement measurement;
@@ -179,10 +179,45 @@ static void test_duplicate_old_and_unusable_do_not_drive(void)
     queue_vis(9U, "2040,0,30,53");
     assert(Device_VisionLink_Step(&link, 30U));
     assert(link.status.vis_old_sequence_count == 1U);
+}
+
+static void test_unusable_vis_holds_last_usable_until_age_limit(void)
+{
+    Device_VisionLink link;
+    Device_VisionLink_Measurement measurement;
+    const Device_VisionLink_Config config = default_config();
+
+    assert(Device_VisionLink_Init(&link, &config));
+    queue_vis(10U, "2000,0,10,53");
+    assert(Device_VisionLink_Step(&link, 10U));
+    assert(link.status.vis_rx_count == 1U);
+    assert(link.status.vis_usable_count == 1U);
 
     queue_vis(11U, "2060,0,0,0");
     assert(Device_VisionLink_Step(&link, 40U));
-    assert(!Device_VisionLink_GetMeasurement(&link, 40U, &measurement));
+    assert(link.last_vis_sequence == 11U);
+    assert(link.status.last_vis_rx_ms == 40U);
+    assert(link.status.vis_rx_count == 2U);
+    assert(link.status.vis_usable_count == 1U);
+
+    assert(Device_VisionLink_GetMeasurement(&link, 40U, &measurement));
+    assert(measurement.sequence == 10U);
+    assert(measurement.position_mm == 10);
+    assert(measurement.received_at_ms == 10U);
+    assert(measurement.estimated_age_ms == 35U);
+    assert(Device_VisionLink_GetMeasurement(&link, 104U, &measurement));
+    assert(measurement.estimated_age_ms == 99U);
+    assert(!Device_VisionLink_GetMeasurement(&link, 105U, &measurement));
+
+    queue_vis(12U, "2080,3,-20,53");
+    assert(Device_VisionLink_Step(&link, 110U));
+    assert(link.status.vis_rx_count == 3U);
+    assert(link.status.vis_usable_count == 2U);
+    assert(Device_VisionLink_GetMeasurement(&link, 110U, &measurement));
+    assert(measurement.sequence == 12U);
+    assert(measurement.position_mm == -20);
+    assert(measurement.received_at_ms == 110U);
+    assert(measurement.estimated_age_ms == 8U);
 }
 
 static void test_session_timeout_accepts_camera_restart(void)
@@ -350,7 +385,8 @@ static void test_vst_encoding_and_busy_drop(void)
 int main(void)
 {
     test_valid_flags_and_age_boundary();
-    test_duplicate_old_and_unusable_do_not_drive();
+    test_duplicate_and_old_do_not_replace_measurement();
+    test_unusable_vis_holds_last_usable_until_age_limit();
     test_session_timeout_accepts_camera_restart();
     test_pid_tuning_latest_value_and_ack();
     test_ball_target_latest_value_sequence_and_payload();

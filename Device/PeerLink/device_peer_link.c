@@ -8,8 +8,10 @@
 #define DEVICE_PEER_LINK_CAR_STATE_TASK_FIELD_COUNT 9U
 #define DEVICE_PEER_LINK_CAR_STATE_TASK_PLANNED_FIELD_COUNT 11U
 #define DEVICE_PEER_LINK_CAR_STATE_TASK_PLANNED_WHEEL_FIELD_COUNT 13U
+#define DEVICE_PEER_LINK_CAR_STATE_SEGMENT_COMPAT_FIELD_COUNT 14U
 #define DEVICE_PEER_LINK_CAR_STATE_FIELD_CAPACITY \
-    DEVICE_PEER_LINK_CAR_STATE_TASK_PLANNED_WHEEL_FIELD_COUNT
+    DEVICE_PEER_LINK_CAR_STATE_SEGMENT_COMPAT_FIELD_COUNT
+#define DEVICE_PEER_LINK_ROUTE_SEGMENT_COMPAT_MAX 3U
 
 static void increment_saturating(uint32_t *value)
 {
@@ -321,6 +323,7 @@ static void consume_car_state(
     uint32_t planned_acceleration_valid = 0U;
     int32_t filtered_wheel_acceleration = 0;
     uint32_t filtered_wheel_acceleration_valid = 0U;
+    uint32_t ignored_route_segment = 0U;
     size_t planned_field_start = DEVICE_PEER_LINK_CAR_STATE_LEGACY_FIELD_COUNT;
 
     for (size_t index = 0U; index <= packet->payload_length; ++index) {
@@ -344,7 +347,9 @@ static void consume_car_state(
          (field_count !=
             DEVICE_PEER_LINK_CAR_STATE_TASK_PLANNED_FIELD_COUNT) &&
          (field_count !=
-            DEVICE_PEER_LINK_CAR_STATE_TASK_PLANNED_WHEEL_FIELD_COUNT)) ||
+            DEVICE_PEER_LINK_CAR_STATE_TASK_PLANNED_WHEEL_FIELD_COUNT) &&
+         (field_count !=
+            DEVICE_PEER_LINK_CAR_STATE_SEGMENT_COMPAT_FIELD_COUNT)) ||
         !parse_u32_canonical(
             &packet->payload[start[0]], length[0], &node_id)) {
         increment_saturating(&link->status.car_state_payload_error_count);
@@ -377,7 +382,9 @@ static void consume_car_state(
     if ((field_count == DEVICE_PEER_LINK_CAR_STATE_TASK_FIELD_COUNT) ||
         (field_count == DEVICE_PEER_LINK_CAR_STATE_TASK_PLANNED_FIELD_COUNT) ||
         (field_count ==
-            DEVICE_PEER_LINK_CAR_STATE_TASK_PLANNED_WHEEL_FIELD_COUNT)) {
+            DEVICE_PEER_LINK_CAR_STATE_TASK_PLANNED_WHEEL_FIELD_COUNT) ||
+        (field_count ==
+            DEVICE_PEER_LINK_CAR_STATE_SEGMENT_COMPAT_FIELD_COUNT)) {
         if (!parse_u32_canonical(
                 &packet->payload[start[8]], length[8],
                 &competition_task_active) ||
@@ -391,7 +398,9 @@ static void consume_car_state(
          (field_count ==
             DEVICE_PEER_LINK_CAR_STATE_TASK_PLANNED_FIELD_COUNT) ||
          (field_count ==
-            DEVICE_PEER_LINK_CAR_STATE_TASK_PLANNED_WHEEL_FIELD_COUNT)) &&
+            DEVICE_PEER_LINK_CAR_STATE_TASK_PLANNED_WHEEL_FIELD_COUNT) ||
+         (field_count ==
+            DEVICE_PEER_LINK_CAR_STATE_SEGMENT_COMPAT_FIELD_COUNT)) &&
         (!parse_i32_canonical(
             &packet->payload[start[planned_field_start]],
             length[planned_field_start],
@@ -404,8 +413,10 @@ static void consume_car_state(
         increment_saturating(&link->status.car_state_payload_error_count);
         return;
     }
-    if ((field_count ==
-            DEVICE_PEER_LINK_CAR_STATE_TASK_PLANNED_WHEEL_FIELD_COUNT) &&
+    if (((field_count ==
+            DEVICE_PEER_LINK_CAR_STATE_TASK_PLANNED_WHEEL_FIELD_COUNT) ||
+         (field_count ==
+            DEVICE_PEER_LINK_CAR_STATE_SEGMENT_COMPAT_FIELD_COUNT)) &&
         (!parse_i32_canonical(
             &packet->payload[start[11]], length[11],
             &filtered_wheel_acceleration) ||
@@ -413,6 +424,15 @@ static void consume_car_state(
             &packet->payload[start[12]], length[12],
             &filtered_wheel_acceleration_valid) ||
          (filtered_wheel_acceleration_valid > 1U))) {
+        increment_saturating(&link->status.car_state_payload_error_count);
+        return;
+    }
+    if ((field_count ==
+            DEVICE_PEER_LINK_CAR_STATE_SEGMENT_COMPAT_FIELD_COUNT) &&
+        (!parse_u32_canonical(
+            &packet->payload[start[13]], length[13],
+            &ignored_route_segment) ||
+         (ignored_route_segment > DEVICE_PEER_LINK_ROUTE_SEGMENT_COMPAT_MAX))) {
         increment_saturating(&link->status.car_state_payload_error_count);
         return;
     }

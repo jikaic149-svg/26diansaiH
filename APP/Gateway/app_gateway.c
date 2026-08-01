@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "algorithm_ball_model_interpolator.h"
 #include "algorithm_ball_position_control.h"
 #include "algorithm_ball_state_estimator.h"
 #include "algorithm_chassis_acceleration_fusion.h"
@@ -35,6 +36,7 @@ static Device_QD4310 *s_motor_list[GATEWAY_MOTOR_COUNT];
 static const uint8_t s_motor_ids[GATEWAY_MOTOR_COUNT] = GATEWAY_MOTOR_IDS;
 static BSP_CAN_Handle s_can;
 static Algorithm_LevelCurrentControl s_level_controller;
+static Algorithm_BallModelInterpolator s_ball_model_interpolator;
 static Algorithm_BallPositionControl s_ball_controller;
 static Algorithm_BallStateEstimator s_ball_estimator;
 static Algorithm_ChassisAccelerationFusion s_chassis_fusion;
@@ -77,6 +79,7 @@ static uint32_t s_last_chassis_wheel_sample_ms;
 static bool s_last_chassis_wheel_acceleration_sequence_seen;
 static uint16_t s_last_chassis_wheel_acceleration_sequence;
 static uint32_t s_last_chassis_wheel_acceleration_sample_ms;
+static bool s_simple_lap_compensation_active;
 static bool s_chassis_fusion_trusted;
 static bool s_last_ball_sequence_seen;
 static uint16_t s_last_ball_sequence;
@@ -89,6 +92,7 @@ static bool s_zero_entry_stable_seen;
 static uint32_t s_zero_entry_stable_since_ms;
 static float s_chassis_compensation_angle_deg;
 static uint32_t s_last_ball_target_update_ms;
+static bool s_task3_direct_visual_feedback_active;
 
 static float clamp_float(float value, float minimum, float maximum)
 {
@@ -254,6 +258,10 @@ static void update_chassis_acceleration(
     const APP_Gateway_ControlInput *input)
 {
     Algorithm_ChassisAccelerationFusion_State state;
+    const bool simple_lap_compensation = (input != NULL) &&
+        (input->competition_mode >=
+            GATEWAY_LAP_COMPENSATION_COMPETITION_MODE_MIN) &&
+        (input->competition_mode <= GATEWAY_TASK6_COMPETITION_MODE);
 
     s_chassis_acceleration_valid =
         (input != NULL) && input->chassis_acceleration_valid;
@@ -272,7 +280,38 @@ static void update_chassis_acceleration(
         s_last_chassis_imu_sequence_seen = false;
         s_last_chassis_wheel_sequence_seen = false;
         s_last_chassis_wheel_acceleration_sequence_seen = false;
+        s_simple_lap_compensation_active = false;
         return;
+    }
+    if (simple_lap_compensation) {
+        float plan_weight = fabsf(
+            (float)s_planned_chassis_acceleration_mm_s2) /
+            GATEWAY_CHASSIS_PLAN_DOMINANT_ACCEL_MM_S2;
+        float selected = (float)s_planned_chassis_acceleration_mm_s2;
+
+        plan_weight = clamp_float(plan_weight, 0.0F, 1.0F);
+        if (input->chassis_wheel_acceleration_measurement_valid) {
+            selected += GATEWAY_CHASSIS_WHEEL_ACCEL_CRUISE_GAIN *
+                (1.0F - plan_weight) *
+                (float)input->measured_chassis_wheel_acceleration_mm_s2;
+        }
+        s_selected_chassis_acceleration_mm_s2 = round_float_to_i32(selected);
+        if (!s_simple_lap_compensation_active) {
+            Algorithm_ChassisAccelerationFusion_Reset(
+                &s_chassis_fusion, now_ms);
+            s_last_chassis_imu_sequence_seen = false;
+            s_last_chassis_wheel_sequence_seen = false;
+            s_last_chassis_wheel_acceleration_sequence_seen = false;
+            s_simple_lap_compensation_active = true;
+        }
+        return;
+    }
+    if (s_simple_lap_compensation_active) {
+        Algorithm_ChassisAccelerationFusion_Reset(&s_chassis_fusion, now_ms);
+        s_last_chassis_imu_sequence_seen = false;
+        s_last_chassis_wheel_sequence_seen = false;
+        s_last_chassis_wheel_acceleration_sequence_seen = false;
+        s_simple_lap_compensation_active = false;
     }
     if (!Algorithm_ChassisAccelerationFusion_Predict(
             &s_chassis_fusion,
@@ -364,12 +403,84 @@ static bool get_estimator_rod_angle_deg(
 
 static void reset_estimated_ball_feedback(uint32_t now_ms)
 {
+    if (s_ball_model_interpolator.state_valid) {
+        Algorithm_BallModelInterpolator_Reset(
+            &s_ball_model_interpolator, now_ms);
+    }
     if (s_ball_estimator.state_valid ||
         (s_ball_estimator.history_count > 0U)) {
         Algorithm_BallStateEstimator_Reset(&s_ball_estimator, now_ms);
     }
     Algorithm_BallPositionControl_ResetMeasurement(&s_ball_controller);
     s_last_ball_sequence_seen = false;
+}
+
+static bool update_model_interpolated_ball_feedback(
+    uint32_t now_ms,
+    const APP_Gateway_ControlInput *input,
+    float *ball_angle_deg)
+{
+    Algorithm_BallModelInterpolator_State state;
+    float rod_angle_deg;
+
+    if (!get_estimator_rod_angle_deg(now_ms, &rod_angle_deg)) {
+        reset_estimated_ball_feedback(now_ms);
+        return true;
+    }
+    /* All ball-loop angles are offsets from the calibrated horizontal trim.
+     * Remove that static trim before applying the physical rolling model. */
+    rod_angle_deg -= s_rod_trim_angle_deg;
+    if (s_ball_model_interpolator.state_valid &&
+        ((uint32_t)(now_ms -
+            s_ball_model_interpolator.last_accepted_measurement_time_ms) >
+            GATEWAY_BALL_MODEL_MAX_COAST_MS)) {
+        Algorithm_BallModelInterpolator_Reset(
+            &s_ball_model_interpolator, now_ms);
+        Algorithm_BallPositionControl_ResetMeasurement(&s_ball_controller);
+    }
+    if (!Algorithm_BallModelInterpolator_Predict(
+            &s_ball_model_interpolator,
+            now_ms,
+            rod_angle_deg,
+            (float)s_selected_chassis_acceleration_mm_s2)) {
+        Algorithm_BallPositionControl_ResetMeasurement(&s_ball_controller);
+        return true;
+    }
+    if ((input != NULL) && input->ball_measurement_valid &&
+        (!s_last_ball_sequence_seen ||
+         (input->ball_sequence != s_last_ball_sequence))) {
+        const float physical_position_mm =
+            GATEWAY_BALL_MEASUREMENT_POLARITY *
+            (float)input->ball_position_mm;
+
+        if (!Algorithm_BallModelInterpolator_CorrectPosition(
+                &s_ball_model_interpolator,
+                now_ms,
+                input->ball_measurement_age_ms,
+                physical_position_mm)) {
+            reset_estimated_ball_feedback(now_ms);
+            return true;
+        }
+        s_last_ball_sequence = input->ball_sequence;
+        s_last_ball_sequence_seen = true;
+    }
+    if (!Algorithm_BallModelInterpolator_IsTrusted(
+            &s_ball_model_interpolator, now_ms) ||
+        !Algorithm_BallModelInterpolator_GetState(
+            &s_ball_model_interpolator, &state)) {
+        Algorithm_BallPositionControl_ResetMeasurement(&s_ball_controller);
+        return true;
+    }
+    if (!Algorithm_BallPositionControl_SetEstimatedState(
+            &s_ball_controller,
+            now_ms,
+            state.position_mm,
+            state.velocity_mm_s)) {
+        reset_estimated_ball_feedback(now_ms);
+        return false;
+    }
+    return Algorithm_BallPositionControl_ComputeRodAngleDeg(
+        &s_ball_controller, ball_angle_deg);
 }
 
 static bool update_kalman_ball_feedback(
@@ -438,13 +549,36 @@ static bool update_primary_tracking_target(
     float limited_offset_deg;
     bool total_angle_saturated;
     bool target_applied;
+    const bool task3 = (input != NULL) &&
+        (input->competition_mode == GATEWAY_TASK3_COMPETITION_MODE);
+    const bool task6 = (input != NULL) &&
+        (input->competition_mode == GATEWAY_TASK6_COMPETITION_MODE);
 
     if (!Algorithm_BallPositionControl_SetSpeedHandoffEnabled(
-            &s_ball_controller,
-            (input == NULL) ||
-                (input->competition_mode !=
-                    GATEWAY_TASK3_COMPETITION_MODE))) {
+            &s_ball_controller, true)) {
         return false;
+    }
+    if (!Algorithm_BallPositionControl_SetMotionLimits(
+            &s_ball_controller,
+            task3 ? GATEWAY_TASK3_BALL_MAX_TARGET_VELOCITY_MM_S :
+                GATEWAY_BALL_MAX_TARGET_VELOCITY_MM_S,
+            task3 ? GATEWAY_TASK3_BALL_MAX_TARGET_ACCELERATION_MM_S2 :
+                (task6 ?
+                    GATEWAY_TASK6_BALL_MAX_TARGET_ACCELERATION_MM_S2 :
+                    GATEWAY_BALL_MAX_TARGET_ACCELERATION_MM_S2))) {
+        return false;
+    }
+    if (!Algorithm_BallPositionControl_SetFinalPositionBands(
+            &s_ball_controller,
+            task3 ? GATEWAY_TASK3_BALL_HANDOFF_ERROR_MM :
+                GATEWAY_BALL_STICTION_MIN_ERROR_MM,
+            task3 ? GATEWAY_TASK3_BALL_HOLD_ERROR_MM :
+                GATEWAY_BALL_HOLD_POSITION_ERROR_MM)) {
+        return false;
+    }
+    if (s_task3_direct_visual_feedback_active != task3) {
+        reset_estimated_ball_feedback(now_ms);
+        s_task3_direct_visual_feedback_active = task3;
     }
     s_chassis_compensation_angle_deg = 0.0F;
     if (s_level_calibration_active) {
@@ -470,7 +604,16 @@ static bool update_primary_tracking_target(
     if (GATEWAY_BALL_VISUAL_CONTROL_ENABLE == 0U) {
         reset_estimated_ball_feedback(now_ms);
     }
-    else if (GATEWAY_BALL_KALMAN_ENABLE != 0U) {
+    else if (!task3 && (GATEWAY_BALL_MODEL_INTERPOLATION_ENABLE != 0U)) {
+        if (!update_model_interpolated_ball_feedback(
+                now_ms, input, &ball_angle_deg)) {
+            return false;
+        }
+        s_ball_measurement_valid =
+            Algorithm_BallModelInterpolator_IsTrusted(
+                &s_ball_model_interpolator, now_ms);
+    }
+    else if (!task3 && (GATEWAY_BALL_KALMAN_ENABLE != 0U)) {
         if (!update_kalman_ball_feedback(
                 now_ms, input, &ball_angle_deg)) {
             return false;
@@ -1041,12 +1184,16 @@ static void make_primary_telemetry(
     uint32_t now_ms, APP_Gateway_Telemetry *telemetry)
 {
     Device_QD4310_Feedback feedback;
+    Algorithm_BallModelInterpolator_Diagnostics model_diagnostics;
     Algorithm_BallStateEstimator_State estimator_state;
     Algorithm_BallStateEstimator_Covariance estimator_covariance;
     Algorithm_ChassisAccelerationFusion_State fusion_state;
     Algorithm_ChassisAccelerationFusion_Covariance fusion_covariance;
     const bool estimator_state_valid = Algorithm_BallStateEstimator_GetState(
         &s_ball_estimator, &estimator_state, &estimator_covariance);
+    const bool model_diagnostics_valid =
+        Algorithm_BallModelInterpolator_GetDiagnostics(
+            &s_ball_model_interpolator, &model_diagnostics);
     const bool fusion_state_valid =
         Algorithm_ChassisAccelerationFusion_GetState(
             &s_chassis_fusion, &fusion_state, &fusion_covariance);
@@ -1087,9 +1234,12 @@ static void make_primary_telemetry(
         .ball_velocity_valid = s_ball_controller.velocity_valid,
         .ball_last_used_sequence_valid = s_last_ball_sequence_seen,
         .ball_estimator_trusted =
-            (GATEWAY_BALL_KALMAN_ENABLE != 0U) &&
-            Algorithm_BallStateEstimator_IsTrusted(
-                &s_ball_estimator, now_ms),
+            ((GATEWAY_BALL_MODEL_INTERPOLATION_ENABLE != 0U) &&
+             Algorithm_BallModelInterpolator_IsTrusted(
+                &s_ball_model_interpolator, now_ms)) ||
+            ((GATEWAY_BALL_KALMAN_ENABLE != 0U) &&
+             Algorithm_BallStateEstimator_IsTrusted(
+                &s_ball_estimator, now_ms)),
         .chassis_acceleration_valid = s_chassis_acceleration_valid,
         .chassis_acceleration_fusion_trusted = s_chassis_fusion_trusted,
         .rod_angle_saturated = s_rod_angle_saturated,
@@ -1099,6 +1249,9 @@ static void make_primary_telemetry(
         .chassis_compensation_angle_deg =
             s_chassis_compensation_angle_deg,
         .ball_estimator_innovation_reject_count =
+            (GATEWAY_BALL_MODEL_INTERPOLATION_ENABLE != 0U) &&
+                model_diagnostics_valid ?
+            model_diagnostics.innovation_reject_count :
             s_ball_estimator.innovation_reject_count,
         .chassis_fusion_innovation_reject_count =
             s_chassis_fusion.wheel_innovation_reject_count +
@@ -1281,6 +1434,25 @@ bool APP_Gateway_Init(uint32_t now_ms)
         .stiction_kick_duration_ms =
             GATEWAY_BALL_STICTION_DURATION_MS,
     };
+    const Algorithm_BallModelInterpolator_Config model_interpolator_config = {
+        .gravity_mm_s2 = GATEWAY_BALL_GRAVITY_MM_S2,
+        .inertia_ratio = GATEWAY_BALL_INERTIA_RATIO,
+        .position_alpha = GATEWAY_BALL_MODEL_POSITION_ALPHA,
+        .velocity_beta = GATEWAY_BALL_MODEL_VELOCITY_BETA,
+        .maximum_absolute_innovation_mm =
+            GATEWAY_BALL_MODEL_MAX_INNOVATION_MM,
+        .maximum_absolute_position_mm =
+            GATEWAY_BALL_MODEL_MAX_POSITION_MM,
+        .maximum_absolute_velocity_mm_s =
+            GATEWAY_BALL_MODEL_MAX_VELOCITY_MM_S,
+        .maximum_prediction_step_ms =
+            GATEWAY_BALL_MODEL_MAX_PREDICT_STEP_MS,
+        .maximum_measurement_age_ms =
+            GATEWAY_BALL_MODEL_MAX_MEASUREMENT_AGE_MS,
+        .maximum_coast_ms = GATEWAY_BALL_MODEL_MAX_COAST_MS,
+        .minimum_accepted_measurements =
+            GATEWAY_BALL_MODEL_MIN_ACCEPTED_VIS,
+    };
     const Algorithm_BallStateEstimator_Config estimator_config = {
         .measurement_polarity = GATEWAY_BALL_MEASUREMENT_POLARITY,
         .gravity_mm_s2 = GATEWAY_BALL_GRAVITY_MM_S2,
@@ -1397,6 +1569,11 @@ bool APP_Gateway_Init(uint32_t now_ms)
         (GATEWAY_CHASSIS_FF_GAIN < 0.0F) ||
         !isfinite(GATEWAY_CHASSIS_STOP_PLAN_FF_GAIN) ||
         (GATEWAY_CHASSIS_STOP_PLAN_FF_GAIN < 0.0F) ||
+        !isfinite(GATEWAY_CHASSIS_WHEEL_ACCEL_CRUISE_GAIN) ||
+        (GATEWAY_CHASSIS_WHEEL_ACCEL_CRUISE_GAIN < 0.0F) ||
+        (GATEWAY_CHASSIS_WHEEL_ACCEL_CRUISE_GAIN > 1.0F) ||
+        !isfinite(GATEWAY_CHASSIS_PLAN_DOMINANT_ACCEL_MM_S2) ||
+        (GATEWAY_CHASSIS_PLAN_DOMINANT_ACCEL_MM_S2 <= 0.0F) ||
         !isfinite(GATEWAY_CHASSIS_FF_POLARITY) ||
         ((GATEWAY_CHASSIS_FF_POLARITY != 1.0F) &&
          (GATEWAY_CHASSIS_FF_POLARITY != -1.0F)) ||
@@ -1409,6 +1586,10 @@ bool APP_Gateway_Init(uint32_t now_ms)
             Device_QD4310_AngleRawToRad(GATEWAY_LEVEL_ZERO_RAW)) ||
         !Algorithm_BallPositionControl_Init(
             &s_ball_controller, &ball_config) ||
+        !Algorithm_BallModelInterpolator_Init(
+            &s_ball_model_interpolator,
+            &model_interpolator_config,
+            now_ms) ||
         !Algorithm_BallStateEstimator_Init(
             &s_ball_estimator, &estimator_config, now_ms) ||
         !Algorithm_ChassisAccelerationFusion_Init(
@@ -1491,6 +1672,7 @@ bool APP_Gateway_Init(uint32_t now_ms)
     s_last_chassis_wheel_acceleration_sequence_seen = false;
     s_last_chassis_wheel_acceleration_sequence = 0U;
     s_last_chassis_wheel_acceleration_sample_ms = 0U;
+    s_simple_lap_compensation_active = false;
     s_chassis_fusion_trusted = false;
     s_last_ball_sequence_seen = false;
     s_ball_measurement_valid = false;
@@ -1501,6 +1683,7 @@ bool APP_Gateway_Init(uint32_t now_ms)
     s_zero_entry_stable_since_ms = 0U;
     s_chassis_compensation_angle_deg = 0.0F;
     s_last_ball_target_update_ms = now_ms;
+    s_task3_direct_visual_feedback_active = false;
     return true;
 }
 

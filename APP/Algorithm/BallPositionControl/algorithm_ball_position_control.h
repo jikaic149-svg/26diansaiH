@@ -12,9 +12,9 @@ typedef struct {
     float target_position_mm;
     float maximum_absolute_target_position_mm;
     float target_slew_rate_mm_s;
-    /* Speed-approach target and acceleration limit. A distant target command
-     * starts one continuous speed-loop trip; the normal position loop takes
-     * over once near the final command and remains latched for that trip. */
+    /* Speed-assist target and acceleration limit. The speed PI only launches
+     * a stuck ball; after its minimum active time, measured speed above the
+     * stiction threshold hands all remaining tracking to position/velocity PD. */
     float maximum_target_velocity_mm_s;
     float maximum_target_acceleration_mm_s2;
     /* +1 or -1 maps camera-rule position into the physical rod coordinate. */
@@ -55,12 +55,11 @@ typedef struct {
     float stiction_kick_angle_deg;
     float stiction_kick_step_angle_deg;
     float stiction_kick_maximum_angle_deg;
-    /* Legacy field names are kept for the VST/config integration. The speed
-     * trip enters when command error exceeds minimum_error + exit_distance,
-     * tapers across that band, and permanently hands off to the position loop
-     * at minimum_error once ball speed is below maximum_velocity. A new target
-     * or measurement reset rearms the trip. duration_ms shapes only the speed
-     * loop acceleration limit; it does not gate loop activation. */
+    /* Legacy field names are kept for the VST/config integration. A new target
+     * immediately starts speed assist outside minimum_error+exit_distance.
+     * After handoff, an unchanged target rearms only after low speed and large
+     * error persist for duration_ms. The same duration is the minimum assist
+     * time and shapes the launch ramp. */
     float stiction_assist_velocity_gain_per_s;
     float stiction_assist_velocity_integral_gain_per_s2;
     float stiction_assist_exit_distance_mm;
@@ -133,6 +132,22 @@ bool Algorithm_BallPositionControl_ResetTargetPositionMm(
 bool Algorithm_BallPositionControl_SetSpeedHandoffEnabled(
     Algorithm_BallPositionControl *controller,
     bool enabled);
+
+/* Apply finite positive runtime speed and acceleration limits. Reapplying the
+ * active pair is a no-op; changing either value clears the current speed trip
+ * and quiet-hold state without discarding the latest measurement. */
+bool Algorithm_BallPositionControl_SetMotionLimits(
+    Algorithm_BallPositionControl *controller,
+    float maximum_target_velocity_mm_s,
+    float maximum_target_acceleration_mm_s2);
+
+/* Select the speed-trip handoff error and quiet-hold entry error. Reapplying
+ * the active pair is non-disruptive; changing either value rearms a fresh
+ * speed trip without discarding the target or latest measurement. */
+bool Algorithm_BallPositionControl_SetFinalPositionBands(
+    Algorithm_BallPositionControl *controller,
+    float speed_handoff_error_mm,
+    float hold_position_error_mm);
 
 /* Apply finite, non-negative runtime gains. The integral state is represented
  * directly as acceleration, so changing Ki does not rescale or jump it.

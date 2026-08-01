@@ -269,19 +269,33 @@ static void test_car_filtered_wheel_acceleration_extension(void)
     assert(state.filtered_wheel_acceleration_valid);
     assert(state.filtered_wheel_acceleration_x_mm_per_second2 == -75);
 
+    /* Transitional 14-field sender remains accepted, but its obsolete
+     * route segment is intentionally ignored by control. */
+    queue_packet(
+        "CAR", 11U, "2,1010,234,100,9807,0,1,6,0,0,1,-75,1,2");
+    assert(Device_PeerLink_Step(&link, 110U));
+    assert(Device_PeerLink_GetRemoteCarState(
+        &link, 110U, 50U, &state));
+
     /* An explicit invalid bit requires the corresponding value to be zero. */
     queue_packet(
-        "CAR", 11U, "2,1010,234,100,9807,0,1,6,0,0,1,1,0");
-    assert(Device_PeerLink_Step(&link, 110U));
+        "CAR", 12U, "2,1020,234,100,9807,0,1,6,0,0,1,1,0");
+    assert(Device_PeerLink_Step(&link, 120U));
     assert(link.status.car_state_payload_error_count == 1U);
-    assert(link.status.car_state_rx_count == 1U);
+    assert(link.status.car_state_rx_count == 2U);
 
     /* Wheel acceleration cannot be valid without a valid trajectory plan. */
     queue_packet(
-        "CAR", 11U, "2,1010,234,100,9807,0,1,6,0,0,0,1,1");
-    assert(Device_PeerLink_Step(&link, 111U));
+        "CAR", 13U, "2,1030,234,100,9807,0,1,6,0,0,0,1,1");
+    assert(Device_PeerLink_Step(&link, 130U));
     assert(link.status.car_state_payload_error_count == 2U);
-    assert(link.status.car_state_rx_count == 1U);
+    assert(link.status.car_state_rx_count == 2U);
+
+    queue_packet(
+        "CAR", 14U, "2,1040,234,100,9807,0,1,6,0,0,1,-75,1,4");
+    assert(Device_PeerLink_Step(&link, 140U));
+    assert(link.status.car_state_payload_error_count == 3U);
+    assert(link.status.car_state_rx_count == 2U);
 }
 
 static void test_car_rejects_malformed_and_unknown_types(void)
