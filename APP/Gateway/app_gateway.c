@@ -554,8 +554,12 @@ static bool update_primary_tracking_target(
     const bool task6 = (input != NULL) &&
         (input->competition_mode == GATEWAY_TASK6_COMPETITION_MODE);
 
+    /* Task3 experiments with the reference video's continuous position-PD
+     * behavior: position error and visual velocity damping own the complete
+     * trip. Other competition modes retain the one-shot speed-PI launch
+     * assistance needed to overcome their measured static friction. */
     if (!Algorithm_BallPositionControl_SetSpeedHandoffEnabled(
-            &s_ball_controller, true)) {
+            &s_ball_controller, !task3)) {
         return false;
     }
     if (!Algorithm_BallPositionControl_SetMotionLimits(
