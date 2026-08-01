@@ -184,30 +184,40 @@
 #define GATEWAY_BALL_TARGET_MM               0.0F
 
 /* 25 cm水管和直径1 cm球对应球心几何域[-120,+120] mm。该值仅是软件
- * 安全边界，扩大实机目标仍须从小范围逐级验证。目标参考按120 mm/s线性推进。
- * Task2/4/5/6沿用30 mm/s和180 mm/s2；Task3单独提高到45 mm/s和300 mm/s2。 */
+ * 安全边界，扩大实机目标仍须从小范围逐级验证。目标参考按120 mm/s线性推进。 */
 #define GATEWAY_BALL_TARGET_LIMIT_MM        120.0F
 #define GATEWAY_BALL_TARGET_SLEW_MM_S       120.0F
 #define GATEWAY_BALL_MAX_TARGET_VELOCITY_MM_S 30.0F
 #define GATEWAY_BALL_MAX_TARGET_ACCELERATION_MM_S2 180.0F
-#define GATEWAY_TASK3_BALL_MAX_TARGET_VELOCITY_MM_S 45.0F
-#define GATEWAY_TASK3_BALL_MAX_TARGET_ACCELERATION_MM_S2 300.0F
-#define GATEWAY_TASK3_BALL_HANDOFF_ERROR_MM          1.5F
-#define GATEWAY_TASK3_BALL_HOLD_ERROR_MM             1.5F
+/* Task3使用Maix视觉坐标0 -> +50 -> -50 mm；VBT进入F407后按-1映射成
+ * 物理目标0 -> -50 -> +50 mm。收到首段目标且新鲜视觉球位在原点+-10 mm
+ * 内时，杆角目标以0.40 deg/s匀速抬升；Maix球位首次越过+50 mm或返回目标
+ * 已经到达时，立即把活动物理目标跳到+50 mm并使用共享位置PD。
+ * +0.60 deg加标定trim仍低于+0.75 deg总杆角上限。 */
+#define GATEWAY_TASK3_ORIGIN_TOLERANCE_MM            10.0F
+#define GATEWAY_TASK3_POSITIVE_CROSSING_MM           50.0F
+#define GATEWAY_TASK3_OUTBOUND_TARGET_MM            (-50.0F)
+#define GATEWAY_TASK3_RETURN_TARGET_MM                50.0F
+#define GATEWAY_TASK3_TARGET_MATCH_TOLERANCE_MM        0.5F
+#define GATEWAY_TASK3_RAISE_RATE_DEG_S                0.40F
+#define GATEWAY_TASK3_MAX_RAISE_OFFSET_DEG            0.60F
+#define GATEWAY_TASK3_MAX_RAISE_STEP_MS          UINT32_C(100)
 /* M6 arbitrary-position hold must fit the weaker +0.75 deg rod authority.
  * 80 mm/s2 maps to about 0.65 deg for a solid ball, leaving real actuator
  * margin instead of winding the speed PI against the downstream clamp. */
 #define GATEWAY_TASK6_BALL_MAX_TARGET_ACCELERATION_MM_S2 80.0F
 
 /* 正常位置环生成目标球加速度：Kp*位置误差+Ki积分-Kd*视觉球速。
- * 位置参数恢复Git基线；远距离旅程由速度PI独占，近目标低速后一次性切入位置环。 */
-#define GATEWAY_BALL_POSITION_KP_PER_S2      0.60F
+ * 2026-08-01整圈数据中，BC/CD的球环杆角分别约0.21/0.27 deg RMS，且在无
+ * 规划加速度时仍持续换向，表明位置环欠阻尼而不是加速度补偿限幅。适当降低P并
+ * 将速度阻尼提高到接近0.8阻尼比；远距离旅程仍由速度PI助启动，近目标回到PD。 */
+#define GATEWAY_BALL_POSITION_KP_PER_S2      0.50F
 #define GATEWAY_BALL_POSITION_KI_PER_S3      0.000F
-#define GATEWAY_BALL_VELOCITY_KD_PER_S       0.55F
+#define GATEWAY_BALL_VELOCITY_KD_PER_S       0.75F
 #define GATEWAY_BALL_INTEGRAL_ACCEL_LIMIT_MM_S2 10.0F
-/* Task3球速只由真实视觉位置计算：120 ms多帧差分适配当前约33 Hz有效视觉帧，
- * 再做60 ms一阶低通，避免两帧差分尖峰把杆角反复推向限幅。其他赛题继续使用
- * 下方轻量杆球模型插值。 */
+/* Damping velocity in every visual-control mode comes only from real camera
+ * positions: a 120 ms multi-frame difference followed by a 60 ms low-pass.
+ * The lightweight rod-ball model below now interpolates position only. */
 #define GATEWAY_BALL_VELOCITY_ESTIMATION_WINDOW_MS UINT32_C(120)
 #define GATEWAY_BALL_VELOCITY_FILTER_TAU_S   0.060F
 #define GATEWAY_BALL_MAX_VELOCITY_DT_MS      UINT32_C(100)

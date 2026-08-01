@@ -46,6 +46,7 @@ static void reset_velocity_history(
 {
     controller->velocity_history_write_index = 0U;
     controller->velocity_history_count = 0U;
+    controller->last_velocity_sample_ms = 0U;
 }
 
 static void push_velocity_sample(
@@ -575,6 +576,21 @@ bool Algorithm_BallPositionControl_SetSpeedHandoffEnabled(
     return true;
 }
 
+bool Algorithm_BallPositionControl_RearmPositionLoop(
+    Algorithm_BallPositionControl *controller)
+{
+    if ((controller == NULL) || !controller->initialized) {
+        return false;
+    }
+    controller->integral_acceleration_mm_s2 = 0.0F;
+    controller->hold_active = false;
+    reset_hold_exit(controller);
+    reset_hold_candidate(controller);
+    reset_speed_loop(controller);
+    latch_position_loop(controller);
+    return true;
+}
+
 bool Algorithm_BallPositionControl_SetMotionLimits(
     Algorithm_BallPositionControl *controller,
     float maximum_target_velocity_mm_s,
@@ -669,8 +685,6 @@ bool Algorithm_BallPositionControl_UpdateMeasurement(
 {
     float position_mm;
     uint32_t delta_ms = 0U;
-    float raw_velocity_mm_s = 0.0F;
-    bool velocity_available;
 
     if ((controller == NULL) || !controller->initialized ||
         !isfinite(camera_position_mm)) {
@@ -684,23 +698,57 @@ bool Algorithm_BallPositionControl_UpdateMeasurement(
 
     if (controller->measurement_seen) {
         delta_ms = sample_ms - controller->last_sample_ms;
+    }
+    if (!Algorithm_BallPositionControl_UpdateVisualVelocity(
+            controller, sample_ms, camera_position_mm)) {
+        return false;
+    }
+    controller->position_mm = position_mm;
+    update_position_loop_state(controller, sample_ms, delta_ms);
+    update_speed_handoff(controller, sample_ms, delta_ms);
+    controller->last_sample_ms = sample_ms;
+    controller->measurement_seen = true;
+    return true;
+}
 
+bool Algorithm_BallPositionControl_UpdateVisualVelocity(
+    Algorithm_BallPositionControl *controller,
+    uint32_t sample_ms,
+    float camera_position_mm)
+{
+    float position_mm;
+    float raw_velocity_mm_s = 0.0F;
+    uint32_t delta_ms = 0U;
+    bool velocity_available;
+
+    if ((controller == NULL) || !controller->initialized ||
+        !isfinite(camera_position_mm)) {
+        return false;
+    }
+    position_mm = camera_position_mm *
+        controller->config.measurement_polarity;
+    if (!isfinite(position_mm)) {
+        return false;
+    }
+    if (controller->velocity_history_count > 0U) {
+        delta_ms = sample_ms - controller->last_velocity_sample_ms;
         if ((delta_ms == 0U) ||
             (delta_ms > controller->config.maximum_velocity_dt_ms)) {
             reset_velocity_history(controller);
             controller->velocity_mm_s = 0.0F;
             controller->velocity_valid = false;
             reset_speed_loop(controller);
+            delta_ms = 0U;
         }
     }
     else {
-        reset_velocity_history(controller);
         controller->velocity_mm_s = 0.0F;
-        reset_speed_loop(controller);
         controller->velocity_valid = false;
+        reset_speed_loop(controller);
     }
 
     push_velocity_sample(controller, sample_ms, position_mm);
+    controller->last_velocity_sample_ms = sample_ms;
     velocity_available = calculate_window_velocity(
         controller, sample_ms, position_mm, &raw_velocity_mm_s);
     if (velocity_available) {
@@ -722,11 +770,31 @@ bool Algorithm_BallPositionControl_UpdateMeasurement(
         controller->velocity_valid = false;
         reset_speed_loop(controller);
     }
+    return true;
+}
+
+bool Algorithm_BallPositionControl_SetEstimatedPosition(
+    Algorithm_BallPositionControl *controller,
+    uint32_t sample_ms,
+    float position_mm)
+{
+    uint32_t delta_ms = 0U;
+
+    if ((controller == NULL) || !controller->initialized ||
+        !isfinite(position_mm)) {
+        return false;
+    }
+    if (controller->measurement_seen) {
+        delta_ms = sample_ms - controller->last_sample_ms;
+    }
+    else {
+        reset_speed_loop(controller);
+    }
     controller->position_mm = position_mm;
+    controller->measurement_seen = true;
     update_position_loop_state(controller, sample_ms, delta_ms);
     update_speed_handoff(controller, sample_ms, delta_ms);
     controller->last_sample_ms = sample_ms;
-    controller->measurement_seen = true;
     return true;
 }
 

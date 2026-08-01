@@ -970,6 +970,70 @@ static void test_invalid_stiction_configuration(void)
     assert(!Algorithm_BallPositionControl_Init(&controller, &config));
 }
 
+static void test_rearm_position_loop_preserves_measured_state(void)
+{
+    Algorithm_BallPositionControl controller;
+    Algorithm_BallPositionControl_Config config = stiction_config();
+    float angle;
+
+    config.position_gain_per_s2 = 0.5F;
+    config.velocity_gain_per_s = 1.1F;
+    assert(Algorithm_BallPositionControl_Init(&controller, &config));
+    assert(Algorithm_BallPositionControl_SetSpeedHandoffEnabled(
+        &controller, false));
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 0U, -3.0F));
+    assert(Algorithm_BallPositionControl_UpdateMeasurement(
+        &controller, 100U, -5.0F));
+    controller.hold_active = true;
+    controller.integral_acceleration_mm_s2 = 4.0F;
+
+    assert(Algorithm_BallPositionControl_RearmPositionLoop(&controller));
+    assert(controller.measurement_seen);
+    assert(controller.velocity_valid);
+    assert(close_enough(controller.position_mm, -5.0F, 0.001F));
+    assert(controller.velocity_mm_s < 0.0F);
+    assert(!controller.hold_active);
+    assert(close_enough(controller.integral_acceleration_mm_s2,
+        0.0F, 0.001F));
+    assert(controller.stiction_state ==
+        ALGORITHM_BALL_STICTION_POSITION_LATCHED);
+    assert(Algorithm_BallPositionControl_ComputeRodAngleDeg(
+        &controller, &angle));
+    assert(angle < 0.0F);
+
+    assert(!Algorithm_BallPositionControl_RearmPositionLoop(NULL));
+}
+
+static void test_interpolated_position_preserves_visual_velocity(void)
+{
+    Algorithm_BallPositionControl controller;
+    Algorithm_BallPositionControl_Config config = default_config();
+
+    config.velocity_estimation_window_ms = 80U;
+    config.velocity_filter_tau_s = 0.0F;
+    assert(Algorithm_BallPositionControl_Init(&controller, &config));
+    assert(Algorithm_BallPositionControl_UpdateVisualVelocity(
+        &controller, 0U, 0.0F));
+    assert(Algorithm_BallPositionControl_SetEstimatedPosition(
+        &controller, 1U, 2.0F));
+    assert(!controller.velocity_valid);
+    assert(Algorithm_BallPositionControl_UpdateVisualVelocity(
+        &controller, 40U, 4.0F));
+    assert(Algorithm_BallPositionControl_SetEstimatedPosition(
+        &controller, 41U, 20.0F));
+    assert(!controller.velocity_valid);
+    assert(Algorithm_BallPositionControl_UpdateVisualVelocity(
+        &controller, 80U, 8.0F));
+    assert(controller.velocity_valid);
+    assert(close_enough(controller.velocity_mm_s, 100.0F, 0.001F));
+    assert(Algorithm_BallPositionControl_SetEstimatedPosition(
+        &controller, 81U, -12.0F));
+    assert(close_enough(controller.position_mm, -12.0F, 0.001F));
+    assert(close_enough(controller.velocity_mm_s, 100.0F, 0.001F));
+    assert(controller.velocity_valid);
+}
+
 int main(void)
 {
     test_position_and_velocity_sign();
@@ -1002,6 +1066,8 @@ int main(void)
     test_runtime_motion_limits_validate_and_reset_trip();
     test_runtime_final_position_bands_validate_and_reset_trip();
     test_invalid_stiction_configuration();
+    test_rearm_position_loop_preserves_measured_state();
+    test_interpolated_position_preserves_visual_velocity();
     puts("ball position control tests: PASS");
     return 0;
 }

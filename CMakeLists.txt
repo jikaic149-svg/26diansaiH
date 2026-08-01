@@ -57,6 +57,7 @@ add_executable(${PROJECT_NAME}
     APP/Algorithm/RodAngleMap/algorithm_rod_angle_map.c
     APP/Algorithm/SPSC_Ring/src/algorithm_spsc_ring.c
     APP/Gateway/app_gateway.c
+    APP/Gateway/task3_rod_sequence.c
     Task/task_app.c
     FreeRTOS/Kernel/tasks.c
     FreeRTOS/Kernel/queue.c

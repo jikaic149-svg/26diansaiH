@@ -91,6 +91,7 @@ typedef struct {
     uint32_t velocity_history_sample_ms[
         ALGORITHM_BALL_POSITION_CONTROL_VELOCITY_HISTORY_CAPACITY];
     uint32_t last_sample_ms;
+    uint32_t last_velocity_sample_ms;
     uint32_t hold_candidate_started_ms;
     uint32_t hold_exit_consecutive_count;
     uint32_t stiction_state_started_ms;
@@ -133,6 +134,13 @@ bool Algorithm_BallPositionControl_SetSpeedHandoffEnabled(
     Algorithm_BallPositionControl *controller,
     bool enabled);
 
+/* Clear quiet hold, integral and speed-assist state while preserving the
+ * latest measured position, filtered velocity and velocity history. This is
+ * used for a state-clean handoff from an external open-loop rod motion to the
+ * normal position/velocity PD path. */
+bool Algorithm_BallPositionControl_RearmPositionLoop(
+    Algorithm_BallPositionControl *controller);
+
 /* Apply finite positive runtime speed and acceleration limits. Reapplying the
  * active pair is a no-op; changing either value clears the current speed trip
  * and quiet-hold state without discarding the latest measurement. */
@@ -165,6 +173,21 @@ bool Algorithm_BallPositionControl_UpdateMeasurement(
     Algorithm_BallPositionControl *controller,
     uint32_t sample_ms,
     float camera_position_mm);
+
+/* Update only the damping velocity from a new real camera frame. This keeps
+ * model-interpolated position independent from the multi-frame visual
+ * derivative and must be called exactly once per camera sequence. */
+bool Algorithm_BallPositionControl_UpdateVisualVelocity(
+    Algorithm_BallPositionControl *controller,
+    uint32_t sample_ms,
+    float camera_position_mm);
+
+/* Supply only an already polarity-corrected high-rate position estimate.
+ * The latest real-camera velocity and its validity are preserved. */
+bool Algorithm_BallPositionControl_SetEstimatedPosition(
+    Algorithm_BallPositionControl *controller,
+    uint32_t sample_ms,
+    float position_mm);
 
 /* Supply an already polarity-corrected physical state estimate at sample_ms.
  * This is the Kalman integration boundary: velocity is supplied directly,

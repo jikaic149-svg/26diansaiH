@@ -20,6 +20,7 @@
 #include "core_config.h"
 #include "device_esp8266.h"
 #include "device_qd4310.h"
+#include "task3_rod_sequence.h"
 
 #define GATEWAY_ESP_UART_INDEX 1U  /* BSP transport 1 = USART3 */
 #define GATEWAY_ARRAY_COUNT(array) (sizeof(array) / sizeof((array)[0]))
@@ -41,6 +42,7 @@ static Algorithm_BallPositionControl s_ball_controller;
 static Algorithm_BallStateEstimator s_ball_estimator;
 static Algorithm_ChassisAccelerationFusion s_chassis_fusion;
 static Algorithm_RodAngleMap s_rod_angle_map;
+static Task3_RodSequence s_task3_rod_sequence;
 static const Algorithm_RodAngleMap_Point s_rod_angle_points[] =
     GATEWAY_ROD_ANGLE_CALIBRATION_POINTS;
 
@@ -453,6 +455,13 @@ static bool update_model_interpolated_ball_feedback(
             GATEWAY_BALL_MEASUREMENT_POLARITY *
             (float)input->ball_position_mm;
 
+        if (!Algorithm_BallPositionControl_UpdateVisualVelocity(
+                &s_ball_controller,
+                input->ball_sample_ms,
+                (float)input->ball_position_mm)) {
+            reset_estimated_ball_feedback(now_ms);
+            return true;
+        }
         if (!Algorithm_BallModelInterpolator_CorrectPosition(
                 &s_ball_model_interpolator,
                 now_ms,
@@ -471,11 +480,10 @@ static bool update_model_interpolated_ball_feedback(
         Algorithm_BallPositionControl_ResetMeasurement(&s_ball_controller);
         return true;
     }
-    if (!Algorithm_BallPositionControl_SetEstimatedState(
+    if (!Algorithm_BallPositionControl_SetEstimatedPosition(
             &s_ball_controller,
             now_ms,
-            state.position_mm,
-            state.velocity_mm_s)) {
+            state.position_mm)) {
         reset_estimated_ball_feedback(now_ms);
         return false;
     }
@@ -536,6 +544,93 @@ static bool update_kalman_ball_feedback(
         &s_ball_controller, ball_angle_deg);
 }
 
+static bool task3_target_matches(float target_mm, float expected_mm)
+{
+    return fabsf(target_mm - expected_mm) <=
+        GATEWAY_TASK3_TARGET_MATCH_TOLERANCE_MM;
+}
+
+static bool update_task3_rod_target(
+    uint32_t now_ms,
+    const APP_Gateway_ControlInput *input,
+    float *ball_angle_deg)
+{
+    Task3_RodSequence_Output sequence_output;
+    bool new_measurement = false;
+    const bool center_target = task3_target_matches(
+        s_ball_controller.target_command_mm, GATEWAY_BALL_TARGET_MM);
+    const bool outbound_target = task3_target_matches(
+        s_ball_controller.target_command_mm,
+        GATEWAY_TASK3_OUTBOUND_TARGET_MM);
+    const bool return_target = task3_target_matches(
+        s_ball_controller.target_command_mm,
+        GATEWAY_TASK3_RETURN_TARGET_MM);
+
+    if ((input == NULL) || (ball_angle_deg == NULL)) {
+        return false;
+    }
+    *ball_angle_deg = 0.0F;
+    if (s_level_phase != GATEWAY_LEVEL_PHASE_ACCELERATION_COMPENSATION) {
+        Task3_RodSequence_Reset(&s_task3_rod_sequence, now_ms);
+        return true;
+    }
+
+    if (s_ball_measurement_valid) {
+        new_measurement = !s_last_ball_sequence_seen ||
+            (input->ball_sequence != s_last_ball_sequence);
+        if (new_measurement) {
+            if (!Algorithm_BallPositionControl_UpdateMeasurement(
+                    &s_ball_controller,
+                    input->ball_sample_ms,
+                    (float)input->ball_position_mm)) {
+                return false;
+            }
+            s_last_ball_sequence = input->ball_sequence;
+            s_last_ball_sequence_seen = true;
+        }
+    }
+    else if (s_ball_controller.measurement_seen) {
+        Algorithm_BallPositionControl_ResetMeasurement(&s_ball_controller);
+        s_last_ball_sequence_seen = false;
+    }
+
+    if (center_target &&
+        (s_task3_rod_sequence.state !=
+            TASK3_ROD_SEQUENCE_WAIT_ORIGIN)) {
+        Task3_RodSequence_Reset(&s_task3_rod_sequence, now_ms);
+    }
+    if (!Task3_RodSequence_Step(
+            &s_task3_rod_sequence,
+            now_ms,
+            outbound_target,
+            return_target,
+            s_ball_measurement_valid,
+            new_measurement,
+            (float)input->ball_position_mm,
+            &sequence_output)) {
+        return false;
+    }
+    if (sequence_output.entered_position_return &&
+        (!Algorithm_BallPositionControl_ResetTargetPositionMm(
+                &s_ball_controller, GATEWAY_TASK3_RETURN_TARGET_MM) ||
+         !Algorithm_BallPositionControl_RearmPositionLoop(
+                &s_ball_controller))) {
+        return false;
+    }
+    if ((sequence_output.mode ==
+            TASK3_ROD_SEQUENCE_OUTPUT_POSITION_RETURN) ||
+        ((sequence_output.mode == TASK3_ROD_SEQUENCE_OUTPUT_LEVEL) &&
+         !outbound_target)) {
+        if (!s_ball_controller.measurement_seen) {
+            return true;
+        }
+        return Algorithm_BallPositionControl_ComputeRodAngleDeg(
+            &s_ball_controller, ball_angle_deg);
+    }
+    *ball_angle_deg = sequence_output.rod_offset_deg;
+    return true;
+}
+
 static bool update_primary_tracking_target(
     uint32_t now_ms,
     const APP_Gateway_ControlInput *input)
@@ -554,34 +649,34 @@ static bool update_primary_tracking_target(
     const bool task6 = (input != NULL) &&
         (input->competition_mode == GATEWAY_TASK6_COMPETITION_MODE);
 
-    /* Task3 experiments with the reference video's continuous position-PD
-     * behavior: position error and visual velocity damping own the complete
-     * trip. Other competition modes retain the one-shot speed-PI launch
-     * assistance needed to overcome their measured static friction. */
+    /* Task3 uses its own reference-video launch sequence and then the common
+     * position/velocity PD. Other competition modes retain one-shot speed-PI
+     * launch assistance for measured static friction. */
     if (!Algorithm_BallPositionControl_SetSpeedHandoffEnabled(
             &s_ball_controller, !task3)) {
         return false;
     }
     if (!Algorithm_BallPositionControl_SetMotionLimits(
             &s_ball_controller,
-            task3 ? GATEWAY_TASK3_BALL_MAX_TARGET_VELOCITY_MM_S :
-                GATEWAY_BALL_MAX_TARGET_VELOCITY_MM_S,
-            task3 ? GATEWAY_TASK3_BALL_MAX_TARGET_ACCELERATION_MM_S2 :
-                (task6 ?
-                    GATEWAY_TASK6_BALL_MAX_TARGET_ACCELERATION_MM_S2 :
-                    GATEWAY_BALL_MAX_TARGET_ACCELERATION_MM_S2))) {
+            GATEWAY_BALL_MAX_TARGET_VELOCITY_MM_S,
+            task6 ? GATEWAY_TASK6_BALL_MAX_TARGET_ACCELERATION_MM_S2 :
+                GATEWAY_BALL_MAX_TARGET_ACCELERATION_MM_S2)) {
         return false;
     }
     if (!Algorithm_BallPositionControl_SetFinalPositionBands(
             &s_ball_controller,
-            task3 ? GATEWAY_TASK3_BALL_HANDOFF_ERROR_MM :
-                GATEWAY_BALL_STICTION_MIN_ERROR_MM,
-            task3 ? GATEWAY_TASK3_BALL_HOLD_ERROR_MM :
-                GATEWAY_BALL_HOLD_POSITION_ERROR_MM)) {
+            GATEWAY_BALL_STICTION_MIN_ERROR_MM,
+            GATEWAY_BALL_HOLD_POSITION_ERROR_MM)) {
         return false;
     }
     if (s_task3_direct_visual_feedback_active != task3) {
         reset_estimated_ball_feedback(now_ms);
+        Task3_RodSequence_Reset(&s_task3_rod_sequence, now_ms);
+        if (task3 &&
+            !Algorithm_BallPositionControl_ResetTargetPositionMm(
+                &s_ball_controller, GATEWAY_BALL_TARGET_MM)) {
+            return false;
+        }
         s_task3_direct_visual_feedback_active = task3;
     }
     s_chassis_compensation_angle_deg = 0.0F;
@@ -592,6 +687,9 @@ static bool update_primary_tracking_target(
         return true;
     }
     if (s_level_phase == GATEWAY_LEVEL_PHASE_ZEROING) {
+        if (task3) {
+            Task3_RodSequence_Reset(&s_task3_rod_sequence, now_ms);
+        }
         s_chassis_acceleration_valid = false;
         s_selected_chassis_acceleration_mm_s2 = 0;
         return apply_rod_target_deg(0.0F);
@@ -608,7 +706,12 @@ static bool update_primary_tracking_target(
     if (GATEWAY_BALL_VISUAL_CONTROL_ENABLE == 0U) {
         reset_estimated_ball_feedback(now_ms);
     }
-    else if (!task3 && (GATEWAY_BALL_MODEL_INTERPOLATION_ENABLE != 0U)) {
+    else if (task3) {
+        if (!update_task3_rod_target(now_ms, input, &ball_angle_deg)) {
+            return false;
+        }
+    }
+    else if (GATEWAY_BALL_MODEL_INTERPOLATION_ENABLE != 0U) {
         if (!update_model_interpolated_ball_feedback(
                 now_ms, input, &ball_angle_deg)) {
             return false;
@@ -617,7 +720,7 @@ static bool update_primary_tracking_target(
             Algorithm_BallModelInterpolator_IsTrusted(
                 &s_ball_model_interpolator, now_ms);
     }
-    else if (!task3 && (GATEWAY_BALL_KALMAN_ENABLE != 0U)) {
+    else if (GATEWAY_BALL_KALMAN_ENABLE != 0U) {
         if (!update_kalman_ball_feedback(
                 now_ms, input, &ball_angle_deg)) {
             return false;
@@ -1438,6 +1541,14 @@ bool APP_Gateway_Init(uint32_t now_ms)
         .stiction_kick_duration_ms =
             GATEWAY_BALL_STICTION_DURATION_MS,
     };
+    const Task3_RodSequence_Config task3_rod_sequence_config = {
+        .origin_tolerance_mm = GATEWAY_TASK3_ORIGIN_TOLERANCE_MM,
+        .positive_crossing_mm = GATEWAY_TASK3_POSITIVE_CROSSING_MM,
+        .raise_rate_deg_s = GATEWAY_TASK3_RAISE_RATE_DEG_S,
+        .maximum_raise_offset_deg =
+            GATEWAY_TASK3_MAX_RAISE_OFFSET_DEG,
+        .maximum_step_ms = GATEWAY_TASK3_MAX_RAISE_STEP_MS,
+    };
     const Algorithm_BallModelInterpolator_Config model_interpolator_config = {
         .gravity_mm_s2 = GATEWAY_BALL_GRAVITY_MM_S2,
         .inertia_ratio = GATEWAY_BALL_INERTIA_RATIO,
@@ -1590,6 +1701,8 @@ bool APP_Gateway_Init(uint32_t now_ms)
             Device_QD4310_AngleRawToRad(GATEWAY_LEVEL_ZERO_RAW)) ||
         !Algorithm_BallPositionControl_Init(
             &s_ball_controller, &ball_config) ||
+        !Task3_RodSequence_Init(
+            &s_task3_rod_sequence, &task3_rod_sequence_config, now_ms) ||
         !Algorithm_BallModelInterpolator_Init(
             &s_ball_model_interpolator,
             &model_interpolator_config,
