@@ -1,5 +1,133 @@
 # Process
 
+## 2026-08-01：Task3提前制动回调到中间档
+
+- 结论：用户确认`-15 mm / Kd=2.00`制动过强后，Task3回调为视觉`-18 mm`切位置闭环、专属`Kd=1.75 1/s`；新固件已验证、烧录和复位。
+- 最终决策：在已验证方向有效的`-20 mm / 1.50`与过强的`-15 mm / 2.00`之间取中间值；最终视觉目标`-50 mm`、`Kp=0.50 1/s²`、两段开环、静摩擦速度PI和其他Task不变。
+- 涉及文件：`config/core_config.h`、Task3RodSequence测试、根`README.md`及本记录；不新增状态或API。
+- 验证方式和结果：Task3RodSequence、BallPositionControl和control polarity chain严格主机测试均PASS；ARM Debug/Release clean-first完整链接通过，FLASH/RAM分别为`59620/21064 B`和`51016/21048 B`；`git diff --check`通过。Debug BIN SHA-256为`F6E4372D89FAF0858C02D1A83A0EC5B72EA3900806B373064E5946CA449A67DA`。烧录前COM3为`phase0/disabled/0 mA/0 rpm`；OpenOCD锁定F407 `0416:5051`写入Debug ELF并报告`Verified OK`后复位，复位后仍为命令`0 mA`、速度`0 rpm`、`phase0`且未使能。
+- 已知限制与待确认：烧录校验不能替代带球动态验证；短测中间档的首次制动距离和回拉次数。
+
+## 2026-08-01：Task3提前制动效果二次强化
+
+- 结论：在用户确认提前制动方向有效后，Task3位置闭环入口由视觉`-20 mm`进一步提前到`-15 mm`，专属`Kd`由`1.50`提高到`2.00 1/s`；新固件已完成验证、烧录和复位。
+- 修改原因：已烧录的`-20 mm / Kd=1.50`版本能正确抑制返程方向，但制动效果仍不足。
+- 最终决策：最终视觉目标仍为`-50 mm`且`Kp=0.50 1/s²`不变；正向`+0.40°/s`至`+0.60°`、换向初值`-0.150°`、反向`-0.40°/s`至`-1.00°`、低速静摩擦速度PI及其他Task均不变。
+- 涉及文件：`config/core_config.h`、Task3RodSequence测试、根`README.md`及本记录；不新增状态或API。
+- 验证方式和结果：Task3RodSequence、BallPositionControl和control polarity chain严格主机测试均PASS；ARM Debug/Release clean-first完整链接通过，FLASH/RAM分别为`59620/21064 B`和`51016/21048 B`；`git diff --check`通过。Debug BIN SHA-256为`21C6968FF8A17F4BE5E1A73A7526A466B46EDE7E8920673AAF42FDFF348B9B5C`。烧录前COM3为`phase0/disabled/0 mA/0 rpm`；OpenOCD锁定F407 `0416:5051`写入Debug ELF并报告`Verified OK`后复位，复位后仍为命令`0 mA`、速度`0 rpm`、`phase0`且仅motor_online。
+- 已知限制与待确认：烧录校验不能代替带球动态验证；短测Task3是否仍越过`-50 mm`或出现停得过早，异常立即按KEY停止。
+
+## 2026-08-01：Task3提前制动并提高专属速度阻尼
+
+- 结论：Task3反向开环在视觉`-20 mm`即撤销，并提前切入最终`-50 mm`位置闭环；Task3专属`Kd`由`0.80`提高到`1.50 1/s`，`Kp=0.50 1/s²`不变。Debug固件已烧录、校验并复位，电机保持失能。
+- 修改原因：实测钢球越过`-50 mm`后在目标两侧往返；原状态机到`-50 mm`才撤销反向开环，首次制动过晚，且原位置PD阻尼不足。
+- 最终决策：最终视觉目标仍为`-50 mm`；只把Task3位置闭环入口提前到`-20 mm`并增加Task3速度阻尼。正向`+0.40°/s`至`+0.60°`、换向初值`-0.150°`、反向`-0.40°/s`至`-1.00°`、低速静摩擦速度PI、其他Task及共享参数均不变。
+- 涉及文件：`config/core_config.h`、`APP/Gateway/app_gateway.c`、Task3RodSequence测试、根`README.md`及本记录；未修改状态机结构、公共API、通信、Task周期、BSP、启停或保护。
+- 验证与部署：Task3RodSequence、BallPositionControl及control polarity chain严格主机测试均PASS，`git diff --check`通过；ARM Debug/Release clean-first完整链接通过，FLASH/RAM分别为`59620/21064 B`和`51016/21048 B`。Debug BIN SHA-256为`3EDD64F10C66698B3045DEB3C7DF89164E50D992D33A6228504B07ED67ADE1AF`。烧录前COM3为`phase0/disabled/0 mA/0 rpm`；OpenOCD锁定F407 `0416:5051`写入Debug ELF并报告`Verified OK`后复位，复位后仍为命令`0 mA`、速度`0 rpm`、`phase0`且仅motor_online。
+- 已知限制与待确认：软件测试和烧录校验不能代替带球动态验证；只短测一次Task3，观察首次接近`-50 mm`是否停止往返，异常立即按KEY停止。
+
+## 2026-08-01：Task6接近目标减速度与破静摩擦输出解耦
+
+- 修改原因：新桌面`1.csv`共6854帧，其中phase2为6507帧/约130.14 s；完整目标序列为`0 -> -55 -> 38 -> 58 mm`，视觉有效率`96.74%`且无通信、视觉或Task故障。持续速度PI已生效，但`0/-55/+58 mm`首次进入`±6 mm`分别约需`10.34/3.84/2.04 s`，首次超调约`12/12/23 mm`；`+58 mm`约10.76 s才首次连续保持，杆角饱和占`2.29%`。原`120 mm/s²`同时作为破静摩擦PI输出/速度斜率和距离制动参数，使`20 mm/s`直到约`7.7 mm`误差才减速，无法覆盖视觉延迟与钢球惯性。
+- 最终决策：用户明确允许修改和烧录后，仅Task6增加独立接近目标减速度`25 mm/s²`；距离速度规划在`20 mm/s`时约从`14 mm`误差开始减速，仍在`6 mm`或越过目标时切位置PD。破静摩擦PI输出上限和速度斜率继续为`120 mm/s²`，最大球速仍为`20 mm/s`，PI/PD增益、`3 mm`安静保持和`8 mm/s`低速重入门均不变。Task2/3/4/5继续使用原最大加速度作为制动参数，行为不变。
+- 涉及文件：`APP/Algorithm/BallPositionControl/algorithm_ball_position_control.[ch]`新增独立速度目标制动参数及运行时API；`APP/Gateway/app_gateway.c`仅为Task6选择`25 mm/s²`；同步更新`config/core_config.h`、BallPositionControl测试及两份README。未修改通信协议、Task周期/优先级、G3519、MaixCAM、启停、PID或保护。
+- 验证与部署：新增测试验证`120 mm/s²`速度斜率不变、14 mm处仍可达20 mm/s、10 mm处按`25 mm/s²`降至约`14.14 mm/s`、6 mm处切回位置环，并覆盖非法参数。BallPositionControl、Task3RodSequence、BallModelInterpolator和control polarity chain严格主机测试均PASS，`git diff --check`通过。ARM Debug/Release clean-first完整链接通过，FLASH/RAM分别为`59620/21064 B`和`51016/21048 B`；Debug BIN为`59620 B`，SHA-256为`3EDD64F10C66698B3045DEB3C7DF89164E50D992D33A6228504B07ED67ADE1AF`。烧录前后COM5均为`phase0/disabled/0 mA/0 rpm`；F407 CMSIS-DAP `0416:5051`写入Debug BIN并复位，按要求未做verify/readback，未启动电机。
+- 已知限制与待确认：独立减速度尚未进行实物动态验证。由用户按原KEY复测至少`-55/+58 mm`，对比首次超调、交接冲击和首次连续保持时间；若仍超调，优先继续降低接近减速度，不削弱破静摩擦输出。
+
+## 2026-08-01：Task6速度PI持续推进到最终交接带
+
+- 修改原因：新桌面`1.csv`共8730帧、约174.6 s且全部为phase2；视觉有效率`96.9%`、无通信/视觉/Task故障。Task6在`+78 mm`曾进入约6.5 s安静保持，但受扰后末10 s平均误差约`51.6 mm`；`-55 mm`目标也曾长期停在约`-48 mm`。代码与杆角反演确认原速度PI在250 ms后只要视觉球速超过`8 mm/s`便锁存位置PD，正常起滚本身即触发退出，随后在`6～11 mm`交接滞环或远端视觉速度噪声下反复停滞。
+- 最终决策：用户明确允许后，仅Task6关闭“运动超过8 mm/s即退出速度PI”的运行时策略；新目标或低速大误差重入后，速度PI持续到误差进入`6 mm`、到达/越过目标或目标方向改变，再切位置PD与`3 mm`安静保持。`8 mm/s`仍用于同一目标受扰后、误差约`11 mm`外持续250 ms的重入判断。Task2/3/5保留原短时助启动，Task4继续关闭速度助推；Task6的`20 mm/s`、`120 mm/s²`、位置PD、直接真实VIS路径和底盘加速度前馈均不变。此前“Task6起滚后立即锁存位置PD”的方向已被本次实测否决。
+- 涉及文件：`APP/Algorithm/BallPositionControl/algorithm_ball_position_control.[ch]`新增运行时运动退出策略API与状态位；`APP/Gateway/app_gateway.c`只为Task6选择持续推进策略；同步更新BallPositionControl测试、`config/core_config.h`和两份README。未修改通信协议、Task周期/优先级、G3519、MaixCAM、PID数值、启停或保护。
+- 验证与部署：新增测试覆盖“速度超过8 mm/s仍保持ACTIVE、进入最终误差带退出、低速门仍控制重入”；BallPositionControl、Task3RodSequence、BallModelInterpolator和control polarity chain严格主机测试均PASS，`git diff --check`通过。ARM Debug/Release clean-first完整链接通过，FLASH/RAM分别为`59492/21064 B`和`50888/21040 B`，Debug BIN SHA-256为`9E8A6454C7F65BB1DC1E559C9CB0269E5A879D0768EC05B44D04D02F7E9EB00D`。烧录前后COM5均为`phase0/disabled/0 mA/0 rpm`；F407 CMSIS-DAP `0416:5051`写入Debug BIN并复位，按要求未做verify/readback，未启动电机。
+- 已知限制与待确认：持续速度PI尚未进行实物动态验证；速度PI仍使用现有PI增益、20 mm/s上限和距离制动规划。由用户按原KEY依次短测`+29/-55/+78 mm`及受扰恢复，重点确认远端不再呈现短促脉冲、约6 mm交接无明显冲击、3 mm内能安静保持；异常立即按KEY停止。
+
+## 2026-08-01：Task3末端位置闭环恢复速度PI脱困
+
+- 结论：Task3前两段开环轨迹保持不变；到达视觉`-50 mm`并进入最终位置PD后，若球低速卡在目标外，现有受限速度PI可短时重新助启动，球速起来后再交回Task3专属位置PD。Debug固件已烧录并复位，未启动电机。
+- 修改原因：用户提供的13.9 s Task3视频显示，正向段约到`+50 mm`、反向段约到`-50 mm`，说明`-0.150°`反角与`-1.00°`反向上限足够；切入位置PD后球回弹并停在约`-15～-18 mm`，相对`-50 mm`仍有约`32～35 mm`静差。用户确认末端可使用速度环克服静摩擦。
+- 最终决策：仅解除Task3的速度交接门控；首段`+0.40°/s`至`+0.60°`、越过`+50 mm`同周期切`-0.150°`、随后`-0.40°/s`累加至`-1.00°`以及`-50 mm`切位置PD均不变。进入位置PD时仍由`RearmPositionLoop()`清旧速度状态并锁存PD；之后仅当低速且误差超过约`8 mm`持续`250 ms`才重入共享速度PI，使用`30 mm/s`与`180 mm/s²`上限，达到真实`8 mm/s`运动门槛后重新锁存`Kp/Kd=0.50/0.80`位置PD。Task4/6现有门控不变。
+- 视觉基线核对：桌面上午`10:40`基线与当前Maix工程的模型、`CONF/IOU`、中轴、球位、alpha-beta/Kalman及F4发送代码一致；当前仅增加RTSP/全UI并把固定标定改成“现场标定或SKIP”，其中SKIP仍加载同一套冻结映射。视频实体位移已覆盖约`+50/-50 mm`，因此本次末端静差不归因于视觉比例，不新增Task3视觉专用分支。
+- 涉及文件：`APP/Gateway/app_gateway.c`、根`README.md`、`APP/Algorithm/BallPositionControl/README.md`、BallPositionControl主机测试及本记录。未修改Task3状态机、算法公共API、控制参数、通信协议、Task周期/优先级、BSP、引脚、电机内环或保护。
+- 验证方式和结果：BallPositionControl新增验证Task3专属PD计算入口能消费重入后的速度PI输出，并与control polarity chain、Task3RodSequence主机测试一起严格编译运行PASS；`git diff --check`通过。ARM Debug/Release clean-first完整链接通过，FLASH/RAM分别为`59412/21064 B`和`50808/21040 B`；Debug/Release BIN SHA-256分别为`0EFF5C70D4EA637FAB76B553985F03AC306E141AD8B3D11582B95E42B91164DE`和`73E2ADA31132788A9B41186D2D4E4295E1062297AF4B055C87501939C92ED909`。烧录前COM3连续确认`phase0`、命令`0 mA`、速度`0 rpm`、状态位仅motor_online；CMSIS-DAP `0416:5051`写入Debug ELF并报告`Programming Finished`后复位，按当前快速流程未做verify/readback。复位后DBG序号重置且仍保持相同安全停止状态。
+- 已知限制与待确认：软件测试和烧录成功不能证明速度助启动一定一次消除实机静差，也不能排除重新起滚后的二次回弹。由用户复测同一路径，重点确认到`-50 mm`后若停在带外，约250 ms后能否平滑再次起滚并最终进入`±3 mm`；异常立即按KEY停止。
+
+## 2026-08-01：Task6恢复连续速度PI脱困并保留直接视觉近端PD
+
+- 修改原因：桌面`1.csv`共3492帧、约69.84 s且全部为phase2；视觉有效率约96.6%，模型与视觉RMS差约1.87 mm，视觉/模型偏差不是主因。45 mm目标曾到位，但受扰跌至约`-18 mm`后连续约20 s保持`35～44 mm`误差，说明上一版纯位置PD不能持续克服静摩擦。
+- 最终决策：仅Task6在远端低速误差下恢复现有连续速度PI，不使用离散脉冲；最大目标球速`20 mm/s`、最大目标加速度`120 mm/s²`，误差进入`6 mm`后切回现有位置PD。结合共享`5 mm`交接滞环，低速受扰后约在`11 mm`外持续250 ms重入速度环；低速阈值仍为`8 mm/s`。进入近目标后保留`3 mm`安静保持。Task6继续直接使用真实VIS位置和多帧差分速度，不恢复模型位置插值；底盘加速度前馈独立保留。此前“Task6纯位置PD且完全关闭速度助推”的方向已被本次实测否决。
+- 涉及文件：`APP/Gateway/app_gateway.c`、`config/core_config.h`、根`README.md`、`APP/Algorithm/BallPositionControl/README.md`及本记录。Task2/3/4/5、协议、Task周期/优先级、G3519 KEY启停、BSP、ISR/DMA和保护均未改。
+- 验证与部署：BallPositionControl、Task3RodSequence和BallModelInterpolator严格主机测试均PASS，`git diff --check`通过；ARM Debug/Release clean-first完整链接通过，FLASH/RAM分别为`59428/21064 B`和`50856/21040 B`，Debug BIN SHA-256为`134A02D09C33D75EF72A855A2EE3856AB4811D307A9343D1836B0D07AE466534`。烧录请求到达时旧固件仍为`phase2/enabled/-82 mA`，未直接擦写；先复位并确认`phase0/disabled/0 mA/0 rpm`，再由F407 CMSIS-DAP `0416:5051`写入Debug BIN并复位，按要求未做verify/readback。复位后连续COM5遥测仍为`phase0/disabled/0 mA/0 rpm`，未启动电机。
+- 已知限制与待确认：软件测试和烧录成功不能证明Task6实物动态已改善。由用户按原KEY短测不同目标位置及到点后扰动恢复，重点观察远端是否持续平滑起滚、约6 mm处是否无冲击切回位置PD，以及3 mm内能否静止；异常立即按KEY停止。
+
+## 2026-08-01：Task3换向反角与反向上限调整
+
+- 修改原因：用户明确要求Task3正向段不变，画面到`+50 mm`时换向初值改为`-0.150°`，随后仍按`-0.40°/s`累加但最大反角收紧为`-1.00°`。
+- 最终决策：仅将`GATEWAY_TASK3_INITIAL_REVERSE_OFFSET_DEG`由`0.10`改为`0.150`、`GATEWAY_TASK3_MAX_REVERSE_OFFSET_DEG`由`2.00`改为`1.00`。正向`0 -> +0.60°`和`+0.40°/s`、反向`-0.40°/s`、画面`-50 mm`切位置PD、Task3专属`Kp/Kd=0.50/0.80`、G3519 KEY启停、其他Task及共享参数均不变。
+- 涉及文件：`config/core_config.h`、根`README.md`和本记录；未修改状态机、协议、Task周期、公共API或保护。
+- 验证与部署：Task3RodSequence严格主机测试PASS；ARM Debug clean-first完整链接通过，FLASH/RAM为`59396/21064 B`。烧录前后COM5均为命令`0 mA`、速度`0 rpm`、`phase0`、enabled未置位；F407 CMSIS-DAP `0416:5051`写入Debug BIN并复位，按要求未做verify/readback，未启动电机。
+- 已知限制与待确认：构建时工作区已并发存在独立的Task6直接视觉PD改动，因此同一镜像也包含该Task6改动；它不作用于Task3，但部署范围不只本条的两项参数。Task3动态效果尚未实测。
+
+## 2026-08-01：Task6简化为直接视觉位置PD与底盘加速度前馈
+
+- 结论：Task6已绕过速度PI助启动、安静保持和轻量杆球模型位置插值；外环只使用每个新VIS帧的实测位置、真实视觉多帧差分速度与共享位置PD，最终杆角继续叠加现有底盘加速度前馈。该并发改动随后被包含在Task3参数构建的同一Debug镜像中并已烧录。
+- 修改原因：桌面`1.csv`的Task6运行段位置平均绝对误差约`9.04 mm`，并出现与速度助启动重入吻合的大杆角脉冲；用户明确要求先简化Task6控制链。
+- 最终决策：仅在新鲜`competition_mode=6`时选择直接VIS路径并关闭速度交接；每个新实测帧后清保持候选/激活、速度助推和位置积分状态，保留最新位置与视觉速度后直接计算`Kp/Ki/Kd=0.50/0/0.80`位置PD。任意毫米目标、目标限斜率、Task6运行时水平标定、加速度选择/前馈、杆角映射、电机电流内环和全部保护不变；Task2/3/4/5路径不变。
+- 涉及文件：`APP/Gateway/app_gateway.c`、`config/core_config.h`、根`README.md`、`APP/Algorithm/BallPositionControl/README.md`及本记录。未修改公共API、通信协议、Task周期/优先级、BSP、ISR/DMA、引脚、启停或保护边界。
+- 验证方式和结果：BallPositionControl、control polarity chain、Task3RodSequence和BallModelInterpolator主机回归均PASS；`git diff --check`通过。ARM Debug/Release clean-first完整链接通过，FLASH/RAM分别为`59396/21064 B`和`50824/21040 B`；Debug/Release BIN SHA-256分别为`E3BAE5812000972D20767D7E4B0201CCAD252E1964100F56344DAE892A4FE875`和`B1E728EEE09E6F6EC600328EAF3A2594F21AEE98C842B477F2CD5449B0F2C69D`。
+- 已知限制：主机测试与完整构建不能证明纯视觉PD能在实机上克服静摩擦或稳定跟踪；F407已随Task3参数镜像写入并复位，但尚未按KEY验证Task6动态效果。
+- 待确认事项：烧录后先静止短测任意非零目标，确认Task6的`ball_hold_active`始终为0、无速度PI大杆角脉冲，再进行整圈测试；异常立即按KEY停止。
+
+## 2026-08-01：Task3仅专属PD参数回归基线并重烧双端
+
+- 修改原因：用户要求Task3回归基线，随后明确纠正为“启停逻辑不变，只改任务内参数”；此前Task3专属`Kp/Kd=0.70/1.00`不再保留。
+- 最终决策：仅将Task3返程/保持专属位置PD调为基线`Kp/Kd=0.50/0.80`。G3519 KEY第一次启动、第二次停止及F407远程Start/Stop链路不变；Task3现有`0 -> +0.60° -> -0.10°`换向、`-0.40°/s`累加至`-2.00°`、画面到`-50 mm`后切位置PD的状态机不变；其他Task和共享参数不变。曾短暂准备的“整段Task3状态机回退”方向被用户否决，且因调试器当时未枚举从未烧入硬件。
+- 涉及文件：`config/core_config.h`、根`README.md`和本记录；现有Task3单次PD覆盖API、任务状态机、启停链路、协议与保护均保留。
+- 验证与部署：Task3RodSequence和BallPositionControl严格主机测试均PASS；ARM Debug clean-first完整链接通过，FLASH/RAM为`59188/21056 B`。F407 CMSIS-DAP `0416:5051`写入Debug BIN并复位；G3519 DAPLink `0D28:0204`重新写入正确Bringup HEX `86904 B`并复位。两端均按要求未做verify/readback。F407复位后COM5为命令`0 mA`、反馈约`-1 mA`、速度`0 rpm`、`phase0`、enabled未置位。
+- 已知限制与待确认：参数和烧录成功不能替代Task3动态验证；由用户使用原有G3519 KEY启停短测返程超调与保持误差。
+
+## 2026-08-01：Task3换向初始反角缩小
+
+- 修改原因：用户反馈Task3在画面到`+50 mm`时立即给出的`-0.20°`反角过大，要求缩小。
+- 最终决策：仅将Task3换向初始反角由`-0.20°`缩小为`-0.10°`；正向`+0.40°/s`至`+0.60°`、反向`-0.40°/s`累加至`-2.00°`、`-50 mm`切位置PD以及其他模式和通用限幅均不变。
+- 涉及文件：`config/core_config.h`、根`README.md`和本记录；未修改状态机、Task周期、通信、角度PID、位置PD或保护逻辑。
+- 验证方式和结果：Task3RodSequence严格主机测试PASS；ARM Debug clean-first完整链接通过，FLASH/RAM为`59188/21056 B`。F407调试器重新连接后，CMSIS-DAP `0416:5051`向STM32F407写入最新Debug BIN并复位运行；OpenOCD报告写入`65536 B`（含Flash写入对齐），按要求未做verify/readback。复位后COM3 DBG为命令`0 mA`、反馈约`-1 mA`、速度`0 rpm`、`phase0`、状态仅motor_online且enabled未置位；未替用户启动电机。
+- 已知限制：新参数尚未进行Task3动态实物验证。
+- 待确认事项：由用户通过G3519 KEY短测换向冲击；若仍偏大再继续缩小初始反角，不改反向累加斜率。
+
+## 2026-08-01：Task3越点回拉的专属PD调整
+
+- 修改原因：用户反馈Task3严重越过目标后才返回，并要求增加Kp和Kd；后续补充该现象也可能来自响应偏慢。
+- 最终决策：仅Task3位置回程/保持使用`Kp=0.70 1/s^2`、`Kd=1.00 1/s`，共享Task2/4/5/6继续保持`0.50/0.80`；Ki、开环抬杆序列和电机角度电流环不变。此前拟定的`0.65/1.20`因阻尼可能过重、进一步拖慢响应而被取消，未构建或烧录。
+- 涉及文件：`APP/Algorithm/BallPositionControl/algorithm_ball_position_control.[ch]`、`APP/Gateway/app_gateway.c`、`config/core_config.h`、对应主机测试及本记录。新增单次PD计算覆盖API，不改写共享运行时增益或控制器状态。
+- 验证与部署：BallPositionControl以`-Wall -Wextra -Wpedantic -Werror`严格主机测试PASS；F407 Debug clean-first完整链接通过，FLASH/RAM为`59188/21056 B`；`git diff --check`通过。用户确认电机失能并授权后，CMSIS-DAP `0416:5051`向STM32F407写入最新Debug BIN并复位运行；OpenOCD报告写入`65536 B`（含Flash写入对齐），按要求未做verify/readback。复位后COM3连续DBG为命令`0 mA`、反馈约`-1~-2 mA`、速度`0 rpm`、`phase0`、状态仅motor_online且enabled未置位；未按KEY、未启动电机。
+- 已知限制与待确认：越点原因仍需动态数据区分“P不足”与视觉速度延迟；烧录后应只短测Task3，比较首次越点距离和回拉次数，再决定是否继续加P或改视觉测速延迟。
+
+## 2026-08-01：Task2整圈提速且停车点保持
+
+- 修改原因：用户纠正目标为第二问提速，并明确要求停车点不变。
+- 最终决策：仅将G3519 Task2直线速度由`500`提高到`550 mm/s`、弯道速度由`380`提高到`420 mm/s`；终点前`220 mm/s`降速、横杆确认后`180 mm`停车余量、目标距离和停车状态机全部不变。Task1/3/4/5/6不变。
+- 涉及文件：G3519 `config/core_config.h`及本记录；未修改F407、MaixCAM、协议、Task周期或保护。
+- 验证与部署：`git diff --check`通过；正确的`g3519-bringup-debug`增量构建通过，FLASH/RAM为`86904/19480 B`。用户确认电机失能并授权后，DAPLink `0D28:0204`写入正确的`MSPM0G3519-Bringup/Debug/MSPM0G3519.hex`共`86904 B`并复位运行；按要求未做verify/readback，未启动底盘或滚球电机。
+- 已知限制与待确认：提速后的循线裕量和整圈时间尚未实车验证；需用户明确授权后烧录3519，再短测Task2停车点。
+
+## 2026-08-01：Task4 A→B规划前馈独立化并烧录双端
+
+- 修改原因：桌面`2ti.csv`显示Task4运行期间视觉位置PD持续输出，但底盘三状态融合的延迟/残余以及静摩擦速度助推误触发覆盖了平滑位置环；助推退出时QD目标出现714～825 count单步跳变。
+- 最终决策：仅Task4禁用静摩擦速度助推，直接使用G3519 jerk规划加速度，不再采用BMI088/Kalman或轮速加速度残余；Task4底盘前馈增益独立设为`0.40`。Task1/2/3/5/6的控制参数和既有路径不变。G3519将Task4与Task5/6纵向配置拆为两组，首轮数值均保持`100/100/400/0.15`。
+- 涉及文件：F407 `APP/Gateway/app_gateway.c`、`config/core_config.h`及本记录；G3519 `config/core_config.h`、`Task/task_bringup_chassis.c`和速度规划测试。未修改MaixCAM、通信协议、Task周期、启停或保护边界。
+- 验证与部署：F407 Debug clean-first链接通过，FLASH/RAM为`58836/21040 B`、BIN SHA-256 `5F160F576A28AD88FD5DD49B841110469EF3B53B943DB13A9FF2448C4F165A04`。G3519首次误用通用`g3519-debug`产物并写入，该18.8 KB镜像不含竞赛Bring-up Task，已由用户指出并否决；随后改用正确的`g3519-bringup-debug`完整构建，FLASH/RAM为`86904/19480 B`、BIN SHA-256 `DA83957CCB1AF1155860B3A80FE4920133A1BD72DE294855F4A663B8D34622DB`，DAPLink `0D28:0204`写入86904 B并复位。F407烧录前后DBG均为phase0、命令0 mA、速度0、电机未使能。两端均按用户要求未做verify/readback。
+- 已知限制与待确认：构建和烧录不能代替动态AB验收；下一次只运行Task4，比较起步、巡航和制动段球位峰值，并确认不再出现速度助推式目标阶跃。异常由用户按KEY停止。
+
+## 2026-08-01：Task3专属位置Kp提高并同步烧录双端
+
+- 修改原因：用户要求加大Task3的小球位置环Kp并烧录G3519；代码确认该位置环实际运行在F407，G3519只发送Task3启停/模式状态。
+- 最终决策：Task3位置返程/保持阶段使用专属`Kp=0.60 1/s^2`，共享位置环继续保持`0.50 1/s^2`；Task3开环抬杆段、`Ki=0`、`Kd=0.80 1/s`、电机角度电流环、其他赛题及全部启停/保护逻辑不变。采用单次计算增益覆盖，不改写共享运行时增益。
+- 涉及文件：`APP/Algorithm/BallPositionControl/algorithm_ball_position_control.[ch]`、`APP/Gateway/app_gateway.c`、`config/core_config.h`、`tests/ball_position_control/test_algorithm_ball_position_control.c`和本记录；G3519本轮不改控制参数，仅构建并部署当前`car`分支的Bring-up产品源码。
+- 验证方式和结果：BallPositionControl严格主机测试PASS，覆盖Task3使用`0.60`后杆角P项增大、共享`0.50`及普通计算结果不变；`git diff --check`通过。F407 Debug链接为FLASH/RAM `58700/21048 B`，BIN为`58708 B`、SHA-256 `BB9F4667E5D97CDB5D3E07DB7AE4D33D5F22456872790702EB13DBEEDAF85CE2`。G3519 Bring-up Debug链接为FLASH/RAM `86872/19480 B`，BIN为`86872 B`、SHA-256 `AE58666464A28FD21D7BDA3CD3E1A97B712D48F0F8C9E42442AEB81573E6C460`。用户确认电机失能后，F407 CMSIS-DAP `0416:5051`与G3519 DAPLink `0D28:0204`均完成写入并复位；按要求未做verify/readback，未按KEY。
+- 已知限制：构建、单测与烧录成功不能代替Task3动态响应验证；本轮未改变G3519车辆循迹`Kp=0.65`，该参数与滚球位置环无关。
+- 待确认事项：由用户按G3519 KEY短测Task3，观察返程响应、过冲和停车误差；若出现振荡，优先回退Task3专属Kp，不影响其他赛题。
+
 ## 2026-08-01：最新整圈弧线速度阻尼小调
 
 - 修改原因：桌面11:04版`1.csv`共1920帧、38.4秒，为一整圈而非仅第一弧线。第一弧线CH24为`-0.724..+0.332 deg`，进入第二直线后继续达到`-0.864 deg`；同期弧线CH23底盘补偿约`0.011 deg RMS`、无杆角限幅，表明主要是滚球趋势制动不足，不是BMI088/规划补偿压过位置环。
@@ -2489,3 +2617,39 @@
 - 验证方式和结果：34列数据离线回放预计第二半圆总杆角RMS由`0.164 deg`降至约`0.119 deg`、正向峰值由`+0.443 deg`降至约`+0.298 deg`；新增正负等幅规划前馈对称性断言，control polarity chain严格主机测试PASS；ARM Debug clean-first完整链接通过，FLASH/RAM为`57204/20992 B`，BIN SHA-256为`4F442AEA5CC6432422AE79F833AE432C005D87AE53FE46A864235F2B80F7F314`，`git diff --check`通过。烧录前COM3连续确认`phase0/disabled/0 mA/0 rpm`；OpenOCD锁定F407 CMSIS-DAP `0416:5051`写入Debug ELF，报告`Programming Finished`并复位，按要求未做verify/readback。复位后COM3仍连续为`phase0/disabled/0 mA/0 rpm`。
 - 已知限制：VOFA仍没有同步真实球位、目标和速度辅助状态，离线回放和烧录成功不能宣称第二半圆实物已经通过；本轮尚未动态验证。
 - 待确认事项：由用户按KEY复测。重点看第二半圆刹车段CH23是否不超过约`+0.15 deg`、CH24是否不再与位置环对抗，以及停车后CH22/CH23能否归零。
+
+## 2026-08-01：KEY2/PA1接通Task6运行时水平标定
+
+- 结论：新增板载KEY2/PA1低有效输入，仅在PeerLink题号新鲜且为Task6时推进现有运行时水平标定；KEY1/PA0高有效继续专门负责滚球电机Enable/Disable，KEY3/PA4保持未配置。Debug固件已烧录并复位，未按任何KEY。
+- 修改原因：Task6零电流手调、捕获QD4310绝对raw、恢复视觉闭环的三阶段状态机已经存在，但没有Task调用入口；用户纠正PA0已有Enable/Disable职责，并指定使用KEY2/PA1作为独立标定键。
+- 最终决策：PA1配置为GPIO输入上拉，稳定低电平30 ms只触发一次；PA1在当前BSP资源中不与USART1 PA9/PA10、USART2 PA2/PA3、SPI1 PA4..PA7、CAN1 PB8/PB9或USART3 PB10/PB11冲突。KEY2在本周期PeerLink解析后、远端命令消费前处理，因此使用最新题号且同周期BST仍可最终停止。非Task6、题号失鲜或电机闭环未启动时KEY2不改变电机状态；Task6且KEY1已启动闭环后，三次KEY2依次持续发送0 A、捕获当时raw、以该raw为运行期水平零点恢复球环。停止/故障清除运行期零点。
+- 涉及文件：`BSP/bsp_f407.c`、`BSP/bsp_key.h`、`Task/task_app.c`、`APP/Gateway/app_gateway.[ch]`、`config/core_config.h`、根README和本记录。没有新增GPIO中断、Task、动态内存、协议字段或周期变化；工作区原有PeerLink/Task6未提交改动不归属于本条。
+- 验证方式和结果：静态资源搜索确认PA1在当前工程未被占用；ARM Debug/Release clean-first完整链接通过，FLASH/RAM分别为`58628/21040 B`和`50232/21024 B`；`git diff --check`通过。烧录前COM3连续DBG为`phase0`、命令`0 mA`、速度`0 rpm`、状态位仅motor_online；锁定CMSIS-DAP `0416:5051`写入Debug ELF，OpenOCD报告`Programming Finished`并复位，按要求未verify/readback。
+- 已知限制与待确认：尚未物理按压KEY2验证PA1低有效接线和三阶段动作。Task6标定中途若题号失鲜，固件继续保持零电流标定态，直到重新进入Task6完成后续KEY2步骤，或由KEY1/BST停止并清除；本轮未新增自动取消行为。首次实测应先KEY1启动，随后逐次按KEY2并观察0 A、捕获raw和视觉闭环恢复。
+
+## 2026-08-01：Task3返程位置Kp独立增大并双端烧录
+
+- 结论：Task3返程球位置PD的Kp由共享基线`0.50 s^-2`独立提高到`0.60 s^-2`；其他任务、Task3开环抬杆段、球速Kd和杆角电流环均保持不变。F407 Debug与G3519 Bring-up Debug产品镜像均已烧录并复位运行。
+- 修改原因：用户要求加大Task3的位置环Kp，同时不能影响其他赛题。Task3球位置环实际位于F407；G3519只发送Task3任务状态，不持有该球位置Kp。
+- 最终决策：BallPositionControl新增单次位置P增益覆盖计算API，不修改控制器保存的共享增益或状态；仅Task3返程位置闭环调用该API。未修改Task3发车序列、通信协议、Task周期、保护或电机启停逻辑。
+- 涉及文件：`APP/Algorithm/BallPositionControl/algorithm_ball_position_control.[ch]`、`APP/Gateway/app_gateway.c`、`config/core_config.h`和本记录；G3519本轮未改源码，仅重新部署当前`car`分支Bring-up产品镜像。
+- 验证方式和结果：F407 Debug完整链接通过，FLASH/RAM为`58708/21040 B`；用户确认电机已失能后，CMSIS-DAP `0416:5051`写入F407 Debug ELF并报告`Programming Finished`。DAPLink `0D28:0204`向G3519写入Bring-up Debug HEX，OpenOCD报告写入`86872 B`。两端均复位运行，按用户要求未做verify/readback。
+- 已知限制与待确认：尚未动态验证Kp提高后的Task3返程响应；需由用户按KEY实测是否缩短追点时间且未增加超调。烧录期间未替用户启动电机。
+
+## 2026-08-01：Task3换向小反倾角、反向累加并烧录
+
+- 结论：Task3正向发车保持从`0 deg`以`+0.40 deg/s`累加并限于`+0.60 deg`；画面越过`+50 mm`或返程目标到达时，同周期撤销正倾角、立即给`-0.20 deg`，随后以`-0.40 deg/s`累加并限于`-2.00 deg`，画面到另一侧`-50 mm`后切入位置PD保持。Debug固件已写入F407、完整校验并复位运行。
+- 修改原因：用户取消超过现有正向上限的`+1 deg`初始倾角方案，要求正向部分不变，只在反方向增加小倾角并继续累加。
+- 最终决策：Task3序列扩展为`WAIT_ORIGIN -> RAISE -> REVERSE_RAISE -> POSITION_RETURN`。换向先将原正向开环量替换为`-0.20 deg`，不是在`+0.60 deg`上叠加；反向到点后清开环量并复用现有Task3专属`Kp=0.60`、共享`Ki=0`和`Kd=0.80`位置闭环。其他赛题、`+0.75 deg`通用正向限幅、通信、Task周期、电机角环及保护不变。
+- 涉及文件：`APP/Gateway/task3_rod_sequence.[ch]`、`APP/Gateway/app_gateway.c`、`config/core_config.h`、Task3严格主机测试、根README及本记录。
+- 验证方式和结果：Task3RodSequence严格主机测试PASS；ARM Debug/Release完整链接通过，FLASH/RAM分别为`59156/21056 B`和`50632/21040 B`；Debug/Release BIN SHA-256分别为`219823435C55725392D12A46FAE73FF2DA7DED4D14B7099316FBC996A34FE772`和`114BDCDB2FDE9A1CC9166869FF04A147825D6C3C202CA26F0AA6F4B218BA028D`；`git diff --check`通过。OpenOCD锁定F407 CMSIS-DAP，识别STM32F407 512 KiB Flash，报告`Programming Finished`、`Verified OK`并复位运行；未操作G3519探针，未替用户启动电机。
+- 已知限制与待确认：烧录校验不能代替带球动态验证。首次仅短测Task3，确认`+50 mm`换向当帧杆角由正值跳到约`-0.20 deg`、随后负向斜坡连续、到`-50 mm`后切位置闭环；异常立即按KEY停止。
+
+## 2026-08-01：Task6一次性固定发车角度下限并烧录
+
+- 结论：Task6每次新速度PI旅程增加误差方向`0.50 deg`的一次性发车角度下限；真实视觉球速首次超过`8 mm/s`后本旅程永久撤销，途中减速不会再次触发。Debug固件已写入F407并复位，未启动电机。
+- 修改原因：桌面最新`1.csv`显示向负方向约需`+0.49 deg`才起滚、等待约`0.86 s`，向正方向约需`-0.54 deg`才起滚、等待约`0.42 s`；原速度PI从小输出缓慢增长，静摩擦阶段响应过慢。
+- 最终决策：发车补偿是角度下限，不与速度PI重复相加；PI输出超过下限时仍由PI接管。新目标或低速停滞`250 ms`重新进入速度PI时才重新武装。保留Task6最大球速`20 mm/s`、速度斜率`120 mm/s2`、接近减速度`25 mm/s2`、`6 mm`切位置PD和`3 mm`安静保持；其他Task、PID、协议、启停和保护不变。
+- 涉及文件：`APP/Algorithm/BallPositionControl/algorithm_ball_position_control.[ch]`、`APP/Gateway/app_gateway.c`、`config/core_config.h`、滚球控制测试、根README、算法README和本记录。
+- 验证方式和结果：BallPositionControl、Task3RodSequence、BallModelInterpolator及control polarity chain严格主机测试均PASS；ARM Debug/Release clean-first完整链接通过，FLASH/RAM分别为`59984/21072 B`和`51364/21048 B`；`git diff --check`通过。烧录前旧固件仍为`phase2/enabled/-82 mA`，先复位并确认`phase0/disabled/0 mA/0 rpm`；随后锁定F407 CMSIS-DAP `0416:5051`执行Flash擦写、写入Debug BIN并复位，命令成功退出，按要求未做verify/readback。复位后连续10帧仍为`phase0/disabled/0 mA/0 rpm`。BIN长度`59984 B`，SHA-256为`A5CB11513C5F3FC9A784192E2D613F48DBAB11BAA45EE4146BE7081A16EDADF1`。
+- 已知限制与待确认：固定下限来自单次实测且尚未动态验证；需由用户按KEY运行Task6，观察两方向是否立即起滚、首次超过`8 mm/s`后下限是否撤销，以及到点时是否仍能平滑切位置PD并进入安静保持。

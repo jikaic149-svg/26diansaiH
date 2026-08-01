@@ -544,8 +544,12 @@ static void test_ball_stop_pending_cleared_on_session_restart(void)
 static Device_PeerLink_DebugTelemetry make_debug_telemetry(void)
 {
     return (Device_PeerLink_DebugTelemetry){
-        .chassis_acceleration_mm_s2 = -1234,
-        .chassis_compensation_mdeg = -321,
+        .ball_visual_position_0p1mm = -500,
+        .ball_estimated_position_0p1mm = -487,
+        .ball_target_command_0p1mm = -500,
+        .ball_active_target_0p1mm = -495,
+        .ball_velocity_0p1mm_s = 123,
+        .ball_measurement_age_ms = 37U,
         .rod_command_mdeg = 456,
         .motor_target_raw = UINT16_C(54329),
         .motor_feedback_raw = UINT16_C(54379),
@@ -575,9 +579,9 @@ static void test_debug_payload_and_busy_sequence(void)
     assert(memcmp(packet.type, "DBG", 3U) == 0);
     assert(packet.sequence == 0U);
     assert(packet.payload_length ==
-        sizeof("1,-1234,-321,456,54329,54379,-17,18,-125,2,511") - 1U);
+        sizeof("1,-500,-487,-500,-495,123,37,456,54329,54379,-17,18,-125,2,511") - 1U);
     assert(memcmp(packet.payload,
-        "1,-1234,-321,456,54329,54379,-17,18,-125,2,511",
+        "1,-500,-487,-500,-495,123,37,456,54329,54379,-17,18,-125,2,511",
         packet.payload_length) == 0);
 
     s_tx_busy = true;
@@ -597,8 +601,12 @@ static void test_debug_boundaries_and_rejections(void)
     Device_PeerLink link;
     const Device_PeerLink_Config config = make_config();
     Device_PeerLink_DebugTelemetry debug = {
-        .chassis_acceleration_mm_s2 = -60000,
-        .chassis_compensation_mdeg = -60000,
+        .ball_visual_position_0p1mm = -60000,
+        .ball_estimated_position_0p1mm = -60000,
+        .ball_target_command_0p1mm = -60000,
+        .ball_active_target_0p1mm = -60000,
+        .ball_velocity_0p1mm_s = -60000,
+        .ball_measurement_age_ms = UINT16_MAX,
         .rod_command_mdeg = -60000,
         .motor_target_raw = UINT16_MAX,
         .motor_feedback_raw = UINT16_MAX,
@@ -616,10 +624,10 @@ static void test_debug_boundaries_and_rejections(void)
     packet = parse_last_frame();
     assert(packet.payload_length < DEVICE_PEER_LINK_TX_PAYLOAD_CAPACITY);
     assert(memcmp(packet.payload,
-        "1,-60000,-60000,-60000,65535,65535,-2000,-10000,-100000,2,511",
+        "1,-60000,-60000,-60000,-60000,-60000,65535,-60000,65535,65535,-2000,-10000,-100000,2,511",
         packet.payload_length) == 0);
 
-    debug.chassis_acceleration_mm_s2 = 60001;
+    debug.ball_visual_position_0p1mm = 60001;
     assert(!Device_PeerLink_SendDebugTelemetry(&link, &debug));
     debug = make_debug_telemetry();
     debug.motor_command_current_ma = 2001;

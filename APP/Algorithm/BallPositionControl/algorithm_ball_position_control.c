@@ -120,6 +120,7 @@ static void reset_speed_handoff_trip(
     Algorithm_BallPositionControl *controller)
 {
     clear_speed_handoff_output(controller);
+    controller->speed_launch_minimum_active = false;
     controller->stiction_state_started_ms = 0U;
     controller->stiction_error_direction = 0;
     controller->stiction_state = ALGORITHM_BALL_STICTION_IDLE;
@@ -129,6 +130,7 @@ static void latch_position_loop(
     Algorithm_BallPositionControl *controller)
 {
     clear_speed_handoff_output(controller);
+    controller->speed_launch_minimum_active = false;
     controller->stiction_state_started_ms = 0U;
     controller->stiction_error_direction = 0;
     controller->stiction_state = ALGORITHM_BALL_STICTION_POSITION_LATCHED;
@@ -154,6 +156,8 @@ static void begin_speed_handoff(
     controller->stiction_state = ALGORITHM_BALL_STICTION_ACTIVE;
     controller->stiction_state_started_ms = sample_ms;
     controller->stiction_error_direction = direction;
+    controller->speed_launch_minimum_active =
+        controller->speed_launch_minimum_angle_deg > 0.0F;
 }
 
 static void update_speed_handoff(
@@ -223,12 +227,18 @@ static void update_speed_handoff(
         /* Speed PI is launch assistance only, but keep it long enough to
          * produce useful motion. After the minimum assist time, real motion
          * above the stiction threshold hands tracking to position PD. */
-        if ((!handoff_velocity_qualifies && minimum_assist_time_elapsed) ||
+        if ((controller->speed_handoff_motion_exit_enabled &&
+             !handoff_velocity_qualifies &&
+             minimum_assist_time_elapsed) ||
             (direction == 0) ||
             (direction != controller->stiction_error_direction) ||
             (absolute_error_mm <= exit_error_mm)) {
             latch_position_loop(controller);
             return;
+        }
+        if (controller->speed_launch_minimum_active &&
+            !handoff_velocity_qualifies) {
+            controller->speed_launch_minimum_active = false;
         }
     }
     else if ((absolute_error_mm > entry_error_mm) && (direction != 0)) {
@@ -247,7 +257,8 @@ static void update_speed_handoff(
             0.0F, absolute_error_mm - exit_error_mm);
         float planned_target_velocity_mm_s;
         float target_speed_magnitude_mm_s = sqrtf(
-            2.0F * controller->config.maximum_target_acceleration_mm_s2 *
+            2.0F *
+            controller->speed_target_braking_acceleration_mm_s2 *
             braking_distance_mm);
 
         if (target_speed_magnitude_mm_s >
@@ -403,7 +414,11 @@ bool Algorithm_BallPositionControl_Init(
     controller->config = *config;
     controller->target_position_mm = config->target_position_mm;
     controller->target_command_mm = config->target_position_mm;
+    controller->speed_target_braking_acceleration_mm_s2 =
+        config->maximum_target_acceleration_mm_s2;
+    controller->speed_launch_minimum_angle_deg = 0.0F;
     controller->speed_handoff_enabled = true;
+    controller->speed_handoff_motion_exit_enabled = true;
     reset_speed_handoff_trip(controller);
     controller->initialized = true;
     return true;
@@ -576,6 +591,27 @@ bool Algorithm_BallPositionControl_SetSpeedHandoffEnabled(
     return true;
 }
 
+bool Algorithm_BallPositionControl_SetSpeedHandoffMotionExitEnabled(
+    Algorithm_BallPositionControl *controller,
+    bool enabled)
+{
+    if ((controller == NULL) || !controller->initialized) {
+        return false;
+    }
+    if (controller->speed_handoff_motion_exit_enabled == enabled) {
+        return true;
+    }
+    controller->speed_handoff_motion_exit_enabled = enabled;
+    controller->integral_acceleration_mm_s2 = 0.0F;
+    if (controller->speed_handoff_enabled) {
+        reset_speed_handoff_trip(controller);
+    }
+    else {
+        latch_position_loop(controller);
+    }
+    return true;
+}
+
 bool Algorithm_BallPositionControl_RearmPositionLoop(
     Algorithm_BallPositionControl *controller)
 {
@@ -613,6 +649,50 @@ bool Algorithm_BallPositionControl_SetMotionLimits(
         maximum_target_velocity_mm_s;
     controller->config.maximum_target_acceleration_mm_s2 =
         maximum_target_acceleration_mm_s2;
+    controller->speed_target_braking_acceleration_mm_s2 =
+        maximum_target_acceleration_mm_s2;
+    controller->hold_active = false;
+    reset_hold_exit(controller);
+    reset_speed_loop(controller);
+    reset_speed_handoff_trip(controller);
+    return true;
+}
+
+bool Algorithm_BallPositionControl_SetSpeedTargetBrakingAcceleration(
+    Algorithm_BallPositionControl *controller,
+    float braking_acceleration_mm_s2)
+{
+    if ((controller == NULL) || !controller->initialized ||
+        !isfinite(braking_acceleration_mm_s2) ||
+        (braking_acceleration_mm_s2 <= 0.0F)) {
+        return false;
+    }
+    if (controller->speed_target_braking_acceleration_mm_s2 ==
+            braking_acceleration_mm_s2) {
+        return true;
+    }
+    controller->speed_target_braking_acceleration_mm_s2 =
+        braking_acceleration_mm_s2;
+    controller->hold_active = false;
+    reset_hold_exit(controller);
+    reset_speed_loop(controller);
+    reset_speed_handoff_trip(controller);
+    return true;
+}
+
+bool Algorithm_BallPositionControl_SetSpeedLaunchMinimumAngleDeg(
+    Algorithm_BallPositionControl *controller,
+    float minimum_angle_deg)
+{
+    if ((controller == NULL) || !controller->initialized ||
+        !isfinite(minimum_angle_deg) || (minimum_angle_deg < 0.0F) ||
+        (minimum_angle_deg > controller->config.rod_angle_limit_deg)) {
+        return false;
+    }
+    if (controller->speed_launch_minimum_angle_deg == minimum_angle_deg) {
+        return true;
+    }
+    controller->speed_launch_minimum_angle_deg = minimum_angle_deg;
     controller->hold_active = false;
     reset_hold_exit(controller);
     reset_speed_loop(controller);
@@ -860,8 +940,10 @@ void Algorithm_BallPositionControl_ResetMeasurement(
     reset_hold_exit(controller);
 }
 
-bool Algorithm_BallPositionControl_ComputeRodAngleDeg(
+bool Algorithm_BallPositionControl_ComputeRodAngleWithPdGainsDeg(
     Algorithm_BallPositionControl *controller,
+    float position_gain_per_s2,
+    float velocity_gain_per_s,
     float *rod_angle_deg)
 {
     float measured_velocity;
@@ -871,6 +953,7 @@ bool Algorithm_BallPositionControl_ComputeRodAngleDeg(
     float desired_acceleration;
     float assist_acceleration_limit;
     float assist_ramp_fraction;
+    float launch_minimum_acceleration;
     float normalized;
     float angle;
 
@@ -878,6 +961,10 @@ bool Algorithm_BallPositionControl_ComputeRodAngleDeg(
         *rod_angle_deg = 0.0F;
     }
     if ((controller == NULL) || !controller->initialized ||
+        !isfinite(position_gain_per_s2) ||
+        !isfinite(velocity_gain_per_s) ||
+        (position_gain_per_s2 < 0.0F) ||
+        (velocity_gain_per_s <= 0.0F) ||
         !controller->measurement_seen || (rod_angle_deg == NULL)) {
         return false;
     }
@@ -891,14 +978,14 @@ bool Algorithm_BallPositionControl_ComputeRodAngleDeg(
     }
     measured_velocity = controller->velocity_valid ?
         controller->velocity_mm_s : 0.0F;
-    velocity_gain = controller->config.velocity_gain_per_s;
+    velocity_gain = velocity_gain_per_s;
     if ((controller->config.near_target_error_mm > 0.0F) &&
         (fabsf(controller->target_position_mm - controller->position_mm) <=
             controller->config.near_target_error_mm)) {
         velocity_gain *=
             controller->config.near_target_velocity_gain_multiplier;
     }
-    position_acceleration = controller->config.position_gain_per_s2 *
+    position_acceleration = position_gain_per_s2 *
         (controller->target_position_mm - controller->position_mm) +
         controller->integral_acceleration_mm_s2 -
         velocity_gain * measured_velocity;
@@ -923,10 +1010,29 @@ bool Algorithm_BallPositionControl_ComputeRodAngleDeg(
             controller->
                 stiction_assist_velocity_integral_acceleration_mm_s2,
             assist_acceleration_limit);
+        if (controller->speed_launch_minimum_active &&
+            (controller->stiction_error_direction != 0)) {
+            launch_minimum_acceleration =
+                sinf(controller->speed_launch_minimum_angle_deg /
+                    BALL_POSITION_CONTROL_RAD_TO_DEG) *
+                controller->config.gravity_mm_s2 /
+                (1.0F + controller->config.inertia_ratio);
+            launch_minimum_acceleration = fminf(
+                launch_minimum_acceleration,
+                controller->config.maximum_target_acceleration_mm_s2);
+            if (controller->stiction_error_direction > 0) {
+                speed_acceleration = fmaxf(
+                    speed_acceleration, launch_minimum_acceleration);
+            }
+            else {
+                speed_acceleration = fminf(
+                    speed_acceleration, -launch_minimum_acceleration);
+            }
+        }
         controller->stiction_assist_acceleration_mm_s2 =
             speed_acceleration;
-        /* Speed control exclusively owns the distant trip. No position-loop
-         * blend and no discrete stiction kick are added. */
+        /* Speed control exclusively owns the distant trip. The optional
+         * one-trip launch floor is not an additive pulse. */
         desired_acceleration = speed_acceleration;
     }
     if (!isfinite(desired_acceleration)) {
@@ -946,4 +1052,39 @@ bool Algorithm_BallPositionControl_ComputeRodAngleDeg(
     *rod_angle_deg = limit_symmetric(
         angle, controller->config.rod_angle_limit_deg);
     return true;
+}
+
+bool Algorithm_BallPositionControl_ComputeRodAngleWithPositionGainDeg(
+    Algorithm_BallPositionControl *controller,
+    float position_gain_per_s2,
+    float *rod_angle_deg)
+{
+    if ((controller == NULL) || !controller->initialized) {
+        if (rod_angle_deg != NULL) {
+            *rod_angle_deg = 0.0F;
+        }
+        return false;
+    }
+    return Algorithm_BallPositionControl_ComputeRodAngleWithPdGainsDeg(
+        controller,
+        position_gain_per_s2,
+        controller->config.velocity_gain_per_s,
+        rod_angle_deg);
+}
+
+bool Algorithm_BallPositionControl_ComputeRodAngleDeg(
+    Algorithm_BallPositionControl *controller,
+    float *rod_angle_deg)
+{
+    if ((controller == NULL) || !controller->initialized) {
+        if (rod_angle_deg != NULL) {
+            *rod_angle_deg = 0.0F;
+        }
+        return false;
+    }
+    return Algorithm_BallPositionControl_ComputeRodAngleWithPdGainsDeg(
+        controller,
+        controller->config.position_gain_per_s2,
+        controller->config.velocity_gain_per_s,
+        rod_angle_deg);
 }

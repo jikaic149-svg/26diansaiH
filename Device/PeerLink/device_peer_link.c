@@ -828,9 +828,15 @@ bool Device_PeerLink_SendDebugTelemetry(
 
     if ((link == NULL) || (telemetry == NULL) || !link->initialized ||
         !absolute_i32_within(
-            telemetry->chassis_acceleration_mm_s2, INT32_C(60000)) ||
+            telemetry->ball_visual_position_0p1mm, INT32_C(60000)) ||
         !absolute_i32_within(
-            telemetry->chassis_compensation_mdeg, INT32_C(60000)) ||
+            telemetry->ball_estimated_position_0p1mm, INT32_C(60000)) ||
+        !absolute_i32_within(
+            telemetry->ball_target_command_0p1mm, INT32_C(60000)) ||
+        !absolute_i32_within(
+            telemetry->ball_active_target_0p1mm, INT32_C(60000)) ||
+        !absolute_i32_within(
+            telemetry->ball_velocity_0p1mm_s, INT32_C(60000)) ||
         !absolute_i32_within(
             telemetry->rod_command_mdeg, INT32_C(60000)) ||
         !absolute_i32_within(
@@ -875,9 +881,17 @@ bool Device_PeerLink_SendDebugTelemetry(
 
     APPEND_DEBUG_U32(link->config.local_node_id);
     APPEND_DEBUG_SEPARATOR();
-    APPEND_DEBUG_I32(telemetry->chassis_acceleration_mm_s2);
+    APPEND_DEBUG_I32(telemetry->ball_visual_position_0p1mm);
     APPEND_DEBUG_SEPARATOR();
-    APPEND_DEBUG_I32(telemetry->chassis_compensation_mdeg);
+    APPEND_DEBUG_I32(telemetry->ball_estimated_position_0p1mm);
+    APPEND_DEBUG_SEPARATOR();
+    APPEND_DEBUG_I32(telemetry->ball_target_command_0p1mm);
+    APPEND_DEBUG_SEPARATOR();
+    APPEND_DEBUG_I32(telemetry->ball_active_target_0p1mm);
+    APPEND_DEBUG_SEPARATOR();
+    APPEND_DEBUG_I32(telemetry->ball_velocity_0p1mm_s);
+    APPEND_DEBUG_SEPARATOR();
+    APPEND_DEBUG_U32(telemetry->ball_measurement_age_ms);
     APPEND_DEBUG_SEPARATOR();
     APPEND_DEBUG_I32(telemetry->rod_command_mdeg);
     APPEND_DEBUG_SEPARATOR();

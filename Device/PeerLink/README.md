@@ -31,19 +31,21 @@ QD4310 Enable/Disable。十一字段尾部规划加速度是车头方向为正�
 M2、旧格式或规划过期时复位融合器并继续使用F407本地BMI088。
 
 ```text
-DBG=<node_id>,<a_selected_mm_s2>,<theta_chassis_mdeg>,<theta_cmd_mdeg>,
-    <target_raw>,<feedback_raw>,<command_current_ma>,<feedback_current_ma>,
-    <speed_centi_rpm>,<phase>,<status_flags>
+DBG=<node_id>,<visual_position_0p1mm>,<estimated_position_0p1mm>,
+    <target_command_0p1mm>,<active_target_0p1mm>,<velocity_0p1mm_s>,
+    <measurement_age_ms>,<theta_cmd_mdeg>,<target_raw>,<feedback_raw>,
+    <command_current_ma>,<feedback_current_ma>,<speed_centi_rpm>,
+    <phase>,<status_flags>
 ```
 
 `DBG`每20 ms在`APP_Gateway_Step()`之后尝试一次，使用独立16位序号。`phase`为
 0=STOPPED、1=ZEROING、2=ACCELERATION_COMPENSATION；`status_flags`从bit0依次表示
-motor_online、motor_enabled、acceleration_valid、rod_saturated、raw_blocked、
+motor_online、motor_enabled、ball_hold_active、rod_saturated、raw_blocked、
 ball_measurement_valid、peer_fault、vision_fault、task_fault。数值均为ASCII定点单位，
 不发送原始C结构体。UART BUSY时整帧丢弃、返回非故障且不推进序号；无ACK、无重发。
 该帧只读，不作为任何控制输入。F407发送成功只表示整帧进入本地TX队列，不证明G3519
 已经接收、转发或显示。当前G3519接收端已实现来源、范围、序号和100 ms新鲜度校验，
-并转发到VOFA CH22～CH31；仍须以双端计数和实际32列串口抓取完成硬件验收。
+并转发为15列位置环专用VOFA；仍须以双端计数和实际串口抓取完成硬件验收。
 
 G3519→F407新增Packet V1控制类型：`BTG=2,<target_0p1mm>`（协议域±1250，独立
 16位序号、单槽Latest Value）和`BST=2`（独立序号、单槽停止事件）。Task在PeerLink

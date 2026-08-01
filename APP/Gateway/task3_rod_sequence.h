@@ -7,20 +7,26 @@
 typedef enum {
     TASK3_ROD_SEQUENCE_WAIT_ORIGIN = 0,
     TASK3_ROD_SEQUENCE_RAISE,
+    TASK3_ROD_SEQUENCE_REVERSE_RAISE,
     TASK3_ROD_SEQUENCE_POSITION_RETURN,
 } Task3_RodSequence_State;
 
 typedef enum {
     TASK3_ROD_SEQUENCE_OUTPUT_LEVEL = 0,
     TASK3_ROD_SEQUENCE_OUTPUT_OPEN_LOOP_RAISE,
+    TASK3_ROD_SEQUENCE_OUTPUT_OPEN_LOOP_REVERSE,
     TASK3_ROD_SEQUENCE_OUTPUT_POSITION_RETURN,
 } Task3_RodSequence_OutputMode;
 
 typedef struct {
     float origin_tolerance_mm;
     float positive_crossing_mm;
+    float negative_crossing_mm;
     float raise_rate_deg_s;
     float maximum_raise_offset_deg;
+    float initial_reverse_offset_deg;
+    float reverse_rate_deg_s;
+    float maximum_reverse_offset_deg;
     uint32_t maximum_step_ms;
 } Task3_RodSequence_Config;
 

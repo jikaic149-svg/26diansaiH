@@ -59,7 +59,8 @@
 #define GATEWAY_MOTOR_COUNT               1U
 #define GATEWAY_MOTOR_IDS                 { 0x01U }
 
-/* 板载 KEY1(PA0，高有效)的消抖时间，单位 ms；稳定按下只触发一次。 */
+/* 板载KEY1(PA0高有效)与KEY2(PA1低有效)共用消抖时间，单位ms；
+ * 稳定按下只触发一次。KEY1只启停滚球电机，KEY2只推进Task6水平标定。 */
 #define GATEWAY_KEY_DEBOUNCE_MS           UINT32_C(30)
 
 /* 手动连杆标定已经完成，KEY恢复普通视觉闭环启停。保留下面的标定参数，
@@ -190,28 +191,38 @@
 #define GATEWAY_BALL_MAX_TARGET_VELOCITY_MM_S 30.0F
 #define GATEWAY_BALL_MAX_TARGET_ACCELERATION_MM_S2 180.0F
 /* Task3使用Maix视觉坐标0 -> +50 -> -50 mm；VBT进入F407后按-1映射成
- * 物理目标0 -> -50 -> +50 mm。收到首段目标且新鲜视觉球位在原点+-10 mm
- * 内时，杆角目标以0.40 deg/s匀速抬升；Maix球位首次越过+50 mm或返回目标
- * 已经到达时，立即把活动物理目标跳到+50 mm并使用共享位置PD。
- * +0.60 deg加标定trim仍低于+0.75 deg总杆角上限。 */
+ * 物理目标0 -> -50 -> +50 mm。正向保持0.40 deg/s匀速抬升和+0.60 deg
+ * 上限。画面越过+50 mm或返回目标到达时，同周期撤销正倾角、先给-0.150 deg，
+ * 再以-0.40 deg/s累加并限于-1.00 deg；画面到-18 mm时撤销反向开环，提前由
+ * Task3专属位置PD制动并继续收敛到画面-50 mm终点。 */
 #define GATEWAY_TASK3_ORIGIN_TOLERANCE_MM            10.0F
 #define GATEWAY_TASK3_POSITIVE_CROSSING_MM           50.0F
+#define GATEWAY_TASK3_POSITION_RETURN_ENTRY_MM      (-18.0F)
 #define GATEWAY_TASK3_OUTBOUND_TARGET_MM            (-50.0F)
 #define GATEWAY_TASK3_RETURN_TARGET_MM                50.0F
 #define GATEWAY_TASK3_TARGET_MATCH_TOLERANCE_MM        0.5F
 #define GATEWAY_TASK3_RAISE_RATE_DEG_S                0.40F
 #define GATEWAY_TASK3_MAX_RAISE_OFFSET_DEG            0.60F
+#define GATEWAY_TASK3_INITIAL_REVERSE_OFFSET_DEG      0.150F
+#define GATEWAY_TASK3_REVERSE_RATE_DEG_S              0.40F
+#define GATEWAY_TASK3_MAX_REVERSE_OFFSET_DEG           1.00F
 #define GATEWAY_TASK3_MAX_RAISE_STEP_MS          UINT32_C(100)
-/* M6 arbitrary-position hold must fit the weaker +0.75 deg rod authority.
- * 80 mm/s2 maps to about 0.65 deg for a solid ball, leaving real actuator
- * margin instead of winding the speed PI against the downstream clamp. */
-#define GATEWAY_TASK6_BALL_MAX_TARGET_ACCELERATION_MM_S2 80.0F
-
+/* Task6 keeps direct visual position/velocity feedback, but uses the existing
+ * continuous speed-PI handoff to cross static friction. With the shared 5 mm
+ * handoff hysteresis, 6 mm exit gives an approximately 11 mm re-entry band. */
+#define GATEWAY_TASK6_BALL_MAX_TARGET_VELOCITY_MM_S       20.0F
+#define GATEWAY_TASK6_BALL_MAX_TARGET_ACCELERATION_MM_S2 120.0F
+#define GATEWAY_TASK6_BALL_BRAKING_ACCELERATION_MM_S2     25.0F
+#define GATEWAY_TASK6_BALL_LAUNCH_MINIMUM_ANGLE_DEG        0.50F
+#define GATEWAY_TASK6_BALL_SPEED_HANDOFF_ERROR_MM           6.0F
 /* 正常位置环生成目标球加速度：Kp*位置误差+Ki积分-Kd*视觉球速。
  * 2026-08-01整圈数据中，BC/CD的球环杆角分别约0.21/0.27 deg RMS，且在无
  * 规划加速度时仍持续换向，表明位置环欠阻尼而不是加速度补偿限幅。适当降低P并
  * 将速度阻尼提高到接近0.8阻尼比；远距离旅程仍由速度PI助启动，近目标回到PD。 */
 #define GATEWAY_BALL_POSITION_KP_PER_S2      0.50F
+/* Task3返程位置PD只覆盖本任务；Kp保持共享基线，增大Kd抑制越过-50 mm后的往返。 */
+#define GATEWAY_TASK3_BALL_POSITION_KP_PER_S2 0.50F
+#define GATEWAY_TASK3_BALL_VELOCITY_KD_PER_S  1.75F
 #define GATEWAY_BALL_POSITION_KI_PER_S3      0.000F
 #define GATEWAY_BALL_VELOCITY_KD_PER_S       0.80F
 #define GATEWAY_BALL_INTEGRAL_ACCEL_LIMIT_MM_S2 10.0F
@@ -230,8 +241,8 @@
 #define GATEWAY_BALL_HOLD_POSITION_ERROR_MM     3.0F
 #define GATEWAY_BALL_HOLD_MAX_VELOCITY_MM_S    12.0F
 #define GATEWAY_BALL_HOLD_STABLE_DURATION_MS UINT32_C(40)
-/* A real disturbance releases quiet hold at every M6 target. The wider
- * hysteresis and three consecutive visual samples reject one-frame noise. */
+/* Quiet-hold hysteresis remains available after Task6 hands continuous speed
+ * assist back to direct-visual position PD. */
 #define GATEWAY_BALL_HOLD_EXIT_POSITION_ERROR_MM 5.0F
 #define GATEWAY_BALL_HOLD_EXIT_MAX_VELOCITY_MM_S 20.0F
 #define GATEWAY_BALL_HOLD_EXIT_SAMPLE_COUNT UINT32_C(3)
@@ -239,9 +250,10 @@
 #define GATEWAY_BALL_NEAR_TARGET_ERROR_MM        0.0F
 #define GATEWAY_BALL_NEAR_TARGET_KD_MULTIPLIER   0.0F
 
-/* 离散角度脉冲保持禁用。速度PI只用于启动静止球：新目标误差超过8 mm时立即启动并
+/* 离散角度脉冲保持禁用。Task2/3/5的速度PI只用于启动静止球：新目标误差超过8 mm时立即启动并
  * 至少保持250 ms；之后球速超过8 mm/s才清速度积分并交给位置PD追踪。若提前到达/越过
- * 目标仍立即退出。后续只有低速大误差持续250 ms才再次助启动，不在目标两侧连续追速。 */
+ * 目标仍立即退出。Task6运行时关闭该运动退出策略，保持速度PI直到6 mm交接带或越过目标；
+ * 8 mm/s只用于同一目标受扰后的低速重入判断。 */
 #define GATEWAY_BALL_STICTION_KICK_ANGLE_DEG          0.00F
 #define GATEWAY_BALL_STICTION_KICK_STEP_ANGLE_DEG     0.00F
 #define GATEWAY_BALL_STICTION_KICK_MAX_ANGLE_DEG      0.00F
@@ -368,6 +380,7 @@
  * 继续由BMI088/轮速融合与视觉闭环修正。两项相加后仍统一限于0.60deg，加上水平trim后的
  * 最终命令继续受杆角表和绝对raw边界约束。 */
 #define GATEWAY_CHASSIS_FF_GAIN                0.25F
+#define GATEWAY_TASK4_CHASSIS_FF_GAIN          0.40F
 /* The common gain above already applies to both acceleration signs. Keep the
  * optional negative-plan addition disabled so braking on the final semicircle
  * is not compensated twice. */
@@ -520,6 +533,7 @@
  * anchor fusion with a fresh, explicitly valid G3519 plan. Measured G3519
  * acceleration remains excluded; M2 keeps the local BMI088 path. */
 #define GATEWAY_TASK3_COMPETITION_MODE UINT8_C(3)
+#define GATEWAY_TASK4_COMPETITION_MODE UINT8_C(4)
 #define GATEWAY_LAP_COMPENSATION_COMPETITION_MODE_MIN UINT8_C(5)
 #define GATEWAY_TASK6_COMPETITION_MODE UINT8_C(6)
 #define GATEWAY_ACCELERATION_FF_DISABLED_COMPETITION_MODE \

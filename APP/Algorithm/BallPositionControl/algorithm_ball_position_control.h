@@ -12,9 +12,9 @@ typedef struct {
     float target_position_mm;
     float maximum_absolute_target_position_mm;
     float target_slew_rate_mm_s;
-    /* Speed-assist target and acceleration limit. The speed PI only launches
-     * a stuck ball; after its minimum active time, measured speed above the
-     * stiction threshold hands all remaining tracking to position/velocity PD. */
+    /* Speed-assist target, velocity-slew and PI-output acceleration limits.
+     * The runtime motion-exit policy selects launch-only behavior or
+     * continuous travel to the final handoff band. */
     float maximum_target_velocity_mm_s;
     float maximum_target_acceleration_mm_s2;
     /* +1 or -1 maps camera-rule position into the physical rod coordinate. */
@@ -81,6 +81,8 @@ typedef struct {
     float position_mm;
     float velocity_mm_s;
     float target_velocity_mm_s;
+    float speed_target_braking_acceleration_mm_s2;
+    float speed_launch_minimum_angle_deg;
     float integral_acceleration_mm_s2;
     float desired_acceleration_mm_s2;
     float stiction_kick_angle_deg;
@@ -102,6 +104,8 @@ typedef struct {
     bool measurement_seen;
     bool velocity_valid;
     bool speed_handoff_enabled;
+    bool speed_handoff_motion_exit_enabled;
+    bool speed_launch_minimum_active;
     bool hold_active;
     bool hold_candidate_active;
     bool initialized;
@@ -134,6 +138,14 @@ bool Algorithm_BallPositionControl_SetSpeedHandoffEnabled(
     Algorithm_BallPositionControl *controller,
     bool enabled);
 
+/* Select whether real motion above the stiction-speed threshold ends an
+ * active speed trip after its minimum time. Enabled preserves launch-only
+ * behavior; disabled keeps speed PI active until the final error band or a
+ * target crossing. Reapplying the active policy is a no-op. */
+bool Algorithm_BallPositionControl_SetSpeedHandoffMotionExitEnabled(
+    Algorithm_BallPositionControl *controller,
+    bool enabled);
+
 /* Clear quiet hold, integral and speed-assist state while preserving the
  * latest measured position, filtered velocity and velocity history. This is
  * used for a state-clean handoff from an external open-loop rod motion to the
@@ -148,6 +160,21 @@ bool Algorithm_BallPositionControl_SetMotionLimits(
     Algorithm_BallPositionControl *controller,
     float maximum_target_velocity_mm_s,
     float maximum_target_acceleration_mm_s2);
+
+/* Select the positive deceleration used only by the distance-to-speed
+ * approach profile. It does not reduce target-velocity slew or the speed-PI
+ * acceleration limit. Reapplying the active value is a no-op. */
+bool Algorithm_BallPositionControl_SetSpeedTargetBrakingAcceleration(
+    Algorithm_BallPositionControl *controller,
+    float braking_acceleration_mm_s2);
+
+/* Select a non-negative one-trip launch angle floor. A new speed trip applies
+ * at least this ball-loop angle in the error direction until measured speed
+ * first exceeds the stiction threshold; it then remains off for that trip.
+ * Zero disables the floor. */
+bool Algorithm_BallPositionControl_SetSpeedLaunchMinimumAngleDeg(
+    Algorithm_BallPositionControl *controller,
+    float minimum_angle_deg);
 
 /* Select the speed-trip handoff error and quiet-hold entry error. Reapplying
  * the active pair is non-disruptive; changing either value rearms a fresh
@@ -204,6 +231,21 @@ void Algorithm_BallPositionControl_ResetMeasurement(
  * loop, then the solid-ball inverse model for rod angle. */
 bool Algorithm_BallPositionControl_ComputeRodAngleDeg(
     Algorithm_BallPositionControl *controller,
+    float *rod_angle_deg);
+
+/* Compute with a one-call position P gain override while preserving the
+ * configured shared gains and every controller state. */
+bool Algorithm_BallPositionControl_ComputeRodAngleWithPositionGainDeg(
+    Algorithm_BallPositionControl *controller,
+    float position_gain_per_s2,
+    float *rod_angle_deg);
+
+/* Compute with one-call P and D gain overrides while preserving the shared
+ * configured gains and every controller state. */
+bool Algorithm_BallPositionControl_ComputeRodAngleWithPdGainsDeg(
+    Algorithm_BallPositionControl *controller,
+    float position_gain_per_s2,
+    float velocity_gain_per_s,
     float *rod_angle_deg);
 
 #endif

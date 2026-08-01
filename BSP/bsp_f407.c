@@ -1,8 +1,9 @@
-/* STM32F407VET6 BSP：时钟、KEY1、USART1(板间通信)、USART2(视觉)、
+/* STM32F407VET6 BSP：时钟、KEY1/KEY2、USART1(板间通信)、USART2(视觉)、
  * USART3(ESP8266)、SPI1(BMI088)、CAN1(QD4310)。
  *
  * 硬件映射（来自开发板例程与 QD4310 手册）：
  *   KEY1    PA0 input, pull-down, active high
+ *   KEY2    PA1 input, pull-up, active low
  *   USART1  PA9 TX / PA10 RX  115200 8N1  APB2 84MHz   DMA2 S7/S2 CH4
  *   USART2  PA2 TX / PA3 RX    115200 8N1  APB1 42MHz   MaixCAM Pro VIS
  *   USART3  PB10 TX / PB11 RX 115200 8N1  APB1 42MHz   ESP8266
@@ -247,16 +248,25 @@ static bool wait_flag(volatile const uint32_t *reg, uint32_t mask, bool set)
 
 static void key_init(void)
 {
-    /* KEY1 is a board-level active-high button on PA0. */
-    GPIOA->MODER &= ~(UINT32_C(0x3) << (0U * 2U));
+    /* KEY1 is active-high on PA0; KEY2 is active-low on PA1. */
+    GPIOA->MODER &= ~(
+        (UINT32_C(0x3) << (0U * 2U)) |
+        (UINT32_C(0x3) << (1U * 2U)));
     GPIOA->PUPDR = (GPIOA->PUPDR &
-                    ~(UINT32_C(0x3) << (0U * 2U))) |
-                   (UINT32_C(0x2) << (0U * 2U));
+                    ~((UINT32_C(0x3) << (0U * 2U)) |
+                      (UINT32_C(0x3) << (1U * 2U)))) |
+                   (UINT32_C(0x2) << (0U * 2U)) |
+                   (UINT32_C(0x1) << (1U * 2U));
 }
 
 bool BSP_Key_IsPressed(void)
 {
     return (GPIOA->IDR & (UINT32_C(1) << 0U)) != 0U;
+}
+
+bool BSP_Key2_IsPressed(void)
+{
+    return (GPIOA->IDR & (UINT32_C(1) << 1U)) == 0U;
 }
 
 static bool clock_init(void)

@@ -9,10 +9,19 @@ static bool valid_config(const Task3_RodSequence_Config *config)
         (config->origin_tolerance_mm >= 0.0F) &&
         isfinite(config->positive_crossing_mm) &&
         (config->positive_crossing_mm > config->origin_tolerance_mm) &&
+        isfinite(config->negative_crossing_mm) &&
+        (config->negative_crossing_mm < -config->origin_tolerance_mm) &&
         isfinite(config->raise_rate_deg_s) &&
         (config->raise_rate_deg_s > 0.0F) &&
         isfinite(config->maximum_raise_offset_deg) &&
         (config->maximum_raise_offset_deg > 0.0F) &&
+        isfinite(config->initial_reverse_offset_deg) &&
+        (config->initial_reverse_offset_deg > 0.0F) &&
+        isfinite(config->reverse_rate_deg_s) &&
+        (config->reverse_rate_deg_s > 0.0F) &&
+        isfinite(config->maximum_reverse_offset_deg) &&
+        (config->maximum_reverse_offset_deg >=
+            config->initial_reverse_offset_deg) &&
         (config->maximum_step_ms > 0U);
 }
 
@@ -23,6 +32,10 @@ static void make_output(
     output->entered_position_return = false;
     if (sequence->state == TASK3_ROD_SEQUENCE_RAISE) {
         output->mode = TASK3_ROD_SEQUENCE_OUTPUT_OPEN_LOOP_RAISE;
+        output->rod_offset_deg = sequence->raise_offset_deg;
+    }
+    else if (sequence->state == TASK3_ROD_SEQUENCE_REVERSE_RAISE) {
+        output->mode = TASK3_ROD_SEQUENCE_OUTPUT_OPEN_LOOP_REVERSE;
         output->rod_offset_deg = sequence->raise_offset_deg;
     }
     else if (sequence->state == TASK3_ROD_SEQUENCE_POSITION_RETURN) {
@@ -106,27 +119,50 @@ bool Task3_RodSequence_Step(
         }
         return true;
     }
-    if (return_requested ||
-        (new_measurement &&
-         (camera_position_mm >= sequence->config.positive_crossing_mm))) {
+    elapsed_ms = now_ms - sequence->last_step_ms;
+    sequence->last_step_ms = now_ms;
+    if (elapsed_ms > sequence->config.maximum_step_ms) {
+        elapsed_ms = sequence->config.maximum_step_ms;
+    }
+    if (sequence->state == TASK3_ROD_SEQUENCE_RAISE) {
+        if (return_requested ||
+            (new_measurement &&
+             (camera_position_mm >=
+                sequence->config.positive_crossing_mm))) {
+            /* Remove the complete positive offset in this control cycle,
+             * then apply a small reverse bias before the reverse ramp. */
+            sequence->state = TASK3_ROD_SEQUENCE_REVERSE_RAISE;
+            sequence->raise_offset_deg =
+                -sequence->config.initial_reverse_offset_deg;
+            sequence->last_step_ms = now_ms;
+        }
+        else {
+            sequence->raise_offset_deg +=
+                sequence->config.raise_rate_deg_s *
+                ((float)elapsed_ms / 1000.0F);
+            if (sequence->raise_offset_deg >
+                sequence->config.maximum_raise_offset_deg) {
+                sequence->raise_offset_deg =
+                    sequence->config.maximum_raise_offset_deg;
+            }
+        }
+    }
+    else if (new_measurement &&
+        (camera_position_mm <= sequence->config.negative_crossing_mm)) {
         sequence->state = TASK3_ROD_SEQUENCE_POSITION_RETURN;
         sequence->raise_offset_deg = 0.0F;
         make_output(sequence, output);
         output->entered_position_return = true;
         return true;
     }
-
-    elapsed_ms = now_ms - sequence->last_step_ms;
-    sequence->last_step_ms = now_ms;
-    if (elapsed_ms > sequence->config.maximum_step_ms) {
-        elapsed_ms = sequence->config.maximum_step_ms;
-    }
-    sequence->raise_offset_deg += sequence->config.raise_rate_deg_s *
-        ((float)elapsed_ms / 1000.0F);
-    if (sequence->raise_offset_deg >
-        sequence->config.maximum_raise_offset_deg) {
-        sequence->raise_offset_deg =
-            sequence->config.maximum_raise_offset_deg;
+    else {
+        sequence->raise_offset_deg -= sequence->config.reverse_rate_deg_s *
+            ((float)elapsed_ms / 1000.0F);
+        if (sequence->raise_offset_deg <
+            -sequence->config.maximum_reverse_offset_deg) {
+            sequence->raise_offset_deg =
+                -sequence->config.maximum_reverse_offset_deg;
+        }
     }
     make_output(sequence, output);
     return true;

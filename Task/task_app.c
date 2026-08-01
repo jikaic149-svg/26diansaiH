@@ -39,6 +39,11 @@ static bool s_key_stable_pressed;
 static uint32_t s_key_candidate_since_ms;
 static uint32_t s_key_press_count;
 static uint32_t s_key_command_errors;
+static bool s_key2_candidate_pressed;
+static bool s_key2_stable_pressed;
+static uint32_t s_key2_candidate_since_ms;
+static uint32_t s_key2_press_count;
+static uint32_t s_key2_command_errors;
 static Device_PeerLink s_peer_link;
 static bool s_peer_link_ready;
 static uint32_t s_peer_link_fault;
@@ -76,12 +81,31 @@ volatile uint32_t g_TASK_BallPidTuningErrors = 0U;
 static void Task_KeyInit(uint32_t now_ms)
 {
     const bool pressed = BSP_Key_IsPressed();
+    const bool key2_pressed = BSP_Key2_IsPressed();
 
     s_key_candidate_pressed = pressed;
     s_key_stable_pressed = pressed;
     s_key_candidate_since_ms = now_ms;
     s_key_press_count = 0U;
     s_key_command_errors = 0U;
+    s_key2_candidate_pressed = key2_pressed;
+    s_key2_stable_pressed = key2_pressed;
+    s_key2_candidate_since_ms = now_ms;
+    s_key2_press_count = 0U;
+    s_key2_command_errors = 0U;
+}
+
+static bool Task_Task6ModeActive(uint32_t now_ms)
+{
+    uint8_t competition_mode = 0U;
+
+    return s_peer_link_ready &&
+        Device_PeerLink_GetRemoteCompetitionMode(
+            &s_peer_link,
+            now_ms,
+            PEER_LINK_OFFLINE_TIMEOUT_MS,
+            &competition_mode) &&
+        (competition_mode == GATEWAY_TASK6_COMPETITION_MODE);
 }
 
 static void Task_KeyStep(uint32_t now_ms)
@@ -108,6 +132,30 @@ static void Task_KeyStep(uint32_t now_ms)
         if (!APP_Gateway_TogglePrimaryMotor(now_ms)) {
 #endif
             ++s_key_command_errors;
+        }
+    }
+}
+
+static void Task_Key2Step(uint32_t now_ms)
+{
+    const bool pressed = BSP_Key2_IsPressed();
+
+    if (pressed != s_key2_candidate_pressed) {
+        s_key2_candidate_pressed = pressed;
+        s_key2_candidate_since_ms = now_ms;
+        return;
+    }
+    if ((pressed == s_key2_stable_pressed) ||
+        ((uint32_t)(now_ms - s_key2_candidate_since_ms) <
+            GATEWAY_KEY_DEBOUNCE_MS)) {
+        return;
+    }
+
+    s_key2_stable_pressed = pressed;
+    if (pressed && Task_Task6ModeActive(now_ms)) {
+        ++s_key2_press_count;
+        if (!APP_Gateway_AdvanceTask6LevelCalibration(now_ms)) {
+            ++s_key2_command_errors;
         }
     }
 }
@@ -712,6 +760,7 @@ static void Task_SendVisionControlStatus(
 
 static void Task_SendDebugTelemetry(
     uint32_t now_ms,
+    const APP_Gateway_ControlInput *input,
     const APP_Gateway_Telemetry *gateway)
 {
     Device_PeerLink_DebugTelemetry debug;
@@ -728,8 +777,8 @@ static void Task_SendDebugTelemetry(
     if (gateway->enabled) {
         flags |= DEVICE_PEER_LINK_DEBUG_MOTOR_ENABLED;
     }
-    if (gateway->chassis_acceleration_valid) {
-        flags |= DEVICE_PEER_LINK_DEBUG_ACCEL_VALID;
+    if (gateway->ball_hold_active) {
+        flags |= DEVICE_PEER_LINK_DEBUG_BALL_HOLD_ACTIVE;
     }
     if (gateway->rod_angle_saturated) {
         flags |= DEVICE_PEER_LINK_DEBUG_ROD_SATURATED;
@@ -750,10 +799,24 @@ static void Task_SendDebugTelemetry(
         flags |= DEVICE_PEER_LINK_DEBUG_TASK_FAULT;
     }
     debug = (Device_PeerLink_DebugTelemetry){
-        .chassis_acceleration_mm_s2 =
-            gateway->chassis_acceleration_mm_s2,
-        .chassis_compensation_mdeg = Task_ScaleFloatToI32(
-            gateway->chassis_compensation_angle_deg, 1000.0F),
+        .ball_visual_position_0p1mm =
+            ((input != NULL) && input->ball_measurement_valid) ?
+            Task_ScaleFloatToI32(
+                GATEWAY_BALL_MEASUREMENT_POLARITY *
+                    (float)input->ball_position_mm,
+                10.0F) : 0,
+        .ball_estimated_position_0p1mm = Task_ScaleFloatToI32(
+            gateway->ball_position_mm, 10.0F),
+        .ball_target_command_0p1mm = Task_ScaleFloatToI32(
+            gateway->ball_target_mm, 10.0F),
+        .ball_active_target_0p1mm = Task_ScaleFloatToI32(
+            gateway->ball_active_target_mm, 10.0F),
+        .ball_velocity_0p1mm_s = Task_ScaleFloatToI32(
+            gateway->ball_velocity_mm_s, 10.0F),
+        .ball_measurement_age_ms =
+            ((input != NULL) && input->ball_measurement_valid) ?
+            (uint16_t)((input->ball_measurement_age_ms < UINT16_MAX) ?
+                input->ball_measurement_age_ms : UINT16_MAX) : UINT16_MAX,
         .rod_command_mdeg = Task_ScaleFloatToI32(
             gateway->rod_command_deg, 1000.0F),
         .motor_target_raw = gateway->target_single_turn_angle_raw,
@@ -840,6 +903,7 @@ static void Task_Gateway(void *argument)
             !Device_PeerLink_Step(&s_peer_link, g_TASK_NowMs)) {
             s_peer_link_fault = 2U;
         }
+        Task_Key2Step(g_TASK_NowMs);
         Task_TakePeerBallCommands();
         Task_UpdateCompetitionTaskState(g_TASK_NowMs);
         if (s_vision_link_ready &&
@@ -853,7 +917,8 @@ static void Task_Gateway(void *argument)
             g_TASK_NowMs, &control_input, &gateway_telemetry);
         Task_SendVisionControlStatus(
             g_TASK_NowMs, &control_input, &gateway_telemetry);
-        Task_SendDebugTelemetry(g_TASK_NowMs, &gateway_telemetry);
+        Task_SendDebugTelemetry(
+            g_TASK_NowMs, &control_input, &gateway_telemetry);
         vTaskDelayUntil(
             &last_wake, pdMS_TO_TICKS(GATEWAY_TASK_PERIOD_MS));
     }

@@ -10,7 +10,7 @@
 
 #define DEVICE_PEER_LINK_BAUD_RATE UINT32_C(115200)
 #define DEVICE_PEER_LINK_RX_CHUNK_CAPACITY ALGORITHM_PACKET_MAX_FRAME_SIZE
-#define DEVICE_PEER_LINK_TX_PAYLOAD_CAPACITY 72U
+#define DEVICE_PEER_LINK_TX_PAYLOAD_CAPACITY 96U
 
 #define DEVICE_PEER_LINK_CAR_SPEED_ABS_MAX_MM_PER_SECOND INT32_C(5000)
 #define DEVICE_PEER_LINK_CAR_ACCEL_ABS_MAX_MM_PER_SECOND2 INT32_C(50000)
@@ -53,8 +53,12 @@ typedef struct {
 
 /* F407 -> G3519 fixed-point debug Latest Value for VOFA forwarding. */
 typedef struct {
-    int32_t chassis_acceleration_mm_s2;
-    int32_t chassis_compensation_mdeg;
+    int32_t ball_visual_position_0p1mm;
+    int32_t ball_estimated_position_0p1mm;
+    int32_t ball_target_command_0p1mm;
+    int32_t ball_active_target_0p1mm;
+    int32_t ball_velocity_0p1mm_s;
+    uint16_t ball_measurement_age_ms;
     int32_t rod_command_mdeg;
     uint16_t motor_target_raw;
     uint16_t motor_feedback_raw;
@@ -67,7 +71,7 @@ typedef struct {
 
 #define DEVICE_PEER_LINK_DEBUG_MOTOR_ONLINE        UINT16_C(0x0001)
 #define DEVICE_PEER_LINK_DEBUG_MOTOR_ENABLED       UINT16_C(0x0002)
-#define DEVICE_PEER_LINK_DEBUG_ACCEL_VALID         UINT16_C(0x0004)
+#define DEVICE_PEER_LINK_DEBUG_BALL_HOLD_ACTIVE    UINT16_C(0x0004)
 #define DEVICE_PEER_LINK_DEBUG_ROD_SATURATED       UINT16_C(0x0008)
 #define DEVICE_PEER_LINK_DEBUG_RAW_BLOCKED          UINT16_C(0x0010)
 #define DEVICE_PEER_LINK_DEBUG_BALL_VALID           UINT16_C(0x0020)

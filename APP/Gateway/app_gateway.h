@@ -31,6 +31,7 @@ typedef struct {
     float chassis_acceleration_variance_mm2_s4;
     bool ball_measurement_valid;
     bool ball_velocity_valid;
+    bool ball_hold_active;
     bool ball_last_used_sequence_valid;
     bool ball_estimator_trusted;
     bool chassis_acceleration_valid;
@@ -123,6 +124,13 @@ bool APP_Gateway_StartPrimaryMotor(uint32_t now_ms);
  * path: command zero current before disabling the QD4310. This never starts
  * the motor when already stopped. */
 bool APP_Gateway_StopPrimaryMotor(void);
+
+/* Advance the Task6-only manual horizontal calibration while the protected
+ * level loop is already enabled. KEY2 calls perform: continuous zero current,
+ * capture the fresh QD4310 raw as the runtime horizontal reference, then
+ * clear control state and resume the visual position loop. Task owns the
+ * competition-mode/KEY2 gate. Stop/fault discards the runtime reference. */
+bool APP_Gateway_AdvanceTask6LevelCalibration(uint32_t now_ms);
 
 /* During the active visual-control phase and only after a usable visual
  * measurement in the preceding Gateway step, request a physical ball
