@@ -513,7 +513,8 @@ def _log_result(frame_index, detections, candidates, tracked_ball,
         "trough_scan=%s|trough_points=%d|"
         "trough_length_px=%s|trough_thickness_px=%s|fit_rms_px=%s|"
         "mask_scope=%s|mask_ms=%d|scan_ms=%d|"
-        "axis_distance_px=%s|mapping=%s|ai_ms=%d|trough_ms=%d|fps=%.2f|"
+        "axis_distance_px=%s|axis_yolo_fallback=%d|mapping=%s|"
+        "ai_ms=%d|trough_ms=%d|fps=%.2f|"
         "display_fps=%.2f|cam_avg_ms=%.2f|ai_avg_ms=%.2f|"
         "trough_avg_ms=%.2f|draw_avg_ms=%.2f|show_avg_ms=%.2f"
         % (
@@ -614,6 +615,7 @@ def _log_result(frame_index, detections, candidates, tracked_ball,
             int(trough_axis.get("mask_ms", 0)) if trough_axis else 0,
             int(trough_axis.get("scan_ms", 0)) if trough_axis else 0,
             _format_number(position.get("axis_distance_px"), 2),
+            int(position.get("axis_yolo_fallback", 0)),
             position.get("mapping", "NONE"),
             int(current_ai_ms),
             int(current_trough_ms),
@@ -1026,6 +1028,7 @@ def main():
             current_trough_ms = time.ticks_ms() - trough_started_ms
             perf.record("trough", current_trough_ms)
 
+            calibration_enabled = bool(position_calibration.get("enabled"))
             candidates = filter_detections_on_trough(
                 detections,
                 trough_axis,
@@ -1033,7 +1036,16 @@ def main():
                     config.BALL_MIN_AXIS_DISTANCE_LIMIT_PX,
                 width_factor=config.BALL_AXIS_DISTANCE_WIDTH_FACTOR,
                 endpoint_margin_ratio=config.BALL_ENDPOINT_MARGIN_RATIO,
+                enforce_endpoint_bounds=not calibration_enabled,
             )
+            axis_yolo_fallback = False
+            if calibration_enabled and not candidates and \
+                    preliminary is not None and \
+                    float(preliminary.get("score", 0.0)) >= float(getattr(
+                        config, "CALIBRATED_YOLO_AXIS_FALLBACK_CONF_TH",
+                        0.45)):
+                candidates = [preliminary]
+                axis_yolo_fallback = True
             now_ms = time.ticks_ms()
             if ball_tracker is not None:
                 tracked_ball = ball_tracker.update(candidates, now_ms)
@@ -1052,9 +1064,13 @@ def main():
                     config, "POSITION_MAPPING_ENABLED", False)),
                 physical_length_cm=float(getattr(
                     config, "TROUGH_PHYSICAL_LENGTH_CM", 25.0)),
+                enforce_endpoint_bounds=not calibration_enabled,
+                enforce_axis_distance=not axis_yolo_fallback,
             )
             position = apply_calibrated_position(
                 position, position_calibration)
+            position["axis_yolo_fallback"] = (
+                1 if axis_yolo_fallback else 0)
 
             # 记录视觉结果真正准备好并可发送的时刻，供MCU补偿算法延迟。
             send_timestamp_ms = time.ticks_ms()

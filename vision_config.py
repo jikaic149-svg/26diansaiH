@@ -4,13 +4,11 @@
 换算，不启用旧机位透视打表。颜色阈值与ROI必须按新车结构上板复测。
 """
 
-
 # ---------- YOLO与相机 ----------
 
-# .mud与对应模型文件均预先放在板端/root/mymodel。
 MODEL_PATH = (
     "/root/mymodel/"
-    "steelball_yolo11n_v32_best_320x416_maixcam2.mud"
+    "steelball_yolo11n_v4_leftedge_best_320x416_maixcam2.mud"
 )
 CONF_TH = 0.12
 IOU_TH = 0.45
@@ -251,6 +249,9 @@ TROUGH_PHYSICAL_LENGTH_CM = 25.0
 BALL_MIN_AXIS_DISTANCE_LIMIT_PX = 24.0
 BALL_AXIS_DISTANCE_WIDTH_FACTOR = 1.35
 BALL_ENDPOINT_MARGIN_RATIO = 0.08
+# 固定标定已生效时，若高置信YOLO框仅因动态中轴几何门被拒绝，允许按球心x
+# 进入固定标定映射；未标定模式仍严格执行中轴距离和端点范围约束。
+CALIBRATED_YOLO_AXIS_FALLBACK_CONF_TH = 0.45
 
 
 # ---------- 调试显示与日志 ----------

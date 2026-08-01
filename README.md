@@ -1,5 +1,12 @@
 # MaixCAM2横向水管凹槽钢球位置实验
 
+## 26Hvision 融合说明
+
+本目录以当前带F407 UART、赛题管理和Task3控制的装车版本为基线，吸收
+`diansaiH26`中与现有控制链兼容的视觉优化：阈值菜单降低刷新率并原地二值化，
+位置投影增加可选择的几何门，固定标定状态下增加高置信YOLO兜底。现有固定标定、
+ROI、端点约束、F407协议、题目状态机和目标极性均保持不变。
+
 本目录是从已提交的竖向版本 `steelball_test_pro/` 复制出的独立上板工程，原版本
 不再修改。新车结构中的半截水管凹槽横跨画面左右，因此算法改为逐列扫描上下边。
 
@@ -147,7 +154,7 @@ VOFA+截图中的“本地端口”是电脑接收端口。若保持默认配置
 - `nn.YOLO11` 需要 MaixPy 4.7.0 或更新版本；
 - MaixCAM2 模型包的 `.mud` 和其引用的 `.axmodel` 必须放在设备同一目录，
   本工程入口为
-  `/root/mymodel/steelball_yolo11n_v32_best_320x416_maixcam2.mud`；
+  `/root/mymodel/steelball_yolo11n_v4_leftedge_best_320x416_maixcam2.mud`；
 - 相机宽、高和图像格式由 `detector.input_width()`、`input_height()`、
   `input_format()`读取，避免手写尺寸与模型不一致；
 - 本工程保持 `dual_buff=False`。官方说明双缓冲虽然提高吞吐量，但
@@ -300,4 +307,4 @@ mask_scope=ROI/FULL/FULL_FALLBACK/HELD
 - 当前默认假设凹槽大致水平且完整横跨画面，轻微倾斜和弯曲可以拟合，但接近竖直不适用；
 - 当前厘米值仅按 `position_cm=(t-0.5)*25` 线性换算，没有恢复旧竖向透视表；
   若最终五点实测误差超出要求，只对横向`t`重新做一维标定；
-- 模型仍从 `/root/mymodel/` 加载，不包含在离线应用ZIP或Git中。
+- 模型从 `/root/mymodel/` 加载，不包含在离线应用ZIP中。

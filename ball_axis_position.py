@@ -148,7 +148,8 @@ def point_axis_measurement(x, y, axis):
 
 def filter_detections_on_trough(
         detections, axis, min_distance_limit_px=24.0,
-        width_factor=1.35, endpoint_margin_ratio=0.08):
+        width_factor=1.35, endpoint_margin_ratio=0.08,
+        enforce_endpoint_bounds=True):
     """只保留横向凹槽走廊附近的YOLO框，并按几何优先级排序。"""
     if _axis_polyline(axis) is None:
         return list(detections or ())
@@ -168,7 +169,8 @@ def filter_detections_on_trough(
             continue
         raw_t = measurement["raw_t"]
         distance = measurement["axis_distance_px"]
-        if raw_t < -margin or raw_t > 1.0 + margin or \
+        if bool(enforce_endpoint_bounds) and (
+                raw_t < -margin or raw_t > 1.0 + margin) or \
                 distance > distance_limit:
             continue
         cost = distance / distance_limit - \
@@ -205,7 +207,8 @@ def filter_detections_in_normalized_roi(
 def project_ball_axis_position(
         ball, axis, min_distance_limit_px=24.0,
         width_factor=1.35, endpoint_margin_ratio=0.08,
-        mapping_enabled=False, physical_length_cm=25.0):
+        mapping_enabled=False, physical_length_cm=25.0,
+        enforce_endpoint_bounds=True, enforce_axis_distance=True):
     """把钢球中心投影到横向中轴，返回像素、归一化和线性厘米位置。"""
     mapping_enabled = bool(mapping_enabled)
     physical_length_cm = float(physical_length_cm)
@@ -233,6 +236,8 @@ def project_ball_axis_position(
         "projected_y": None,
         "axis_distance_px": None,
         "axis_length_px": None,
+        "axis_slope_y_per_x": None,
+        "axis_intercept_y": None,
         "mapping": mapping_name,
         "coordinate_mode": coordinate_mode,
         "ball_source": "NONE",
@@ -252,6 +257,18 @@ def project_ball_axis_position(
         result["reason"] = "BAD_TROUGH_AXIS"
         return result
     result.update(measurement)
+    p0 = axis.get("p0")
+    p1 = axis.get("p1")
+    if p0 is not None and p1 is not None:
+        dx = float(p1[0]) - float(p0[0])
+        if abs(dx) > 1.0:
+            slope = float(axis.get(
+                "slope_y_per_x",
+                (float(p1[1]) - float(p0[1])) / dx,
+            ))
+            result["axis_slope_y_per_x"] = slope
+            result["axis_intercept_y"] = float(axis.get(
+                "intercept_y", float(p0[1]) - slope * float(p0[0])))
 
     trough_width = max(
         1.0, float(axis.get("median_width_px", 1.0)))
@@ -259,13 +276,15 @@ def project_ball_axis_position(
         float(min_distance_limit_px),
         trough_width * float(width_factor),
     )
-    if measurement["axis_distance_px"] > distance_limit:
+    if bool(enforce_axis_distance) and \
+            measurement["axis_distance_px"] > distance_limit:
         result["reason"] = "BALL_OFF_TROUGH"
         return result
 
     margin = max(0.0, float(endpoint_margin_ratio))
     raw_t = float(measurement["raw_t"])
-    if raw_t < -margin or raw_t > 1.0 + margin:
+    if bool(enforce_endpoint_bounds) and (
+            raw_t < -margin or raw_t > 1.0 + margin):
         result["reason"] = "BALL_OUTSIDE_TROUGH"
         return result
 

@@ -12,7 +12,7 @@ from maix import app, camera, display, image, nn, time
 
 MODEL_PATH = (
     "/root/mymodel/"
-    "steelball_yolo11n_v32_best_320x416_maixcam2.mud"
+    "steelball_yolo11n_v4_leftedge_best_320x416_maixcam2.mud"
 )
 CONF_TH = 0.12
 IOU_TH = 0.45
