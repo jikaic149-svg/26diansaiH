@@ -383,13 +383,15 @@ static APP_Gateway_ControlInput Task_MakeControlInput(uint32_t now_ms)
     Device_VisionLink_Measurement measurement;
     Algorithm_ChassisImuAcceleration_Output acceleration_output;
     uint8_t competition_mode = 0U;
-    const bool acceleration_feedforward_blocked =
+    const bool competition_mode_valid =
         s_peer_link_ready &&
         Device_PeerLink_GetRemoteCompetitionMode(
             &s_peer_link,
             now_ms,
             PEER_LINK_OFFLINE_TIMEOUT_MS,
-            &competition_mode) &&
+            &competition_mode);
+    const bool acceleration_feedforward_blocked =
+        !competition_mode_valid ||
         (competition_mode ==
             GATEWAY_ACCELERATION_FF_DISABLED_COMPETITION_MODE);
 
@@ -436,9 +438,10 @@ static APP_Gateway_ControlInput Task_MakeControlInput(uint32_t now_ms)
             if (acceleration_output.bias_ready &&
                 !acceleration_feedforward_blocked) {
                 /* Only the F407-local BMI088 may drive chassis
-                 * acceleration feedforward.  G3519 CAR acceleration is
-                 * intentionally excluded from the rod command. M3 keeps
-                 * sampling the BMI088 but does not submit it to control. */
+                 * acceleration feedforward. G3519 CAR acceleration is
+                 * intentionally excluded from the rod command. Unknown or
+                 * stale competition mode and M3 keep sampling the BMI088 but
+                 * do not submit it to control. */
                 input.chassis_acceleration_valid = true;
                 input.acceleration_now_mm_s2 = acceleration_mm_s2;
                 input.acceleration_next_mm_s2 = acceleration_mm_s2;
@@ -490,6 +493,18 @@ static APP_Gateway_ControlInput Task_MakeControlInput(uint32_t now_ms)
             input.chassis_wheel_acceleration_sample_ms = car_state.sample_ms;
             input.measured_chassis_wheel_acceleration_mm_s2 =
                 car_state.filtered_wheel_acceleration_x_mm_per_second2;
+        }
+        if ((car_state.competition_mode >=
+                GATEWAY_PLANNED_ACCELERATION_COMPETITION_MODE_MIN) &&
+            (car_state.competition_mode <=
+                GATEWAY_PLANNED_ACCELERATION_COMPETITION_MODE_MAX) &&
+            !car_state.planned_acceleration_valid && car_state.valid &&
+            (fabsf((float)car_state.speed_x_mm_per_second) <=
+                GATEWAY_CHASSIS_STATIONARY_WHEEL_SPEED_MM_S)) {
+            /* M4/M5/M6 publish a valid zero plan throughout an active run.
+             * Once that plan is withdrawn and measured speed is stationary,
+             * do not fall back to local BMI088 noise between laps. */
+            input.chassis_acceleration_valid = false;
         }
     }
 

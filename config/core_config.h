@@ -213,26 +213,29 @@
  * 将速度阻尼提高到接近0.8阻尼比；远距离旅程仍由速度PI助启动，近目标回到PD。 */
 #define GATEWAY_BALL_POSITION_KP_PER_S2      0.50F
 #define GATEWAY_BALL_POSITION_KI_PER_S3      0.000F
-#define GATEWAY_BALL_VELOCITY_KD_PER_S       0.75F
+#define GATEWAY_BALL_VELOCITY_KD_PER_S       0.80F
 #define GATEWAY_BALL_INTEGRAL_ACCEL_LIMIT_MM_S2 10.0F
 /* Damping velocity in every visual-control mode comes only from real camera
- * positions: a 120 ms multi-frame difference followed by a 60 ms low-pass.
- * The lightweight rod-ball model below now interpolates position only. */
-#define GATEWAY_BALL_VELOCITY_ESTIMATION_WINDOW_MS UINT32_C(120)
-#define GATEWAY_BALL_VELOCITY_FILTER_TAU_S   0.060F
+ * positions. At the measured 24..27 Hz VIS rate, a 60 ms threshold normally
+ * selects a roughly two-frame (about 75..85 ms) baseline; the following
+ * 20 ms low-pass suppresses single-position quantization without the previous
+ * 120 ms window plus 60 ms filter delay. The rod-ball model interpolates
+ * position only. */
+#define GATEWAY_BALL_VELOCITY_ESTIMATION_WINDOW_MS UINT32_C(60)
+#define GATEWAY_BALL_VELOCITY_FILTER_TAU_S   0.020F
 #define GATEWAY_BALL_MAX_VELOCITY_DT_MS      UINT32_C(100)
-/* 目标附近同时满足位置误差不超过3 mm、球速不超过8 mm/s并保持60 ms时，
+/* 目标附近同时满足位置误差不超过3 mm、球速不超过12 mm/s并保持40 ms时，
  * 进入安静死区并锁定清零球环输出；
  * 锁定后不再因测量变化自动退出，仅在目标改变或测量状态复位时解锁。 */
 #define GATEWAY_BALL_HOLD_POSITION_ERROR_MM     3.0F
-#define GATEWAY_BALL_HOLD_MAX_VELOCITY_MM_S     8.0F
-#define GATEWAY_BALL_HOLD_STABLE_DURATION_MS UINT32_C(60)
+#define GATEWAY_BALL_HOLD_MAX_VELOCITY_MM_S    12.0F
+#define GATEWAY_BALL_HOLD_STABLE_DURATION_MS UINT32_C(40)
 /* A real disturbance releases quiet hold at every M6 target. The wider
  * hysteresis and three consecutive visual samples reject one-frame noise. */
 #define GATEWAY_BALL_HOLD_EXIT_POSITION_ERROR_MM 5.0F
-#define GATEWAY_BALL_HOLD_EXIT_MAX_VELOCITY_MM_S 12.0F
+#define GATEWAY_BALL_HOLD_EXIT_MAX_VELOCITY_MM_S 20.0F
 #define GATEWAY_BALL_HOLD_EXIT_SAMPLE_COUNT UINT32_C(3)
-/* 实测近目标Kd跳变形成低频极限环，当前禁用该调度并统一使用基础Kd=0.55。 */
+/* 实测近目标Kd跳变形成低频极限环，当前禁用该调度并统一使用基础Kd=0.80。 */
 #define GATEWAY_BALL_NEAR_TARGET_ERROR_MM        0.0F
 #define GATEWAY_BALL_NEAR_TARGET_KD_MULTIPLIER   0.0F
 
@@ -271,7 +274,7 @@
 #ifndef GATEWAY_BALL_MODEL_INTERPOLATION_ENABLE
 #define GATEWAY_BALL_MODEL_INTERPOLATION_ENABLE             1U
 #endif
-#define GATEWAY_BALL_MODEL_POSITION_ALPHA                  0.65F
+#define GATEWAY_BALL_MODEL_POSITION_ALPHA                  0.80F
 #define GATEWAY_BALL_MODEL_VELOCITY_BETA                   0.08F
 #define GATEWAY_BALL_MODEL_MAX_INNOVATION_MM              12.0F
 #define GATEWAY_BALL_MODEL_MAX_POSITION_MM                150.0F
@@ -365,9 +368,17 @@
  * 继续由BMI088/轮速融合与视觉闭环修正。两项相加后仍统一限于0.60deg，加上水平trim后的
  * 最终命令继续受杆角表和绝对raw边界约束。 */
 #define GATEWAY_CHASSIS_FF_GAIN                0.25F
-#define GATEWAY_CHASSIS_STOP_PLAN_FF_GAIN      0.25F
+/* The common gain above already applies to both acceleration signs. Keep the
+ * optional negative-plan addition disabled so braking on the final semicircle
+ * is not compensated twice. */
+#define GATEWAY_CHASSIS_STOP_PLAN_FF_GAIN      0.00F
 #define GATEWAY_CHASSIS_WHEEL_ACCEL_CRUISE_GAIN 0.50F
 #define GATEWAY_CHASSIS_PLAN_DOMINANT_ACCEL_MM_S2 50.0F
+/* With a zero trajectory acceleration, measured wheel speed inside this
+ * band means the chassis is physically stopped. Suppress the filtered wheel
+ * acceleration residual there so encoder quantization cannot keep tilting
+ * the rod after the vehicle has parked. */
+#define GATEWAY_CHASSIS_STATIONARY_WHEEL_SPEED_MM_S 10.0F
 #define GATEWAY_CHASSIS_FF_POLARITY           (-1.0F)
 #define GATEWAY_CHASSIS_FF_ANGLE_LIMIT_DEG      0.60F
 #define GATEWAY_ACC_PREVIEW_LEAD_MS            UINT32_C(0)

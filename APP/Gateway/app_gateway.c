@@ -286,13 +286,21 @@ static void update_chassis_acceleration(
         return;
     }
     if (simple_lap_compensation) {
+        const bool chassis_stationary =
+            (s_planned_chassis_acceleration_mm_s2 == 0) &&
+            input->chassis_wheel_measurement_valid &&
+            (fabsf((float)input->measured_chassis_wheel_speed_mm_s) <=
+                GATEWAY_CHASSIS_STATIONARY_WHEEL_SPEED_MM_S);
         float plan_weight = fabsf(
             (float)s_planned_chassis_acceleration_mm_s2) /
             GATEWAY_CHASSIS_PLAN_DOMINANT_ACCEL_MM_S2;
         float selected = (float)s_planned_chassis_acceleration_mm_s2;
 
         plan_weight = clamp_float(plan_weight, 0.0F, 1.0F);
-        if (input->chassis_wheel_acceleration_measurement_valid) {
+        if (chassis_stationary) {
+            selected = 0.0F;
+        }
+        else if (input->chassis_wheel_acceleration_measurement_valid) {
             selected += GATEWAY_CHASSIS_WHEEL_ACCEL_CRUISE_GAIN *
                 (1.0F - plan_weight) *
                 (float)input->measured_chassis_wheel_acceleration_mm_s2;
@@ -1689,6 +1697,8 @@ bool APP_Gateway_Init(uint32_t now_ms)
         (GATEWAY_CHASSIS_WHEEL_ACCEL_CRUISE_GAIN > 1.0F) ||
         !isfinite(GATEWAY_CHASSIS_PLAN_DOMINANT_ACCEL_MM_S2) ||
         (GATEWAY_CHASSIS_PLAN_DOMINANT_ACCEL_MM_S2 <= 0.0F) ||
+        !isfinite(GATEWAY_CHASSIS_STATIONARY_WHEEL_SPEED_MM_S) ||
+        (GATEWAY_CHASSIS_STATIONARY_WHEEL_SPEED_MM_S <= 0.0F) ||
         !isfinite(GATEWAY_CHASSIS_FF_POLARITY) ||
         ((GATEWAY_CHASSIS_FF_POLARITY != 1.0F) &&
          (GATEWAY_CHASSIS_FF_POLARITY != -1.0F)) ||

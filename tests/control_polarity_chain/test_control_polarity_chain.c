@@ -182,6 +182,7 @@ static void test_imu_and_rod_map_chain(void)
     float forward_push_acceleration;
     float opposite_acceleration;
     float chassis_rod_deg;
+    float braking_rod_deg;
 
     assert(Algorithm_RodAngleMap_Init(
         &map, s_points, sizeof(s_points) / sizeof(s_points[0]),
@@ -207,6 +208,16 @@ static void test_imu_and_rod_map_chain(void)
      * lower it: negative theta increases raw and requires positive current. */
     assert(chassis_rod_deg < 0.0F);
     assert(current_for_rod_target(chassis_rod_deg) > 0.0F);
+
+    braking_rod_deg =
+        (GATEWAY_CHASSIS_FF_GAIN + GATEWAY_CHASSIS_STOP_PLAN_FF_GAIN) *
+        GATEWAY_CHASSIS_FF_POLARITY * atan2f(
+            opposite_acceleration, GATEWAY_BALL_GRAVITY_MM_S2) *
+        (180.0F / TEST_PI);
+    /* Equal-magnitude acceleration and braking must not receive asymmetric
+     * feedforward authority on the final semicircle. */
+    assert(braking_rod_deg > 0.0F);
+    assert(fabsf(chassis_rod_deg + braking_rod_deg) < 1.0e-5F);
 }
 
 int main(void)
